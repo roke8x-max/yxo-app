@@ -1,0 +1,12 @@
+﻿*.db
+*.db-journal
+__pycache__/
+*.pyc
+*.pyo
+.env
+config_local.py
+config*.local.*
+*.log
+.DS_Store
+.idea/
+.vscode/
