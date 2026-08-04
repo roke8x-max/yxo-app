@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YXO 订舱数据管理</title>
+  <link rel="stylesheet" href="static/style.css?v=20260803c">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">YXO 订舱数据管理</div>
+    <div class="topbar-right">
+      <label class="who">我是
+        <select id="userSel"></select>
+      </label>
+      <span id="filterBadge" class="filter-badge" title="点击清空所有列筛选" style="display:none"></span>
+      <span class="pending">待跟进 <b id="pending">0</b></span>
+      <span class="count">共 <b id="total">0</b> 行</span>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <div class="seg">
+      <button class="seg-btn active" data-view="grid">表格</button>
+      <button class="seg-btn" id="midViewBtn" data-view="board">看板</button>
+      <button class="seg-btn" data-view="stats">统计</button>
+    </div>
+    <div class="seg" id="trainTypeSeg" title="按班列类型分开展示：散舱 / 专列">
+      <button class="seg-btn active" data-type="散舱">散舱</button>
+      <button class="seg-btn" data-type="专列">专列</button>
+      <button class="seg-btn" data-type="全部">全部</button>
+    </div>
+    <button id="companyBtn" class="tbtn">公司 ▾</button>
+    <input id="search" class="search" type="text" placeholder="全局搜索…">
+    <button id="sortBtn" class="tbtn tbtn-primary">⇅ 排序</button>
+    <button id="importBtn" class="tbtn tbtn-primary">导入</button>
+    <input id="importFile" type="file" accept=".xlsx,.xls" class="hidden">
+    <button id="exportBtn" class="tbtn tbtn-primary">导出</button>
+    <button id="addRowBtn" class="tbtn tbtn-primary">＋ 新增</button>
+    <button id="refreshBtn" class="tbtn icon" title="刷新">🔄</button>
+    <button id="fieldBtn" class="tbtn ghost icon" title="字段管理">⚙</button>
+    <button id="gridLinesBtn" class="tbtn ghost icon" title="表格线">▦</button>
+    <button id="helpBtn" class="tbtn ghost icon" title="说明">?</button>
+    <button id="tuoshuBtn" class="tbtn ghost icon hidden" title="托书生成" onclick="location.href='tuoshu?user='+encodeURIComponent(localStorage.getItem('yxo_user')||'')">📄</button>
+    <button id="manifestBtn" class="tbtn ghost icon hidden" title="舱单导入" onclick="location.href='manifest?user='+encodeURIComponent(localStorage.getItem('yxo_user')||'')">🚢</button>
+    <button id="adminBtn" class="tbtn ghost icon hidden" title="系统管理" onclick="location.href='admin?user='+encodeURIComponent(localStorage.getItem('yxo_user')||'')+'&v=20260730k'">🛠</button>
+  </div>
+
+  <!-- 月份标签栏（按发班时间自动分月） -->
+  <div id="monthBar" class="month-bar"></div>
+
+  <!-- 公司多选弹层 -->
+  <div id="companyPop" class="pop company-pop hidden">
+    <div class="pop-head">
+      <span>选择公司（可多选，满足一人看多家）</span>
+      <span><a id="companyAll" href="javascript:void(0)">全选</a> · <a id="companyClear" href="javascript:void(0)">清空</a></span>
+    </div>
+    <div id="companyList" class="pop-list"></div>
+  </div>
+
+  <main class="wrap">
+    <!-- 表格视图 -->
+    <section id="view-grid" class="view active">
+      <div id="bulkBar" class="bulk-bar hidden"></div>
+        <div class="grid-scroll">
+          <table id="tbl">
+            <thead>
+              <tr id="head"></tr>
+              <tr id="filterRow" class="filter-row"></tr>
+            </thead>
+            <tbody id="body"></tbody>
+          </table>
+        </div>
+        <div id="pageBar" class="page-bar"></div>
+    </section>
+
+    <!-- 看板视图 -->
+    <section id="view-board" class="view">
+      <div class="board-toolbar">
+        <label>分组字段
+          <select id="groupField"></select>
+        </label>
+        <div id="tabBar" class="tab-bar"></div>
+        <button id="newTabBtn" class="tbtn small">＋ 新建标签</button>
+      </div>
+      <div id="board" class="board"></div>
+    </section>
+
+    <!-- 专列看板（Dashboard v0.2） -->
+    <section id="view-dash" class="view">
+      <!-- Dashboard 专用时间筛选条（替代全局月份条） -->
+      <div class="dash-date-bar">
+        <span class="lab">时间筛选</span>
+        <select id="dashYearSel" class="dash-year-sel"><option value="">全部年份</option></select>
+        <select id="dashMonthSel" class="dash-month-sel"><option value="">全部月份</option></select>
+        <span class="hint">按发班年份 / 月份过滤专列卡片</span>
+      </div>
+
+      <!-- 总览卡片 -->
+      <div class="dash-stats">
+        <div class="dstat">
+          <div class="k">未发运班列</div><div class="v" id="st-notdeparted">—</div><div class="sub">待发班</div>
+        </div>
+        <div class="dstat alert">
+          <div class="k">箱号异常</div><div class="v" id="st-issue">—</div><div class="sub">非正常状态箱数</div>
+        </div>
+        <div class="dstat ok">
+          <div class="k">已完成班列</div><div class="v" id="st-completed">—</div><div class="sub">手动标记已完成</div>
+        </div>
+        <div class="dstat">
+          <div class="k">总箱数</div><div class="v" id="st-box">—</div><div class="sub">不含退舱</div>
+        </div>
+      </div>
+
+      <div class="dash-toolbar">
+        <div class="dash-filter-section">
+          <span class="lab">状态</span>
+          <div class="chips" id="dashChips">
+            <span class="chip on" data-chip="全部">全部</span>
+            <span class="chip" data-chip="未发运">未发运</span>
+            <span class="chip" data-chip="已发运">已发运</span>
+            <span class="chip warn" data-chip="有异常箱">有异常箱</span>
+          </div>
+        </div>
+        <div class="dash-filter-meta">
+          <span id="dashCount" class="muted"></span>
+          <span class="hint">默认按发班日期倒序（最新在上）· 点卡片展开异常箱</span>
+        </div>
+      </div>
+      <div id="dashYearBar" class="dash-year-bar"></div>
+      <div id="dashList" class="dash-list"></div>
+    </section>
+
+    <!-- 统计视图 -->
+    <section id="view-stats" class="view">
+      <div id="stats" class="stats"></div>
+    </section>
+  </main>
+
+  <!-- 列筛选弹层（漏斗） -->
+  <div id="filterPop" class="pop filter-pop hidden"></div>
+
+  <!-- 新建/编辑标签弹层 -->
+  <div id="tabPop" class="pop hidden">
+    <div class="pop-head"><span id="tabPopTitle">新建标签</span></div>
+    <div class="pop-body">
+      <label>标签名称 <input id="tabName" type="text" style="width:100%"></label>
+      <div id="tabCond"></div>
+      <div class="pop-foot">
+        <button id="tabSave" class="tbtn">保存</button>
+        <button id="tabCancel" class="tbtn ghost">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 字段选项维护弹层 -->
+  <div id="optPop" class="pop opt-pop hidden"></div>
+
+  <!-- 字段管理弹层（隐藏 / 排序，按当前用户） -->
+  <div id="fieldPop" class="pop field-pop hidden"></div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- 右键菜单（新增 / 删除 / 算价 / 复制粘贴） -->
+  <div id="ctxMenu" class="ctx-menu hidden">
+    <div class="ctx-item" data-act="copycell">复制单元格</div>
+    <div class="ctx-item" data-act="copy">复制此行</div>
+    <div class="ctx-item" data-act="paste">粘贴</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" data-act="before">在上方插入新行</div>
+    <div class="ctx-item" data-act="after">在下方插入新行</div>
+    <div class="ctx-item" data-act="end">在末尾新增行</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" data-act="price">算价此行</div>
+    <div class="ctx-item" data-act="priceall">批量算价（所有未算价行）</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item danger" data-act="delete">删除此行</div>
+  </div>
+
+  <!-- 表头右键菜单（冻结列） -->
+  <div id="headCtxMenu" class="ctx-menu hidden"></div>
+
+  <!-- 排序面板（多条件排序） -->
+  <div id="sortPop" class="pop hidden">
+    <div class="pop-head"><span>多条件排序</span><span id="sortClear" class="alink">清除排序</span></div>
+    <div id="sortList" class="pop-list"></div>
+    <div class="pop-foot">
+      <button id="sortAdd" class="tbtn small">＋ 添加条件</button>
+      <button id="sortApply" class="tbtn">应用</button>
+    </div>
+  </div>
+
+  <!-- 账户选择界面（首次进入 / 无 user 时显示；也可通过 ?user=姓名 无感进入） -->
+  <div id="userGate" class="user-gate hidden">
+    <div class="gate-inner">
+      <div class="gate-title">渝新欧 · 订舱数据管理</div>
+      <div class="gate-sub">请选择你的身份进入（也可通过带 <code>?user=姓名</code> 的链接直接无感进入）</div>
+      <div id="gateCards" class="gate-cards"></div>
+      <div class="gate-foot">数据本地存储 · 4 人协同 · 切换身份不影响他人视图</div>
+    </div>
+  </div>
+
+  <script src="static/app.js?v=20260804c"></script>
+</body>
+</html>

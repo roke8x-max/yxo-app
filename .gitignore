@@ -10,3 +10,21 @@ config*.local.*
 .DS_Store
 .idea/
 .vscode/
+
+# === 业务数据（生产数据，绝不上云） ===
+data/tuoshu_out/
+data/*.db*
+data/*.zip
+data/tuoshu_templates/
+
+# === 备份文件 ===
+*.bak
+*.bak_*
+*.bak.*
+
+# === 测试输出 ===
+verify_out.txt
+
+# === Office 文档（含客户数据，不入库） ===
+*.xlsx
+*.xls

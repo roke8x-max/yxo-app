@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" no-cache">
+<title>舱单导入 · 渝新欧订舱</title>
+<style>
+  :root {
+    --bg:#f5f6f8; --surface:#ffffff; --border:#e5e7eb; --border-light:#f3f4f6;
+    --text:#1f2937; --text-secondary:#6b7280; --title:#111827;
+    --primary:#0f6e56; --primary-hover:#0c5a45; --primary-soft:#e6f4f1;
+    --danger:#dc2626; --danger-soft:#fef2f2; --warn:#b45309; --warn-soft:#fffbeb;
+    --radius-sm:8px; --radius-md:12px;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.04);
+    --transition:all .15s ease;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); font-size:14px; }
+  header { background:var(--primary); color:#fff; padding:12px 18px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header a { color:#cfe8df; text-decoration:none; font-size:13px; }
+  header a:hover { text-decoration:underline; }
+  header .who { margin-left:auto; font-size:13px; color:#cfe8df; }
+  main { padding:16px; max-width:1180px; margin:0 auto; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:var(--shadow-sm); padding:16px; margin-bottom:16px; }
+  .card h3 { margin:0 0 12px; font-size:14px; color:var(--title); display:flex; align-items:center; gap:8px; }
+  .muted { color:var(--text-secondary); font-size:12px; }
+  .hidden { display:none !important; }
+  .btn { border:1px solid var(--border); background:var(--surface); color:var(--text); padding:8px 14px; border-radius:var(--radius-sm); cursor:pointer; font-size:13px; transition:var(--transition); }
+  .btn:hover { border-color:var(--primary); color:var(--primary); }
+  .btn-primary { background:var(--primary); border-color:var(--primary); color:#fff; }
+  .btn-primary:hover { background:var(--primary-hover); border-color:var(--primary-hover); color:#fff; }
+  .btn-primary:disabled { background:#9ca3af; border-color:#9ca3af; cursor:not-allowed; }
+  .btn-danger { background:var(--danger); border-color:var(--danger); color:#fff; }
+  .btn-danger:hover { background:#b91c1c; border-color:#b91c1c; color:#fff; }
+  .btn-sm { padding:4px 10px; font-size:12px; }
+  /* 上传区 */
+  .drop { border:2px dashed var(--border); border-radius:var(--radius-md); padding:28px; text-align:center; color:var(--text-secondary); transition:var(--transition); cursor:pointer; }
+  .drop.drag { border-color:var(--primary); background:var(--primary-soft); color:var(--primary); }
+  .drop b { color:var(--text); }
+  /* tabs */
+  .tabs { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+  .tab { padding:7px 14px; border-radius:var(--radius-sm); background:var(--bg); border:1px solid var(--border); cursor:pointer; font-size:13px; color:var(--text-secondary); }
+  .tab.active { background:var(--primary); color:#fff; border-color:var(--primary); }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { border:1px solid var(--border); padding:7px 9px; text-align:left; vertical-align:top; }
+  th { background:var(--bg); color:var(--text-secondary); font-weight:600; white-space:nowrap; }
+  .tag { display:inline-block; padding:2px 8px; border-radius:20px; font-size:12px; font-weight:600; }
+  .tag-补 { background:var(--primary-soft); color:var(--primary); }
+  .tag-改 { background:#eff6ff; color:#1d4ed8; }
+  .tag-增 { background:#ecfdf5; color:#047857; }
+  .tag-警 { background:var(--warn-soft); color:var(--warn); }
+  .tag-错 { background:var(--danger-soft); color:var(--danger); }
+  .tag-新 { background:#faf5ff; color:#7e22ce; }
+  .changes { display:flex; flex-direction:column; gap:4px; }
+  .change-row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .change-row .f { font-weight:600; }
+  .change-row .arrow { color:var(--text-secondary); }
+  .change-row .old { color:var(--text-secondary); text-decoration:line-through; }
+  .change-row .new { color:var(--primary); font-weight:600; }
+  .alert-box { border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:10px; }
+  .alert-box.后缀变更 { border-left:4px solid var(--warn); background:var(--warn-soft); }
+  .alert-box.陌生客编, .alert-box.客编重复无法定位, .alert-box.箱号冲突, .alert-box.字段冲突, .alert-box.客编缺失 { border-left:4px solid var(--danger); background:var(--danger-soft); }
+  .kv { display:flex; gap:18px; flex-wrap:wrap; font-size:12px; color:var(--text-secondary); margin-top:6px; }
+  .kv b { color:var(--text); font-weight:600; }
+  .import-group { border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px; }
+  .import-group .gh { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
+  .import-group input.dest { padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px; }
+  .applybar { position:sticky; bottom:0; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); padding:12px 16px; display:flex; align-items:center; gap:14px; box-shadow:var(--shadow-sm); }
+  .applybar .sum { font-size:13px; color:var(--text-secondary); }
+  .applybar .sum b { color:var(--title); }
+  .applybar .grow { flex:1; }
+  /* 历史 */
+  .batch { border:1px solid var(--border); border-radius:var(--radius-sm); margin-bottom:10px; overflow:hidden; }
+  .batch .bh { display:flex; align-items:center; gap:10px; padding:10px 12px; background:var(--bg); cursor:pointer; flex-wrap:wrap; }
+  .batch .bh .bid { font-weight:600; }
+  .batch .bh .meta { font-size:12px; color:var(--text-secondary); }
+  .batch .bh .act { margin-left:auto; display:flex; gap:6px; }
+  .batch.reverted .bh { opacity:.6; }
+  .batch .logs { padding:10px 12px; display:none; }
+  .batch.open .logs { display:block; }
+  .empty { color:var(--text-secondary); font-size:13px; padding:20px; text-align:center; }
+  code { background:var(--bg); padding:1px 5px; border-radius:4px; font-size:12px; }
+  .foot-note { font-size:12px; color:var(--text-secondary); margin-top:8px; line-height:1.6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🚢 舱单 / 箱号 统一导入</h1>
+  <a href="javascript:history.back()">← 返回</a>
+  <span class="who" id="who"></span>
+</header>
+<main>
+  <div id="forbidden" class="card hidden">
+    <h3>⛔ 无权限</h3>
+    <p class="muted">舱单导入仅限指定管理员（毛骁洋）使用。请用本人身份进入。</p>
+  </div>
+
+  <div id="main">
+    <!-- 1. 上传 -->
+    <div class="card">
+      <h3>① 上传舱单 / 箱号文件</h3>
+      <div class="drop" id="drop">
+        <p>将 <b>.xlsx</b> 文件拖到这里，或 <b>点击选择</b></p>
+        <p class="muted">支持「舱单模板」（含班列号）与「箱号模板」（仅客编+箱号）。系统先空跑出差异，确认后再写库。</p>
+        <input type="file" id="file" accept=".xlsx,.xls" class="hidden">
+      </div>
+      <div id="uploadInfo" class="muted" style="margin-top:10px;"></div>
+    </div>
+
+    <!-- 2. 差异 -->
+    <div class="card hidden" id="diffCard">
+      <h3>② 差异清单（空跑，未写库）</h3>
+      <div class="tabs">
+        <div class="tab active" data-tab="updates">更新 <span id="cUpdates">0</span></div>
+        <div class="tab" data-tab="imports">待导入专列 <span id="cImports">0</span></div>
+        <div class="tab" data-tab="alerts">报警 / 待处理 <span id="cAlerts">0</span></div>
+      </div>
+      <div class="panel active" id="panel-updates"></div>
+      <div class="panel" id="panel-imports"></div>
+      <div class="panel" id="panel-alerts"></div>
+      <div class="foot-note">
+        说明：发班时间按系统现行标准 <code>YYYY-MM-DD</code> 归一（与库一致）；
+        引擎只写白名单字段（班列号 / 口岸 / 发班时间 / 箱号 / 封号 / 箱属 / 目的站），
+        品名、放箱地、还箱、前后端运输、atb、运输条款等字段永不触碰。
+      </div>
+    </div>
+
+    <!-- 3. 应用 -->
+    <div class="applybar hidden" id="applyBar">
+      <span class="sum" id="applySum"></span>
+      <span class="grow"></span>
+      <button class="btn" id="discardBtn">放弃</button>
+      <button class="btn btn-primary" id="applyBtn">✔ 确认应用（写库 + 快照）</button>
+    </div>
+
+    <!-- 4. 历史 -->
+    <div class="card">
+      <h3>③ 导入历史 / 回退</h3>
+      <div id="batches"><div class="empty">暂无导入批次</div></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const USER = new URLSearchParams(location.search).get("user") || "";
+let LAST_DIFF = null;
+let UPLOADED_FILE = "";
+const destInputs = {};      // train_no -> 目的站 input 值
+const confirmedSuffix = {}; // record_id -> {new_code, 目的站} 已勾选的后缀变更
+
+function el(tag, attrs, children) {
+  const e = document.createElement(tag);
+  if (attrs) for (const k in attrs) {
+    if (k === "class") e.className = attrs[k];
+    else if (k === "html") e.innerHTML = attrs[k];
+    else if (k === "text") e.textContent = attrs[k];
+    else if (k.startsWith("on") && typeof attrs[k] === "function") e.addEventListener(k.slice(2), attrs[k]);
+    else e.setAttribute(k, attrs[k]);
+  }
+  if (children) (Array.isArray(children) ? children : [children]).forEach(c => {
+    if (c == null) return;
+    e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  });
+  return e;
+}
+
+function tagClass(t) { return ["补","改","增","新"].includes(t) ? t : (t === "警" ? "警" : "错"); }
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) throw new Error(j.msg || ("请求失败 " + r.status));
+  return j;
+}
+
+function init() {
+  document.getElementById("who").textContent = USER ? ("身份：" + USER) : "";
+  api("api/meta").then(m => {
+    const admins = (m.manifest_admins || ["毛骁洋"]);
+    if (!admins.includes(USER)) {
+      document.getElementById("forbidden").classList.remove("hidden");
+      document.getElementById("main").classList.add("hidden");
+      return;
+    }
+    bindUpload();
+    loadBatches();
+  }).catch(err => {
+    document.getElementById("uploadInfo").textContent = "加载失败：" + err.message;
+  });
+}
+
+/* ---------- 上传 ---------- */
+function bindUpload() {
+  const drop = document.getElementById("drop");
+  const file = document.getElementById("file");
+  drop.addEventListener("click", () => file.click());
+  file.addEventListener("change", () => { if (file.files[0]) onFile(file.files[0]); });
+  ["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("drag"); }));
+  ["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("drag"); }));
+  drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) onFile(f); });
+}
+
+function onFile(f) {
+  UPLOADED_FILE = f.name;
+  const info = document.getElementById("uploadInfo");
+  info.textContent = "解析中：" + f.name + " …";
+  const fd = new FormData();
+  fd.append("file", f);
+  api("api/manifest/upload?user=" + encodeURIComponent(USER), { method:"POST", body:fd })
+    .then(d => { LAST_DIFF = d; renderDiff(d); })
+    .catch(err => { info.textContent = "解析失败：" + err.message; });
+}
+
+/* ---------- 差异渲染 ---------- */
+function renderDiff(d) {
+  document.getElementById("diffCard").classList.remove("hidden");
+  document.getElementById("applyBar").classList.remove("hidden");
+  const diff = d.diff || {};
+  const updates = diff.updates || [];
+  const imports = diff.imports || [];
+  const alerts = diff.alerts || [];
+  document.getElementById("cUpdates").textContent = updates.length;
+  document.getElementById("cImports").textContent = imports.length;
+  document.getElementById("cAlerts").textContent = alerts.length;
+  document.getElementById("uploadInfo").textContent =
+    "已识别：" + (d.ftype === "manifest" ? "舱单模板" : d.ftype === "box_template" ? "箱号模板" : "未知类型") +
+    "，解析 " + (d.row_count || 0) + " 行。";
+  renderUpdates(updates);
+  renderImports(imports);
+  renderAlerts(alerts);
+  updateApplySum();
+}
+
+function renderUpdates(updates) {
+  const p = document.getElementById("panel-updates");
+  p.innerHTML = "";
+  if (!updates.length) { p.appendChild(el("div", { class:"empty", text:"无更新项" })); return; }
+  const t = el("table");
+  t.appendChild(el("thead", null, el("tr", null, [
+    el("th", { text:"客户编码" }), el("th", { text:"箱号" }), el("th", { text:"变更明细" })
+  ])));
+  const tb = el("tbody");
+  updates.forEach(u => {
+    const ch = el("div", { class:"changes" });
+    (u.changes || []).forEach(c => {
+      ch.appendChild(el("div", { class:"change-row" }, [
+        el("span", { class:"f", text:c.field }),
+        el("span", { class:"tag tag-" + (c.action === "补" ? "补" : "改"), text:c.action }),
+        el("span", { class:"old", text:c.old || "（空）" }),
+        el("span", { class:"arrow", text:"→" }),
+        el("span", { class:"new", text:c.new || "（空）" }),
+      ]));
+    });
+    tb.appendChild(el("tr", null, [
+      el("td", { text:u["客户编码"] || "" }),
+      el("td", { text:u["箱号"] || "" }),
+      el("td", null, ch),
+    ]));
+  });
+  t.appendChild(tb);
+  p.appendChild(t);
+}
+
+function renderImports(imports) {
+  const p = document.getElementById("panel-imports");
+  p.innerHTML = "";
+  if (!imports.length) { p.appendChild(el("div", { class:"empty", text:"无待导入专列（新客编且库内无该班列）" })); return; }
+  imports.forEach(g => {
+    destInputs[g.train_no] = g["目的站建议"] || "";
+    const destInp = el("input", { class:"dest", placeholder:"目的站", value:g["目的站建议"] || "",
+      oninput: e => { destInputs[g.train_no] = e.target.value; } });
+    const gh = el("div", { class:"gh" }, [
+      el("span", { class:"tag tag-新", text:"新专列" }),
+      el("b", { text:g.train_no }),
+      el("span", { class:"muted", text:"口岸 " + (g["口岸"] || "—") + " · 发班 " + (g["发班时间"] || "—") + " · " + (g.rows ? g.rows.length : 0) + " 箱" }),
+      el("span", { class:"muted", text:"目的站：" }),
+      destInp,
+    ]);
+    const grp = el("div", { class:"import-group" }, [gh]);
+    const t = el("table");
+    t.appendChild(el("thead", null, el("tr", null, [
+      el("th", { text:"客户编码" }), el("th", { text:"箱号" }), el("th", { text:"封号" }),
+      el("th", { text:"箱属" }), el("th", { text:"口岸" }), el("th", { text:"发班时间" })
+    ])));
+    const tb = el("tbody");
+    (g.rows || []).forEach(r => {
+      tb.appendChild(el("tr", null, [
+        el("td", { text:r["客户编码"] || "" }), el("td", { text:r["箱号"] || "" }),
+        el("td", { text:r["封号"] || "" }), el("td", { text:r["箱属"] || "" }),
+        el("td", { text:r["口岸"] || "" }), el("td", { text:r["发班时间"] || "" }),
+      ]));
+    });
+    t.appendChild(tb);
+    grp.appendChild(t);
+    p.appendChild(grp);
+  });
+}
+
+function renderAlerts(alerts) {
+  const p = document.getElementById("panel-alerts");
+  p.innerHTML = "";
+  if (!alerts.length) { p.appendChild(el("div", { class:"empty", text:"无报警" })); return; }
+  alerts.forEach((a, idx) => {
+    const box = el("div", { class:"alert-box " + (a.type || "") });
+    box.appendChild(el("div", null, [
+      el("span", { class:"tag tag-" + (a.type === "后缀变更" ? "警" : "错"), text:a.type || "报警" }),
+      el("b", { text:" " + (a["客户编码"] || "") + (a["箱号"] ? " / " + a["箱号"] : "") }),
+    ]));
+    box.appendChild(el("div", { class:"muted", style:"margin-top:4px;", text:a["说明"] || "" }));
+    if (a["文件值"]) {
+      const kv = el("div", { class:"kv" });
+      for (const k in a["文件值"]) kv.appendChild(el("span", { html:"<b>" + k + "</b> " + (a["文件值"][k] || "—") }));
+      box.appendChild(kv);
+    }
+    if (a["库内值"]) {
+      const kv = el("div", { class:"kv" });
+      for (const k in a["库内值"]) kv.appendChild(el("span", { html:"<b>库内." + k + "</b> " + (a["库内值"][k] || "—") }));
+      box.appendChild(kv);
+    }
+    if (a.type === "后缀变更" && a.record_id != null) {
+      const chk = el("input", { type:"checkbox", id:"suf_" + a.record_id,
+        onchange: e => {
+          if (e.target.checked) confirmedSuffix[a.record_id] = { new_code:a["客户编码"], 目的站:a["目的站建议"] || "" };
+          else delete confirmedSuffix[a.record_id];
+          updateApplySum();
+        } });
+      const destInp = el("input", { class:"dest", placeholder:"目的站", value:a["目的站建议"] || "",
+        style:"margin-left:6px;",
+        oninput: e => { if (confirmedSuffix[a.record_id]) confirmedSuffix[a.record_id].目的站 = e.target.value; } });
+      box.appendChild(el("label", { style:"display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;cursor:pointer;" }, [
+        chk, el("span", { text:"确认应用（更新客编后缀 + 目的站）" }), destInp
+      ]));
+    }
+    p.appendChild(box);
+  });
+}
+
+function updateApplySum() {
+  if (!LAST_DIFF) return;
+  const d = LAST_DIFF.diff || {};
+  const u = (d.updates || []).length;
+  const im = (d.imports || []).length;
+  const nInsert = (d.imports || []).reduce((s, g) => s + (g.rows ? g.rows.length : 0), 0);
+  const suffix = Object.keys(confirmedSuffix).length;
+  document.getElementById("applySum").innerHTML =
+    "待写：<b>" + u + "</b> 项更新 · <b>" + im + "</b> 趟专列（" + nInsert + " 箱）" +
+    (suffix ? " · <b>" + suffix + "</b> 个后缀变更" : "");
+}
+
+/* ---------- tabs ---------- */
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  document.querySelectorAll(".panel").forEach(x => x.classList.remove("active"));
+  t.classList.add("active");
+  document.getElementById("panel-" + t.dataset.tab).classList.add("active");
+}));
+
+/* ---------- 应用 ---------- */
+document.getElementById("applyBtn").addEventListener("click", () => {
+  if (!LAST_DIFF) return;
+  const d = LAST_DIFF.diff;
+  if (!((d.updates || []).length || (d.imports || []).length || Object.keys(confirmedSuffix).length)) {
+    alert("没有可应用的内容。"); return;
+  }
+  if (!confirm("确认写库？系统会先整库快照，应用后可整批回退 / 快照还原。")) return;
+  const imports = (d.imports || []).map(g => ({
+    train_no: g.train_no, 目的站: destInputs[g.train_no] || g["目的站建议"] || "", rows: g.rows
+  }));
+  const alerts_applied = Object.keys(confirmedSuffix).map(rid => ({
+    record_id: parseInt(rid, 10), new_code: confirmedSuffix[rid].new_code, 目的站: confirmedSuffix[rid].目的站
+  }));
+  const payload = {
+    user: USER,
+    files: [UPLOADED_FILE],
+    diff: { updates: d.updates || [], imports, alerts_applied }
+  };
+  const btn = document.getElementById("applyBtn");
+  btn.disabled = true;
+  api("api/manifest/apply", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) })
+    .then(r => {
+      alert("应用成功，批次号：" + r.batch_id);
+      LAST_DIFF = null;
+      document.getElementById("diffCard").classList.add("hidden");
+      document.getElementById("applyBar").classList.add("hidden");
+      document.getElementById("file").value = "";
+      loadBatches();
+    })
+    .catch(err => { alert("应用失败：" + err.message); })
+    .finally(() => { btn.disabled = false; });
+});
+
+document.getElementById("discardBtn").addEventListener("click", () => {
+  LAST_DIFF = null;
+  for (const k in destInputs) delete destInputs[k];
+  for (const k in confirmedSuffix) delete confirmedSuffix[k];
+  document.getElementById("diffCard").classList.add("hidden");
+  document.getElementById("applyBar").classList.add("hidden");
+  document.getElementById("file").value = "";
+});
+
+/* ---------- 历史 ---------- */
+async function loadBatches() {
+  const box = document.getElementById("batches");
+  try {
+    const d = await api("api/manifest/batches?user=" + encodeURIComponent(USER));
+    const list = d.batches || [];
+    box.innerHTML = "";
+    if (!list.length) { box.appendChild(el("div", { class:"empty", text:"暂无导入批次" })); return; }
+    list.forEach(b => box.appendChild(renderBatchCard(b)));
+  } catch (e) { box.innerHTML = '<div class="empty">加载失败：' + e.message + "</div>"; }
+}
+
+function renderBatchCard(b) {
+  const card = el("div", { class:"batch" + (b.reverted ? " reverted" : "") });
+  const bh = el("div", { class:"bh", onclick: () => toggleBatch(card, b.batch_id) }, [
+    el("span", { class:"bid", text:b.batch_id }),
+    el("span", { class:"meta", text:b.operator + " · " + (b.created_at || "") }),
+    el("span", { class:"meta", text:"更新 " + b.n_update + " · 新增 " + b.n_insert + " · 后缀 " + b.n_alert }),
+    b.reverted ? el("span", { class:"tag tag-错", text:"已回退" }) : null,
+  ]);
+  const act = el("div", { class:"act" }, [
+    el("button", { class:"btn btn-sm", text:"展开日志", onclick: e => { e.stopPropagation(); toggleBatch(card, b.batch_id); } }),
+    el("button", { class:"btn btn-sm btn-danger", text:"整批回退",
+      onclick: e => { e.stopPropagation(); revertBatch(b.batch_id); } }),
+    el("button", { class:"btn btn-sm btn-danger", text:"快照还原",
+      onclick: e => { e.stopPropagation(); restoreBatch(b.batch_id); } }),
+  ]);
+  bh.appendChild(act);
+  const logs = el("div", { class:"logs" });
+  card.appendChild(bh);
+  card.appendChild(logs);
+  return card;
+}
+
+async function toggleBatch(card, bid) {
+  if (card.classList.contains("open")) { card.classList.remove("open"); return; }
+  const logs = card.querySelector(".logs");
+  logs.innerHTML = "加载中…";
+  card.classList.add("open");
+  try {
+    const d = await api("api/manifest/batch/" + encodeURIComponent(bid) + "?user=" + encodeURIComponent(USER));
+    renderLogs(logs, d.logs || []);
+  } catch (e) { logs.innerHTML = "加载失败：" + e.message; }
+}
+
+function renderLogs(box, logs) {
+  box.innerHTML = "";
+  if (!logs.length) { box.appendChild(el("div", { class:"empty", text:"无明细" })); return; }
+  const t = el("table");
+  t.appendChild(el("thead", null, el("tr", null, [
+    el("th", { text:"客户编码" }), el("th", { text:"箱号" }), el("th", { text:"字段" }),
+    el("th", { text:"旧值" }), el("th", { text:"新值" }), el("th", { text:"动作" }),
+    el("th", { text:"操作" })
+  ])));
+  const tb = el("tbody");
+  logs.forEach(l => {
+    const row = el("tr", null, [
+      el("td", { text:l["客户编码"] || "" }), el("td", { text:l["箱号"] || "" }),
+      el("td", { text:l.field || "" }),
+      el("td", { text:l.old_value || "（空）" }), el("td", { text:l.new_value || "（空）" }),
+      el("td", null, el("span", { class:"tag tag-" + tagClass(l.action), text:l.action || "" })),
+    ]);
+    const ops = el("td", null, [
+      el("button", { class:"btn btn-sm", text:"复制TSV", onclick: () => copyTSV(l) }),
+      l.reverted ? el("span", { class:"muted", text:"已回退" }) :
+        el("button", { class:"btn btn-sm btn-danger", text:"撤销",
+          style:"margin-left:4px;", onclick: () => revertItem(l.id) }),
+    ]);
+    row.appendChild(ops);
+    tb.appendChild(row);
+  });
+  t.appendChild(tb);
+  box.appendChild(t);
+  box.appendChild(el("div", { style:"margin-top:8px;" }, [
+    el("button", { class:"btn btn-sm", text:"复制本批 JSON", onclick: () => copyJSON(logs) })
+  ]));
+}
+
+function copyTSV(l) {
+  const line = [l.record_id, l["客户编码"], l["箱号"], l.field, l.old_value || "", l.new_value || "", l.action].join("\t");
+  navigator.clipboard.writeText(line).then(() => alert("已复制 TSV：\n" + line)).catch(() => alert("复制失败"));
+}
+function copyJSON(logs) {
+  const txt = JSON.stringify(logs, null, 2);
+  navigator.clipboard.writeText(txt).then(() => alert("已复制本批 JSON")).catch(() => alert("复制失败"));
+}
+
+async function revertBatch(bid) {
+  if (!confirm("确认整批回退「" + bid + "」？更新类将反向写回旧值，新增专列箱将软删除。")) return;
+  try { await api("api/manifest/revert", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ user:USER, batch_id:bid }) }); alert("已整批回退"); loadBatches(); }
+  catch (e) { alert("回退失败：" + e.message); }
+}
+async function revertItem(logId) {
+  if (!confirm("确认撤销该条？")) return;
+  try { await api("api/manifest/revert", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ user:USER, log_id:logId }) }); alert("已撤销"); loadBatches(); }
+  catch (e) { alert("撤销失败：" + e.message); }
+}
+async function restoreBatch(bid) {
+  if (!confirm("⚠️ 核弹级操作：用「" + bid + "」的整库快照还原整个数据库（含其他人的改动）。确定继续？")) return;
+  if (!confirm("再次确认：将覆盖当前全部数据，恢复至该批次应用前的状态。")) return;
+  try { const r = await api("api/manifest/restore", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ user:USER, batch_id:bid }) }); alert("已还原。快照：" + r.snapshot); loadBatches(); }
+  catch (e) { alert("还原失败：" + e.message); }
+}
+
+init();
+</script>
+</body>
+</html>

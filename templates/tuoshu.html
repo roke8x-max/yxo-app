@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<title>托书生成 · 渝新欧订舱</title>
+<style>
+  :root {
+    --bg:#f5f6f8; --surface:#ffffff; --border:#e5e7eb; --border-light:#f3f4f6;
+    --text:#1f2937; --text-secondary:#6b7280; --title:#111827;
+    --primary:#0f6e56; --primary-hover:#0c5a45; --primary-soft:#e6f4f1;
+    --danger:#dc2626; --danger-soft:#fef2f2; --warn:#b45309; --warn-soft:#fffbeb;
+    --radius-sm:8px; --radius-md:12px;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.04);
+    --transition:all .15s ease;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); font-size:14px; }
+  header { background:var(--primary); color:#fff; padding:12px 18px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header a { color:#cfe8df; text-decoration:none; font-size:13px; }
+  header a:hover { text-decoration:underline; }
+  main { padding:16px; max-width:1100px; margin:0 auto; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:var(--shadow-sm); padding:16px; margin-bottom:16px; }
+  .card h3 { margin:0 0 12px; font-size:14px; color:var(--title); }
+  .form-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; }
+  .fld { display:flex; flex-direction:column; gap:5px; }
+  .fld label { font-size:12px; color:var(--text-secondary); font-weight:500; }
+  input,select { border:1px solid var(--border); border-radius:var(--radius-sm); padding:7px 10px; font-size:13px; background:var(--surface); color:var(--text); outline:none; width:100%; }
+  input:focus,select:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(15,110,86,.1); }
+  button { background:var(--primary); color:#fff; border:none; border-radius:var(--radius-sm); padding:8px 16px; cursor:pointer; font-size:13px; transition:var(--transition); }
+  button:hover { background:var(--primary-hover); }
+  button.ghost { background:var(--surface); color:var(--primary); border:1px solid var(--primary); }
+  button.ghost:hover { background:var(--primary-soft); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .actions { display:flex; gap:10px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+  table { border-collapse:collapse; width:100%; font-size:13px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); overflow:hidden; }
+  th,td { border-bottom:1px solid var(--border-light); padding:8px 10px; text-align:left; }
+  th { background:var(--primary-soft); color:var(--primary); font-weight:600; }
+  tbody tr:nth-child(even) { background:#fafafa; }
+  tbody tr:last-child td { border-bottom:none; }
+  .muted { color:var(--text-secondary); }
+  .warn-txt { color:var(--warn); font-size:12px; }
+  .bad { color:var(--danger); font-weight:600; }
+  .hidden { display:none; }
+  .summary { display:flex; gap:18px; flex-wrap:wrap; margin-bottom:10px; font-size:13px; }
+  .summary b { color:var(--primary); font-size:16px; }
+  .tip { background:var(--warn-soft); border:1px solid #fde68a; color:var(--warn); padding:10px 12px; border-radius:var(--radius-sm); font-size:12.5px; margin-bottom:12px; line-height:1.6; }
+  #denied { text-align:center; padding:80px 20px; }
+  #msg { margin-left:6px; font-size:13px; }
+  @media (max-width:640px){ main{padding:8px;} th,td{padding:5px 6px;font-size:12px;} }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📄 托书生成</h1>
+  <a href="./">← 返回订舱系统</a>
+  <span style="margin-left:auto;font-size:13px">当前身份：<b id="who">—</b></span>
+</header>
+
+<div id="denied" class="hidden"></div>
+
+<main id="app" class="hidden">
+
+  <div class="card">
+    <h3>生成条件</h3>
+    <div class="form-grid">
+      <div class="fld">
+        <label>发班日期 从</label>
+        <input type="date" id="dateFrom">
+      </div>
+      <div class="fld">
+        <label>发班日期 到</label>
+        <input type="date" id="dateTo">
+      </div>
+      <div class="fld">
+        <label>班列类型</label>
+        <select id="trainType">
+          <option value="">全部</option>
+          <option value="散舱">散舱</option>
+          <option value="专列">专列</option>
+        </select>
+      </div>
+      <div class="fld">
+        <label>订舱日期（写入托书 E4）</label>
+        <input type="date" id="bookingDate">
+      </div>
+      <div class="fld">
+        <label>模板</label>
+        <select id="templateId"></select>
+      </div>
+      <div class="fld">
+        <label>指定班列号（可选，逗号分隔）</label>
+        <input type="text" id="trainNos" placeholder="留空 = 该日期范围内全部">
+      </div>
+      <div class="fld">
+        <label>出单方式</label>
+        <select id="groupBy">
+          <option value="train" selected>按 班列（同班列+同发班日期合并，目的站可维护）</option>
+          <option value="train_dest">按 班列＋目的站（每份一个目的站）</option>
+        </select>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="btnPreview" class="ghost">① 预检</button>
+      <button id="btnGen" disabled>② 生成并下载</button>
+      <button id="btnMap" class="ghost" type="button">⚙ 目的站映射维护</button>
+      <span id="msg" class="muted"></span>
+    </div>
+  </div>
+
+  <div class="card hidden" id="mapCard">
+    <h3>目的站 → 英文映射维护</h3>
+    <div id="mapUnresolved" class="tip hidden"></div>
+    <table>
+      <thead><tr><th>目的站(中文)</th><th>英文</th><th>国家</th><th>别名(逗号分隔)</th><th></th></tr></thead>
+      <tbody id="mapBody"></tbody>
+    </table>
+    <h3 style="margin-top:14px">新增 / 编辑</h3>
+    <div class="form-grid">
+      <div class="fld"><label>目的站(中文)*</label><input id="mStation" placeholder="如 圣彼得堡L站"></div>
+      <div class="fld"><label>英文</label><input id="mEn" placeholder="如 Saint-Petersburg L-terminal"></div>
+      <div class="fld"><label>国家代码</label><input id="mCountry" placeholder="如 RUS"></div>
+      <div class="fld"><label>别名</label><input id="mAlias" placeholder="如 圣彼得堡L"></div>
+    </div>
+    <div class="actions">
+      <button id="btnMapSave">保存映射</button>
+      <span id="mapMsg" class="muted"></span>
+    </div>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <h3>预检结果</h3>
+    <div class="summary">
+      <span>将生成 <b id="sumCount">0</b> 份托书</span>
+      <span>合计 <b id="sumBoxes">0</b> 箱</span>
+      <span class="muted">箱量 = 该班列有效记录行数（已排除退舱）</span>
+    </div>
+    <div id="warnBox" class="tip hidden"></div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:38px"><input type="checkbox" id="checkAll" checked style="width:auto"></th>
+          <th>班列号</th><th>发班日期</th><th>目的站</th>
+          <th>托书目的站(E15)</th><th style="width:60px">箱量</th><th>提示</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+</main>
+
+<script>
+const STORE_KEY = "yxo_user";
+const TUOSHU_ADMINS = ["毛骁洋", "杨雅雯"];
+let USER = "";
+let GROUPS = [];
+
+function esc(s){ const d=document.createElement("div"); d.textContent = s==null?"":String(s); return d.innerHTML; }
+function $(id){ return document.getElementById(id); }
+
+function enterPage(u){
+  USER = u;
+  $("who").textContent = u;
+  $("app").classList.remove("hidden");
+  $("denied").classList.add("hidden");
+  const today = new Date().toISOString().slice(0,10);
+  $("bookingDate").value = today;
+  loadMeta();
+}
+
+// 身份闸门：URL 带 ?user= 且在名单内 → 无感进入；否则给出选择/拒绝
+function showGate(){
+  const box = $("denied");
+  box.classList.remove("hidden");
+  const remembered = localStorage.getItem(STORE_KEY) || "";
+  if (remembered && !TUOSHU_ADMINS.includes(remembered)) {
+    box.innerHTML = '<p style="font-size:15px">当前身份 <b>'+esc(remembered)+'</b> 无权使用托书生成。</p>'
+                  + '<p class="muted">该功能仅限：'+TUOSHU_ADMINS.join("、")+'</p>'
+                  + '<p><a href="./">← 返回订舱系统</a></p>';
+    return;
+  }
+  box.innerHTML = '<p style="margin:0 0 12px">请选择你的身份：</p><div id="gateCards"></div>';
+  const wrap = $("gateCards");
+  TUOSHU_ADMINS.forEach(u => {
+    const isRem = (u === remembered);
+    const card = document.createElement("div");
+    card.style.cssText = "display:inline-block;min-width:120px;margin:6px;padding:14px 18px;border:1px solid "+(isRem?"#0f6e56":"#cbd5e1")+";border-radius:10px;cursor:pointer;text-align:center;background:"+(isRem?"#eafaf4":"#fff")+";vertical-align:top";
+    card.innerHTML = '<div style="font-size:22px;font-weight:700;margin-bottom:6px">'+esc(u.slice(0,1))+'</div>'
+                   + '<div style="font-weight:600">'+esc(u)+'</div>'
+                   + '<div style="font-size:12px;color:#64748b;margin-top:4px">'+(isRem?"上次选择 ✓ 点击确认":"点击以该身份进入")+'</div>';
+    card.onclick = () => {
+      localStorage.setItem(STORE_KEY, u);
+      const url = new URL(location.href);
+      url.searchParams.set("user", u);
+      history.replaceState(null, "", url);
+      enterPage(u);
+    };
+    wrap.appendChild(card);
+  });
+}
+
+const urlUser = new URLSearchParams(location.search).get("user");
+if (urlUser && TUOSHU_ADMINS.includes(urlUser)) {
+  localStorage.setItem(STORE_KEY, urlUser);
+  enterPage(urlUser);
+} else {
+  showGate();
+}
+
+function payload(){
+  const nos = $("trainNos").value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
+  return {
+    user: USER,
+    date_from: $("dateFrom").value,
+    date_to: $("dateTo").value,
+    train_type: $("trainType").value,
+    train_nos: nos,
+    group_by: $("groupBy").value,
+    template_id: parseInt($("templateId").value || "0", 10) || null,
+    booking_date: $("bookingDate").value
+  };
+}
+
+function loadMeta(){
+  fetch("api/tuoshu/meta?user=" + encodeURIComponent(USER))
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { $("msg").innerHTML = '<span class="bad">'+esc(d.msg||"加载失败")+'</span>'; return; }
+      const sel = $("templateId");
+      sel.innerHTML = "";
+      (d.templates||[]).forEach(t => {
+        const o = document.createElement("option");
+        o.value = t.id; o.textContent = t.name;
+        sel.appendChild(o);
+      });
+      if (!sel.options.length) {
+        const o = document.createElement("option");
+        o.value = ""; o.textContent = "（默认模板）";
+        sel.appendChild(o);
+      }
+    })
+    .catch(e => { $("msg").innerHTML = '<span class="bad">加载失败：'+esc(e)+'</span>'; });
+}
+
+$("btnPreview").onclick = () => {
+  $("msg").textContent = "预检中…";
+  $("btnGen").disabled = true;
+  fetch("api/tuoshu/preview", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(payload())
+  }).then(r => r.json()).then(d => {
+    if (!d.ok) { $("msg").innerHTML = '<span class="bad">'+esc(d.msg||"预检失败")+'</span>'; return; }
+    GROUPS = d.groups || [];
+    renderPreview(d);
+    $("msg").textContent = "";
+  }).catch(e => { $("msg").innerHTML = '<span class="bad">预检失败：'+esc(e)+'</span>'; });
+};
+
+function renderPreview(d){
+  $("resultCard").classList.remove("hidden");
+  $("sumCount").textContent = d.total || 0;
+  $("sumBoxes").textContent = d.boxes || 0;
+  const tb = $("tbody");
+  tb.innerHTML = "";
+  if (!GROUPS.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="muted" style="text-align:center;padding:20px">所选条件下没有可生成的班列</td></tr>';
+    $("btnGen").disabled = true;
+    $("warnBox").classList.add("hidden");
+    return;
+  }
+  GROUPS.forEach((g, i) => {
+    const tr = document.createElement("tr");
+    // 按班列模式下，同班列同日期可能挂多个目的站 → 目的站列渲染为下拉，供维护
+    const opts = (g.station_options && g.station_options.length) ? g.station_options
+               : (g.station_cn ? [g.station_cn] : []);
+    let stationCell;
+    if (opts.length > 1) {
+      stationCell = '<select class="stsel" data-i="'+i+'">'
+        + opts.map(o => '<option value="'+esc(o)+'"'+(o===g.station_cn?' selected':'')+'>'+esc(o)+'</option>').join('')
+        + '</select>';
+    } else {
+      stationCell = esc(g.station_cn || "—");
+    }
+    tr.innerHTML = '<td><input type="checkbox" class="pick" data-i="'+i+'" checked style="width:auto"></td>'
+      + '<td><b>'+esc(g.train_no)+'</b></td>'
+      + '<td>'+esc(g.departure_date)+'</td>'
+      + '<td>'+stationCell+'</td>'
+      + '<td'+(g.resolved?'':' class="bad"')+'>'+esc(g.destination)+'</td>'
+      + '<td>'+g.boxes+'</td>'
+      + '<td class="warn-txt" id="warn-'+i+'">'+esc(g.warn||"")+'</td>';
+    tb.appendChild(tr);
+  });
+  updateWarnBox();
+  $("btnGen").disabled = false;
+}
+
+// 目的站下拉变更：更新选中站 + E15 解析 + 该行提示
+$("tbody").addEventListener("change", e => {
+  const sel = e.target.closest(".stsel");
+  if (!sel) return;
+  const i = +sel.dataset.i;
+  const g = GROUPS[i];
+  g.station_cn = sel.value;
+  const opt = (g.dest_options || []).find(o => o.station === sel.value);
+  if (opt) { g.destination = opt.destination; g.resolved = opt.resolved; }
+  let w = [];
+  if (!g.resolved) w.push("目的站「" + g.station_cn + "」未配置英文映射");
+  if ((g.station_options || []).length > 1) w.push("同班列同日期存在多个目的站，已选「" + g.station_cn + "」");
+  g.warn = w.join("；");
+  const tr = sel.closest("tr");
+  const tdE15 = tr.children[4];
+  tdE15.textContent = g.destination;
+  tdE15.className = g.resolved ? "" : "bad";
+  $("warn-" + i).textContent = g.warn || "";
+  updateWarnBox();
+});
+
+function updateWarnBox(){
+  const picked = [...document.querySelectorAll(".pick:checked")].map(c => GROUPS[+c.dataset.i]).filter(Boolean);
+  const unresolved = picked.filter(g => !g.resolved);
+  if (unresolved.length) {
+    $("warnBox").classList.remove("hidden");
+    $("warnBox").innerHTML = '⚠️ 有 <b>'+unresolved.length+'</b> 个选中班列的目的站没有英文映射，生成的托书 E15 会写成「未知目的站(…)」。'
+      + '涉及目的站：<b>' + esc([...new Set(unresolved.map(g=>g.station_cn))].join("、")) + '</b>。'
+      + '可在「⚙ 目的站映射维护」中补映射，或取消勾选这些班列。';
+  } else {
+    $("warnBox").classList.add("hidden");
+  }
+}
+
+$("checkAll").onchange = (e) => {
+  document.querySelectorAll(".pick").forEach(c => { c.checked = e.target.checked; });
+  updateWarnBox();
+};
+
+$("btnGen").onclick = () => {
+  const picked = [...document.querySelectorAll(".pick:checked")].map(c => GROUPS[+c.dataset.i]);
+  if (!picked.length) { alert("请至少勾选一个班列"); return; }
+  const bad = picked.filter(g => !g.resolved);
+  if (bad.length && !confirm("有 "+bad.length+" 个班列目的站未配置英文映射，生成的托书会写「未知目的站」。仍要继续吗？")) return;
+
+  const p = payload();
+  // 精确回传勾选的分组（同一班列可能有多个目的站分组，只按班列号回传会多生成）
+  p.picked = picked.map(g => ({
+    train_no: g.train_no, departure_date: g.departure_date, station_cn: g.station_cn
+  }));
+  $("msg").textContent = "生成中…";
+  $("btnGen").disabled = true;
+
+  fetch("api/tuoshu/generate", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(p)
+  }).then(async r => {
+    const ct = r.headers.get("Content-Type") || "";
+    if (ct.includes("application/json")) {
+      const d = await r.json();
+      throw new Error(d.msg || "生成失败");
+    }
+    const cd = r.headers.get("Content-Disposition") || "";
+    let fname = "托书.xlsx";
+    const m = /filename\*=UTF-8''([^;]+)/i.exec(cd) || /filename="?([^";]+)"?/i.exec(cd);
+    if (m) { try { fname = decodeURIComponent(m[1]); } catch(e) { fname = m[1]; } }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    $("msg").innerHTML = '<span style="color:#0f6e56">✓ 已生成 '+picked.length+' 份，开始下载</span>';
+  }).catch(e => {
+    $("msg").innerHTML = '<span class="bad">'+esc(e.message||e)+'</span>';
+  }).finally(() => { $("btnGen").disabled = false; });
+};
+
+// ===== 目的站映射维护窗口 =====
+$("btnMap").onclick = () => {
+  const c = $("mapCard");
+  if (c.classList.contains("hidden")) { c.classList.remove("hidden"); loadMap(); }
+  else c.classList.add("hidden");
+};
+
+function loadMap(){
+  fetch("api/tuoshu/dest_map?user=" + encodeURIComponent(USER))
+    .then(r => r.json()).then(d => {
+      if (!d.ok) { $("mapMsg").innerHTML = '<span class="bad">'+esc(d.msg||"加载失败")+'</span>'; return; }
+      window.__mapRows = d.rows || [];
+      const tb = $("mapBody"); tb.innerHTML = "";
+      (d.rows||[]).forEach(r => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = '<td>'+esc(r.station_cn)+'</td><td>'+esc(r.en_name||"")+'</td><td>'+esc(r.country||"")+'</td><td>'+esc(r.alias||"")+'</td>'
+          + '<td><button class="ghost" data-edit="'+esc(r.station_cn)+'">编辑</button> <button class="ghost" data-del="'+esc(r.station_cn)+'">删</button></td>';
+        tb.appendChild(tr);
+      });
+      const unres = [...new Set(GROUPS.filter(g=>!g.resolved).map(g=>g.station_cn))].filter(Boolean);
+      if (unres.length) {
+        $("mapUnresolved").classList.remove("hidden");
+        $("mapUnresolved").innerHTML = '📌 当前预检中未配置映射的目的站（点可直接填入）：'
+          + unres.map(s => '<a href="#" class="unreslink" data-st="'+esc(s)+'">'+esc(s)+'</a>').join("、");
+      } else {
+        $("mapUnresolved").classList.add("hidden");
+      }
+      $("mapMsg").textContent = "";
+    }).catch(e => { $("mapMsg").innerHTML = '<span class="bad">加载失败：'+esc(e)+'</span>'; });
+}
+
+$("mapBody").addEventListener("click", e => {
+  const ed = e.target.getAttribute("data-edit");
+  const del = e.target.getAttribute("data-del");
+  if (ed) {
+    const row = (window.__mapRows||[]).find(r => r.station_cn === ed);
+    if (row) { $("mStation").value = row.station_cn; $("mEn").value = row.en_name||""; $("mCountry").value = row.country||""; $("mAlias").value = row.alias||""; }
+  } else if (del) {
+    if (confirm("确认删除映射「"+del+"」？")) {
+      fetch("api/tuoshu/dest_map", {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({user:USER, station_cn:del, _delete:true})})
+        .then(r=>r.json()).then(()=>loadMap());
+    }
+  }
+});
+
+$("mapUnresolved").addEventListener("click", e => {
+  const a = e.target.closest(".unreslink");
+  if (a) { e.preventDefault(); $("mStation").value = a.dataset.st; $("mStation").focus(); }
+});
+
+$("btnMapSave").onclick = () => {
+  const station = $("mStation").value.trim();
+  if (!station) { $("mapMsg").innerHTML = '<span class="bad">目的站(中文)不能为空</span>'; return; }
+  const body = { user: USER, station_cn: station, en_name: $("mEn").value.trim(),
+                 country: $("mCountry").value.trim(), alias: $("mAlias").value.trim() };
+  $("mapMsg").textContent = "保存中…";
+  fetch("api/tuoshu/dest_map", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)})
+    .then(r=>r.json()).then(d => {
+      if (!d.ok) { $("mapMsg").innerHTML = '<span class="bad">'+esc(d.msg||"保存失败")+'</span>'; return; }
+      $("mapMsg").innerHTML = '<span style="color:#0f6e56">✓ 已保存</span>';
+      loadMap();
+      if ($("dateFrom").value || $("dateTo").value) $("btnPreview").click();  // 刷新预检解析
+    }).catch(e => { $("mapMsg").innerHTML = '<span class="bad">保存失败：'+esc(e)+'</span>'; });
+};
+</script>
+</body>
+</html>

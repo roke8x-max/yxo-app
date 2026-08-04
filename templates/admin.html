@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<title>系统管理 · 渝新欧订舱</title>
+<style>
+  :root {
+    --bg:#f5f6f8; --surface:#ffffff; --border:#e5e7eb; --border-light:#f3f4f6;
+    --text:#1f2937; --text-secondary:#6b7280; --title:#111827;
+    --primary:#0f6e56; --primary-hover:#0c5a45; --primary-soft:#e6f4f1;
+    --danger:#dc2626; --danger-soft:#fef2f2;
+    --radius-sm:8px; --radius-md:12px;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.04); --shadow:0 1px 3px rgba(0,0,0,.06),0 4px 12px rgba(0,0,0,.04); --shadow-lg:0 10px 25px -5px rgba(0,0,0,.08);
+    --transition:all .15s ease;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); font-size:14px; }
+  header { background:var(--primary); color:#fff; padding:12px 18px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header a { color:#cfe8df; text-decoration:none; font-size:13px; }
+  header a:hover { text-decoration:underline; }
+  .tabs { display:flex; gap:6px; background:var(--surface); border-bottom:1px solid var(--border); padding:8px 12px; overflow-x:auto; }
+  .tab { padding:7px 16px; cursor:pointer; border-radius:999px; border:1px solid transparent; white-space:nowrap; font-size:13px; color:var(--text-secondary); transition:var(--transition); }
+  .tab:hover { background:var(--bg); }
+  .tab.active { background:var(--primary-soft); color:var(--primary); border-color:rgba(15,110,86,.2); font-weight:600; }
+  main { padding:16px; max-width:1100px; margin:0 auto; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:var(--shadow-sm); padding:16px; margin-bottom:16px; }
+  .card h3 { margin:0 0 10px; font-size:14px; color:var(--title); }
+  table { border-collapse:collapse; width:100%; font-size:13px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); overflow:hidden; }
+  th,td { border-bottom:1px solid var(--border-light); padding:8px 10px; text-align:left; word-break:break-all; }
+  th { background:var(--primary-soft); color:var(--primary); font-weight:600; }
+  tbody tr:nth-child(even) { background:#fafafa; }
+  tbody tr:last-child td { border-bottom:none; }
+  .ok { color:var(--primary); font-weight:600; }
+  .bad { color:var(--danger); font-weight:600; }
+  .muted { color:var(--text-secondary); }
+  button { background:var(--primary); color:#fff; border:none; border-radius:var(--radius-sm); padding:7px 14px; cursor:pointer; font-size:13px; transition:var(--transition); }
+  button:hover { background:var(--primary-hover); }
+  button.ghost { background:var(--surface); color:var(--primary); border:1px solid var(--primary); }
+  button.ghost:hover { background:var(--primary-soft); }
+  button.danger { background:var(--danger); }
+  button.danger:hover { background:#b91c1c; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input,select { border:1px solid var(--border); border-radius:var(--radius-sm); padding:7px 10px; font-size:13px; background:var(--surface); color:var(--text); outline:none; }
+  input:focus,select:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(15,110,86,.1); }
+  input { width:100%; }
+  pre.logbox { background:#10201a; color:#c9e8dc; padding:12px; border-radius:var(--radius-sm); overflow:auto; max-height:65vh; font-size:12px; line-height:1.5; white-space:pre-wrap; margin:0; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .hidden { display:none; }
+  #denied { text-align:center; padding:80px 20px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; background:var(--primary-soft); color:var(--primary); font-weight:500; }
+  @media (max-width:640px){ main{padding:8px;} th,td{padding:5px 6px;font-size:12px;} }
+
+  /* 草单机器人配置卡 */
+  .switch-row { display:flex; align-items:center; gap:10px; font-weight:600; color:var(--title); }
+  .switch { position:relative; display:inline-block; width:46px; height:25px; }
+  .switch input { opacity:0; width:0; height:0; }
+  .slider { position:absolute; cursor:pointer; inset:0; background:#cbd5e1; border-radius:999px; transition:var(--transition); }
+  .slider:before { content:""; position:absolute; height:19px; width:19px; left:3px; top:3px; background:#fff; border-radius:50%; transition:var(--transition); }
+  .switch input:checked + .slider { background:var(--primary); }
+  .switch input:checked + .slider:before { transform:translateX(21px); }
+  .kv { display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px dashed var(--border-light); font-size:13px; }
+  .kv:last-child { border-bottom:none; }
+  .kv span { color:var(--text-secondary); }
+  .kv b { color:var(--title); font-weight:600; }
+  textarea { border:1px solid var(--border); border-radius:var(--radius-sm); padding:7px 10px; font-size:13px; background:var(--surface); color:var(--text); outline:none; resize:vertical; }
+  textarea:focus { border-color:var(--primary); box-shadow:0 0 0 3px rgba(15,110,86,.1); }
+  .cfg-edit-input { width:100%; padding:5px 7px; }
+  table input.cfg-edit-input { font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛠 系统管理</h1>
+  <span id="who" class="badge"></span>
+  <a href="./">← 返回订舱数据管理</a>
+</header>
+
+<div id="denied" class="hidden">
+  <h2>⛔ 无权限</h2>
+  <p class="muted">该页面仅限管理员使用。</p>
+</div>
+
+<div id="app" class="hidden">
+  <div class="tabs">
+    <div class="tab active" data-tab="status">服务状态</div>
+    <div class="tab" data-tab="logs">转发日志</div>
+    <div class="tab" data-tab="config">配置管理</div>
+    <div class="tab" data-tab="price">价格维护</div>
+    <div class="tab" data-tab="options">选项维护</div>
+    <div class="tab" data-tab="trash">回收站</div>
+  </div>
+  <main>
+    <!-- ============ 服务状态 ============ -->
+    <section id="tab-status">
+      <div class="card">
+        <div class="row"><h3 style="margin:0">本机服务</h3>
+          <button class="ghost" onclick="loadStatus()">刷新</button>
+          <span id="statusTime" class="muted"></span></div>
+        <table id="svcTbl"><thead><tr><th>服务</th><th>端口</th><th>状态</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h3>邮件转发机器人（定时运行，按最近产出判断）</h3>
+        <table id="botTbl"><thead><tr><th>机器人</th><th>状态</th><th>最近产出文件</th><th>时间</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <h3>最近 48 小时错误日志</h3>
+        <div id="errList" class="muted">加载中…</div>
+      </div>
+    </section>
+
+    <!-- ============ 转发日志 ============ -->
+    <section id="tab-logs" class="hidden">
+      <div class="card">
+        <div class="row">
+          <select id="logBot">
+            <option value="atb">ATB 转发日志</option>
+            <option value="dsk">DSK 转发日志</option>
+            <option value="tracing">运踪转发日志（本地）</option>
+            <option value="errors">错误日志</option>
+          </select>
+          <select id="logDate" class="hidden"></select>
+          <button onclick="loadLogs()">查看</button>
+        </div>
+        <!-- Task#174：运踪日志搜索（仅 tracing 显示） -->
+        <div class="row" id="tracingSearch" style="display:none; margin-top:8px">
+          <input id="logCompany" placeholder="接收公司（模糊匹配）" style="width:190px" onkeydown="if(event.key==='Enter')tracingGo(1)">
+          <input id="logTrain" placeholder="班列号（模糊匹配）" style="width:150px" onkeydown="if(event.key==='Enter')tracingGo(1)">
+          <button onclick="tracingGo(1)">搜索</button>
+          <button class="ghost" onclick="tracingReset()">清空筛选</button>
+          <span id="tracingStat" class="muted"></span>
+        </div>
+        <div id="logView"><p class="muted">选择日志类型后点「查看」。</p></div>
+        <!-- Task#174：分页控件（仅 tracing 显示） -->
+        <div class="row" id="tracingPager" style="display:none; margin-top:10px; align-items:center">
+          <button onclick="tracingGo(Math.max(1, tracingState.page-1))">← 上一页</button>
+          <span id="tracingPageInfo" class="muted" style="margin:0 10px"></span>
+          <button onclick="tracingGo(tracingState.page+1)">下一页 →</button>
+          <select id="logPageSize" onchange="tracingGo(1)" style="margin-left:12px">
+            <option value="50">50 条/页</option>
+            <option value="100">100 条/页</option>
+            <option value="200">200 条/页</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 配置管理 ============ -->
+    <section id="tab-config" class="hidden">
+
+      <!-- 机器人统一开关（6 个） -->
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">🤖 机器人统一开关</h3>
+          <button class="ghost" onclick="loadAllBots()">刷新全部</button>
+        </div>
+        <p class="muted" style="margin:6px 0 14px">开启 = 正式运行；关闭 = 停用（本轮回退 / 只读不写，不再转发或写库）。修改后机器人下次运行生效。草单 / 运单号关闭为 TEST 模式（只投验证邮箱，不真转发）。</p>
+        <div id="botCards" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:14px"></div>
+      </div>
+
+      <!-- 飞书配置表 -->
+      <div class="card">
+        <div class="row">
+          <select id="cfgTable">
+            <option value="tracing_config">运踪配置表（按班列号）</option>
+            <option value="dsk_config">DSK / ATB 配置表（按箱号）</option>
+          </select>
+          <button class="ghost" onclick="loadCfg()">刷新</button>
+          <button onclick="beginAddRow()">＋ 新增一行</button>
+        </div>
+        <p class="muted" style="margin:4px 0 10px">改动直接写入飞书配置表，机器人下次运行自动生效（DSK/ATB 缓存会被自动清除）。收件人/抄送人多个邮箱用分号或逗号分隔。</p>
+        <div id="cfgView">加载中…</div>
+      </div>
+    </section>
+
+    <!-- ============ 价格维护 ============ -->
+    <section id="tab-price" class="hidden">
+      <div class="card">
+        <div class="row">
+          <h3 style="margin:0">价格表</h3>
+          <select id="prMonth"></select>
+          <input id="prNewMonth" placeholder="新月份 2026-09" style="width:130px">
+          <button class="ghost" onclick="prAddMonth()">＋ 新建月份</button>
+          <button class="ghost" onclick="loadPrice()">刷新</button>
+        </div>
+        <div class="row" style="margin:6px 0 10px">
+          <span>当月 USD 汇率：</span>
+          <input id="prRate" style="width:110px" placeholder="如 6.8035">
+          <button onclick="prSaveRate()">保存汇率</button>
+          <button class="ghost" onclick="prRecalc()" title="只覆盖由算价/重算写入的行，手填价格不动；单价为空的行顺带补算">↻ 重算该月价格</button>
+          <span id="prInfo" class="muted"></span>
+        </div>
+        <div id="prTable">加载中…</div>
+        <div class="row" style="margin-top:10px">
+          <input id="prPort" placeholder="口岸" style="width:90px">
+          <input id="prDest" placeholder="目的站" style="width:200px">
+          <input id="prSOC" placeholder="SOC价" style="width:90px">
+          <input id="prCOC" placeholder="COC价" style="width:90px">
+          <select id="prCur" style="width:80px"><option>USD</option><option>RMB</option></select>
+          <button onclick="prSaveEntry()">＋ 添加 / 覆盖</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>模板导入（识别 PDF 后照填 → 上传）</h3>
+        <p class="muted" style="margin:4px 0 10px">模板：<code>D:\YXO_DATA\todo\价格表\价格表导入模板.xlsx</code>（价格 / 汇率 两个 sheet）。导入按月整体覆盖：文件里出现的月份替换该月全部价格，未出现的月份不动。备注含「待确认」的行不会入库，单独列出来确认。写入前自动备份。</p>
+        <div class="row">
+          <input type="file" id="prFile" accept=".xlsx" style="width:auto">
+          <button onclick="prUpload()">上传并预览差异</button>
+        </div>
+        <div id="prPreview"></div>
+      </div>
+      <div class="card">
+        <h3>价格表遗留未归位站点</h3>
+        <div id="prUnmatched" class="muted">—</div>
+      </div>
+    </section>
+
+    <!-- ============ 选项维护 ============ -->
+    <section id="tab-options" class="hidden">
+      <div class="card">
+        <div class="row">
+          <select id="optField"></select>
+          <button class="ghost" onclick="loadOptions()">刷新</button>
+        </div>
+        <p class="muted" style="margin:4px 0 10px">修改后直接保存到本地库，网页与订舱助手的下拉选项会同时生效。</p>
+        <div id="optList" style="margin:10px 0"></div>
+        <div class="row" style="margin-top:12px">
+          <input id="optNew" placeholder="输入新选项" style="width:260px">
+          <button onclick="addOption()">＋ 添加</button>
+          <button class="ghost" onclick="saveOptions()">💾 保存</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 回收站 ============ -->
+    <section id="tab-trash" class="hidden">
+      <div class="card">
+        <div class="row">
+          <h3 style="margin:0">已删除记录</h3>
+          <button class="ghost" onclick="loadTrash()">刷新</button>
+          <span id="trashCount" class="muted"></span>
+        </div>
+        <p class="muted" style="margin:4px 0 10px">这里列出被删除的记录（软删除）。可单条「恢复」回到主表，或「彻底删除」清出数据库。也可勾选后批量操作。</p>
+        <div class="row" style="margin-bottom:10px">
+          <button class="ghost" onclick="restoreSelected()">恢复选中</button>
+          <button class="danger" onclick="purgeSelected()">彻底删除选中</button>
+        </div>
+        <div id="trashView" style="overflow:auto"><p class="muted">加载中…</p></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const STORE_KEY = "yxo_user";
+const ADMIN = "毛骁洋";
+// 受限管理员：可进系统管理页，但只开放 价格维护 / 选项维护 / 回收站 三项
+const LIMITED_ADMINS = ["杨雅雯","冯茜","韩文豪"];
+const ALL_USERS = [ADMIN, ...LIMITED_ADMINS];
+let USER = "";
+
+// 进入系统管理（原逻辑原样搬进函数）
+function enterAdmin(u) {
+  USER = u;
+  document.getElementById("who").textContent = u || "未选择身份";
+  document.getElementById("app").classList.remove("hidden");
+  document.getElementById("denied").classList.add("hidden"); // 身份卡点确认后消失
+  const IS_FULL = u === ADMIN;
+  const IS_LIMITED = LIMITED_ADMINS.includes(u);
+  if (IS_FULL) {
+    loadStatus();
+  } else {
+    const HIDDEN = ["status","logs","config"];
+    const SHOWN  = ["price","options","trash"];
+    HIDDEN.forEach(k => {
+      const t = document.querySelector('.tab[data-tab="'+k+'"]');
+      if (t) t.classList.add("hidden");
+      const p = document.getElementById("tab-"+k);
+      if (p) p.classList.add("hidden");
+    });
+    SHOWN.forEach(k => {
+      const t = document.querySelector('.tab[data-tab="'+k+'"]');
+      if (t) t.classList.remove("hidden");
+      const p = document.getElementById("tab-"+k);
+      if (p) p.classList.remove("hidden");
+    });
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    const priceTab = document.querySelector('.tab[data-tab="price"]');
+    if (priceTab) priceTab.classList.add("active");
+    if (!window._priceLoaded) { loadPrice(); window._priceLoaded = true; }
+  }
+}
+
+// 身份卡弹窗：URL 里已有 ?user=姓名 时直接无感进入；否则弹窗选择
+function showAdminGate() {
+  const box = document.getElementById("denied");
+  box.classList.remove("hidden");
+  const remembered = localStorage.getItem(STORE_KEY) || "";
+  box.innerHTML = '<p style="margin:0 0 12px">请选择你的身份：</p><div class="admin-gate-cards"></div>';
+  const wrap = box.querySelector(".admin-gate-cards");
+  ALL_USERS.forEach(u => {
+    const isRem = (u === remembered);
+    const card = document.createElement("div");
+    card.style.cssText = "display:inline-block;min-width:120px;margin:6px;padding:14px 18px;border:1px solid "+(isRem?"#0f6e56":"#cbd5e1")+";border-radius:10px;cursor:pointer;text-align:center;background:"+(isRem?"#eafaf4":"#fff")+";vertical-align:top";
+    card.innerHTML = '<div style="font-size:22px;font-weight:700;margin-bottom:6px">'+u.slice(0,1)+'</div>'
+                   + '<div style="font-weight:600">'+u+'</div>'
+                   + '<div style="font-size:12px;color:#64748b;margin-top:4px">'+(isRem?"上次选择 ✓ 点击确认":"点击以该身份进入")+'</div>';
+    card.onclick = () => {
+      localStorage.setItem(STORE_KEY, u);
+      const url = new URL(location.href);
+      url.searchParams.set("user", u);
+      history.replaceState(null, "", url);
+      enterAdmin(u);
+    };
+    wrap.appendChild(card);
+  });
+}
+
+const urlUser = new URLSearchParams(location.search).get("user");
+if (urlUser && ALL_USERS.includes(urlUser)) {
+  localStorage.setItem(STORE_KEY, urlUser);
+  enterAdmin(urlUser);
+} else {
+  showAdminGate();
+}
+
+// ---------- 通用 ----------
+function api(path, opts) {
+  const sep = path.includes("?") ? "&" : "?";
+  return fetch(path + sep + "user=" + encodeURIComponent(USER), opts).then(r => r.json());
+}
+function esc(s) { const d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+
+// ---------- 标签页 ----------
+  document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    ["status","logs","config","price","options","trash"].forEach(k => document.getElementById("tab-"+k).classList.toggle("hidden", k !== t.dataset.tab));
+    if (t.dataset.tab === "config") {
+      if (!window._cfgLoaded) { loadCfg(); window._cfgLoaded = true; }
+      if (!window._botLoaded) { loadAllBots(); window._botLoaded = true; }
+    }
+    if (t.dataset.tab === "price" && !window._priceLoaded) { loadPrice(); window._priceLoaded = true; }
+    if (t.dataset.tab === "options" && !window._optLoaded) { loadOptions(); window._optLoaded = true; }
+    if (t.dataset.tab === "trash" && !window._trashLoaded) { loadTrash(); window._trashLoaded = true; }
+  }));
+
+// ---------- 服务状态 ----------
+function loadStatus() {
+  api("api/admin/status").then(j => {
+    if (!j.ok) return alert(j.msg || "加载失败");
+    document.getElementById("statusTime").textContent = "检查时间：" + j.checked_at;
+    document.querySelector("#svcTbl tbody").innerHTML = j.services.map(s =>
+      `<tr><td>${esc(s.name)}</td><td>${s.port}</td><td class="${s.alive?'ok':'bad'}">${s.alive?'● 运行中':'✖ 未监听'}</td></tr>`).join("");
+    document.querySelector("#botTbl tbody").innerHTML = j.bots.map(b => {
+      const badge = b.live == null ? "—" : (b.live ? '<span class="ok">● 运行中</span>' : '<span class="bad">○ 已停用</span>');
+      return `<tr><td>${esc(b.name)}</td><td>${badge}</td><td>${esc(b.last_file||'—')}</td><td>${esc(b.last_time||'—')}</td></tr>`;
+    }).join("");
+    document.getElementById("errList").innerHTML = j.recent_errors.length
+      ? j.recent_errors.map(e => `<div>🔴 <a href="#" onclick="viewErr('${esc(e.file)}');return false">${esc(e.file)}</a> <span class="muted">${esc(e.time)}</span></div>`).join("")
+      : '<span class="ok">✅ 无错误日志</span>';
+  });
+}
+function viewErr(f) {
+  document.querySelector('.tab[data-tab="logs"]').click();
+  document.getElementById("logBot").value = "errors";
+  document.getElementById("tracingSearch").style.display = "none";
+  document.getElementById("tracingPager").style.display = "none";
+  api("api/admin/logs?bot=errors&file=" + encodeURIComponent(f)).then(j => {
+    document.getElementById("logView").innerHTML = j.ok ? `<h3>${esc(f)}</h3><pre class="logbox">${esc(j.content)}</pre>` : esc(j.msg);
+  });
+}
+
+// ---------- 日志 ----------
+document.getElementById("logBot").addEventListener("change", () => {
+  const bot = document.getElementById("logBot").value;
+  const dateSel = document.getElementById("logDate");
+  if (bot === "atb" || bot === "dsk") {
+    api("api/admin/logs?bot=" + bot).then(j => {
+      dateSel.innerHTML = (j.dates || []).map(d => `<option>${esc(d)}</option>`).join("");
+      dateSel.classList.remove("hidden");
+    });
+  } else dateSel.classList.add("hidden");
+  // Task#174：tracing 显示搜索条+分页；其它类型隐藏
+  const showTracing = (bot === "tracing");
+  document.getElementById("tracingSearch").style.display = showTracing ? "" : "none";
+  document.getElementById("tracingPager").style.display = "none";
+  if (showTracing) tracingReset();
+});
+function loadLogs() {
+  const bot = document.getElementById("logBot").value;
+  if (bot === "tracing") { tracingGo(1); return; }   // Task#174：走分页+搜索路径
+  let url = "api/admin/logs?bot=" + bot;
+  const dateSel = document.getElementById("logDate");
+  if (!dateSel.classList.contains("hidden") && dateSel.value) url += "&date=" + dateSel.value;
+  const view = document.getElementById("logView");
+  view.innerHTML = '<p class="muted">加载中…</p>';
+  api(url).then(j => {
+    if (!j.ok) { view.innerHTML = "❌ " + esc(j.msg); return; }
+    if (j.type === "text") view.innerHTML = `<pre class="logbox">${esc(j.content)}</pre>`;
+    else if (j.type === "table") view.innerHTML =
+      `<table><thead><tr>${j.columns.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>` +
+      j.rows.map(r=>`<tr>${j.columns.map(c=>`<td>${esc(r[c])}</td>`).join("")}</tr>`).join("") + "</tbody></table>";
+    else if (j.type === "list") view.innerHTML = j.files.length
+      ? j.files.map(f=>`<div>📄 <a href="#" onclick="viewErr('${esc(f.file)}');return false">${esc(f.file)}</a> <span class="muted">${esc(f.time)}</span></div>`).join("")
+      : '<span class="ok">✅ 没有错误日志</span>';
+  });
+}
+
+// ---------- Task#174：运踪日志 分页 + 公司/班列搜索 ----------
+let tracingState = { page: 1, company: "", train: "" };
+function tracingGo(page) {
+  tracingState.page = Math.max(1, page || 1);
+  tracingState.company = (document.getElementById("logCompany").value || "").trim();
+  tracingState.train = (document.getElementById("logTrain").value || "").trim();
+  const ps = parseInt(document.getElementById("logPageSize").value, 10) || 50;
+  const view = document.getElementById("logView");
+  view.innerHTML = '<p class="muted">加载中…</p>';
+  const q = new URLSearchParams({
+    bot: "tracing", company: tracingState.company, train: tracingState.train,
+    page: tracingState.page, page_size: ps
+  });
+  api("api/admin/logs?" + q.toString()).then(j => {
+    if (!j.ok) { view.innerHTML = "❌ " + esc(j.msg); return; }
+    const cols = j.columns || [];
+    view.innerHTML =
+      `<table><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>` +
+      (j.rows && j.rows.length
+        ? j.rows.map(r=>`<tr>${cols.map(c=>`<td>${esc(r[c])}</td>`).join("")}</tr>`).join("")
+        : `<tr><td colspan="${cols.length||1}" class="muted" style="text-align:center;padding:18px">（无匹配记录）</td></tr>`) +
+      "</tbody></table>";
+    document.getElementById("tracingPageInfo").textContent =
+      `第 ${j.page} / ${j.pages} 页（共 ${j.total} 条）`;
+    document.getElementById("tracingStat").textContent = j.total ? `命中 ${j.total} 条` : "无记录";
+    document.getElementById("tracingPager").style.display = "";
+  });
+}
+function tracingReset() {
+  document.getElementById("logCompany").value = "";
+  document.getElementById("logTrain").value = "";
+  tracingGo(1);
+}
+
+// ---------- 配置管理（飞书表） ----------
+let CFG = { key:"", fields:[], rows:[] };
+function loadCfg() {
+  const key = document.getElementById("cfgTable").value;
+  const view = document.getElementById("cfgView");
+  view.innerHTML = '<p class="muted">加载中…（飞书接口略慢，请稍候）</p>';
+  api("api/admin/table/" + key).then(j => {
+    if (!j.ok) { view.innerHTML = "❌ " + esc(j.msg); return; }
+    CFG = { key, fields: j.fields, rows: j.rows };
+    renderCfg();
+  });
+}
+function renderCfg() {
+  const { fields, rows } = CFG;
+  let html = `<table><thead><tr>${fields.map(f=>`<th>${esc(f)}</th>`).join("")}<th>创建</th><th style="width:120px">操作</th></tr></thead><tbody>`;
+  if (!rows.length) {
+    html += `<tr><td colspan="${fields.length+2}" class="muted" style="text-align:center; padding:18px">（暂无配置，点「＋ 新增一行」添加）</td></tr>`;
+  }
+  rows.forEach((r,i) => {
+    html += `<tr id="cfgrow-${i}">${fields.map(f=>`<td>${esc(r[f])}</td>`).join("")}<td>${esc(r._created||"")}</td>` +
+      `<td><button class="ghost" onclick="editRow(${i})">改</button> <button class="danger" onclick="delRow(${i})">删</button></td></tr>`;
+  });
+  html += "</tbody></table>";
+  document.getElementById("cfgView").innerHTML = html;
+}
+function beginAddRow() {
+  const { fields } = CFG;
+  if (!fields.length) { loadCfg(); return; }
+  if (document.getElementById("addRow")) return;  // 避免重复添加
+  const tbody = document.querySelector("#cfgView table tbody");
+  const tr = document.createElement("tr");
+  tr.id = "addRow";
+  tr.style.background = "var(--primary-soft)";
+  tr.innerHTML = fields.map(f=>`<td><input class="cfg-edit-input" id="add-${esc(f)}"></td>`).join("") +
+    `<td>—</td><td><button onclick="submitAdd()">存</button> <button class="ghost" onclick="document.getElementById('addRow').remove()">取消</button></td>`;
+  if (tbody) tbody.appendChild(tr);
+  else document.getElementById("cfgView").insertAdjacentHTML("afterbegin", `<table><tbody>${tr.outerHTML}</tbody></table>`);
+  tr.querySelector("input") && tr.querySelector("input").focus();
+}
+function submitAdd() {
+  const fields = {};
+  CFG.fields.forEach(f => fields[f] = document.getElementById("add-"+f).value.trim());
+  if (!Object.values(fields).some(v=>v)) return alert("请至少填一个字段");
+  api("api/admin/table/" + CFG.key, { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ user: USER, fields }) })
+    .then(j => j.ok ? loadCfg() : alert("保存失败：" + j.msg));
+}
+function editRow(i) {
+  const r = CFG.rows[i];
+  const tr = document.getElementById("cfgrow-" + i);
+  tr.innerHTML = CFG.fields.map(f=>`<td><input class="cfg-edit-input" id="edit-${i}-${esc(f)}" value="${esc(r[f])}"></td>`).join("") +
+    `<td>${esc(r._created||"")}</td><td><button onclick="submitEdit(${i})">存</button> <button class="ghost" onclick="renderCfg()">取消</button></td>`;
+}
+function submitEdit(i) {
+  const r = CFG.rows[i];
+  const fields = {};
+  CFG.fields.forEach(f => fields[f] = document.getElementById(`edit-${i}-${f}`).value.trim());
+  api("api/admin/table/" + CFG.key + "/" + r.record_id, { method:"PATCH", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ user: USER, fields }) })
+    .then(j => j.ok ? loadCfg() : alert("更新失败：" + j.msg));
+}
+function delRow(i) {
+  const r = CFG.rows[i];
+  const label = CFG.fields.map(f=>r[f]).filter(Boolean).slice(0,2).join(" / ");
+  if (!confirm("确定删除这条配置？\n" + label)) return;
+  api("api/admin/table/" + CFG.key + "/" + r.record_id, { method:"DELETE" })
+    .then(j => j.ok ? loadCfg() : alert("删除失败：" + j.msg));
+}
+
+// ---------- 草单转发机器人配置 ----------
+// ---------- 机器人统一开关（6 个，统一走 /api/admin/bot_config/<name>） ----------
+const BOT_LIST = [
+  ["draft_forward", "草单转发机器人", "关闭 = TEST（只投验证邮箱，不真转发）"],
+  ["waybill",       "运单号机器人",   "关闭 = TEST（只投验证邮箱，不真转发）"],
+  ["atb",           "ATB 转发机器人", "关闭 = 停用（只读不写）"],
+  ["dsk",           "DSK 转发机器人", "关闭 = 停用（只读不写）"],
+  ["tracing",       "运踪转发机器人", "关闭 = 停用（只读不写）"],
+];
+function loadAllBots() {
+  const wrap = document.getElementById("botCards");
+  wrap.innerHTML = BOT_LIST.map(([name, label]) =>
+    `<div class="bot-card" id="bot-${name}" style="border:1px solid var(--border); border-radius:var(--radius-md); padding:14px">
+       <div class="row" style="justify-content:space-between; margin-bottom:8px">
+         <b>${label}</b><span class="bot-mode" style="font-size:12px"></span>
+       </div>
+       <p class="muted" style="margin:0 0 10px; font-size:12px"></p>
+       <div class="switch-row" style="margin-bottom:10px">
+         <span>正式运行（LIVE）</span>
+         <label class="switch"><input type="checkbox" data-bot="${name}" class="bot-live"><span class="slider"></span></label>
+       </div>
+       <div class="row" style="margin-bottom:8px">
+         <label style="width:92px; font-size:13px">起始时间</label>
+         <input type="datetime-local" class="bot-since" style="max-width:220px">
+       </div>
+       <div class="row" style="align-items:flex-start; margin-bottom:8px">
+         <label style="width:92px; font-size:13px; padding-top:6px">监控邮箱</label>
+         <textarea class="bot-accounts" rows="3" style="flex:1; min-width:200px; font-size:13px"></textarea>
+       </div>
+       <div class="row" style="margin-top:6px">
+         <button onclick="saveBot('${name}')">保存</button>
+         <span class="bot-msg muted" style="font-size:12px"></span>
+       </div>
+     </div>`).join("");
+  BOT_LIST.forEach(([name, , note]) => {
+    const card = document.getElementById("bot-" + name);
+    if (card) card.querySelector(".muted").textContent = note;
+  });
+  BOT_LIST.forEach(([name]) => {
+    api("api/admin/bot_config/" + name).then(j => {
+      if (!j.ok) return;
+      const card = document.getElementById("bot-" + name);
+      if (!card) return;
+      card.querySelector(".bot-live").checked = !!j.live;
+      card.querySelector(".bot-since").value = j.forward_since ? String(j.forward_since).slice(0,16) : "";
+      card.querySelector(".bot-accounts").value = (j.accounts||[]).join("\n");
+      const mode = card.querySelector(".bot-mode");
+      mode.textContent = j.live ? "● 运行中" : "○ 已停用";
+      mode.style.color = j.live ? "#1a9d5a" : "#c0392b";
+    });
+  });
+}
+function saveBot(name) {
+  const card = document.getElementById("bot-" + name);
+  if (!card) return;
+  const live = card.querySelector(".bot-live").checked;
+  let since = card.querySelector(".bot-since").value;   // "YYYY-MM-DDTHH:MM"
+  since = since ? since + ":00" : null;                 // 存 "YYYY-MM-DDTHH:MM:SS"
+  const accounts = card.querySelector(".bot-accounts").value
+    .split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+  const body = { user: USER, live, forward_since: since, accounts };
+  api("api/admin/bot_config/" + name, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) })
+    .then(j => {
+      const msg = card.querySelector(".bot-msg");
+      if (j.ok) {
+        msg.textContent = "✅ 已保存（下次运行生效）";
+        const mode = card.querySelector(".bot-mode");
+        mode.textContent = live ? "● 运行中" : "○ 已停用";
+        mode.style.color = live ? "#1a9d5a" : "#c0392b";
+      } else msg.textContent = "❌ " + (j.msg || "保存失败");
+    });
+}
+
+// ---------- 价格维护 ----------
+let PR = { month: "", months: [], entries: [] };
+function loadPrice(month) {
+  const url = "api/admin/price" + (month ? "?month=" + encodeURIComponent(month) : (PR.month ? "?month=" + encodeURIComponent(PR.month) : ""));
+  api(url).then(j => {
+    if (!j.ok) return alert(j.msg || "加载失败");
+    PR = { month: j.month, months: j.months, entries: j.entries };
+    const sel = document.getElementById("prMonth");
+    const ms = j.months.includes(j.month) ? j.months : [j.month].concat(j.months);
+    sel.innerHTML = ms.map(m => `<option value="${esc(m)}"${m===j.month?" selected":""}>${esc(m)}</option>`).join("");
+    document.getElementById("prRate").value = (j.exrates && j.exrates.USD != null) ? j.exrates.USD : "";
+    document.getElementById("prInfo").textContent = `共 ${j.entries.length} 条价格` + ((j.exrates && j.exrates.USD) ? "" : "（⚠ 该月未设 USD 汇率，USD 报价无法算价）");
+    renderPriceTable();
+    document.getElementById("prUnmatched").innerHTML = (j.unmatched && j.unmatched.length)
+      ? j.unmatched.map(u => `<div>· ${esc(typeof u === "string" ? u : JSON.stringify(u))}</div>`).join("")
+      : "✅ 无遗留站点";
+  });
+}
+function renderPriceTable() {
+  const rows = PR.entries;
+  document.getElementById("prTable").innerHTML = rows.length
+    ? `<table><thead><tr><th>口岸</th><th>目的站</th><th>SOC</th><th>COC</th><th>币种</th><th style="width:110px">操作</th></tr></thead><tbody>` +
+      rows.map((r,i) => `<tr id="prrow-${i}"><td>${esc(r.port)}</td><td>${esc(r.dest)}</td><td>${r.SOC==null?"—":esc(r.SOC)}</td><td>${r.COC==null?"—":esc(r.COC)}</td><td>${esc(r.currency)}</td>` +
+        `<td><button class="ghost" onclick="prEdit(${i})">改</button> <button class="danger" onclick="prDel(${i})">删</button></td></tr>`).join("") +
+      "</tbody></table>"
+    : '<span class="muted">该月还没有价格，可手工添加或用模板导入。</span>';
+}
+document.getElementById("prMonth").addEventListener("change", e => loadPrice(e.target.value));
+function prAddMonth() {
+  const m = document.getElementById("prNewMonth").value.trim();
+  if (!/^\d{4}-\d{2}$/.test(m)) return alert("月份格式应为 YYYY-MM，如 2026-09");
+  loadPrice(m);
+}
+function prSaveRate() {
+  const rate = document.getElementById("prRate").value.trim();
+  if (!rate) return alert("请输入汇率");
+  api("api/admin/price/exrate", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ user: USER, month: PR.month, currency: "USD", rate }) })
+    .then(j => j.ok ? (alert("汇率已保存"), loadPrice()) : alert("保存失败：" + j.msg));
+}
+function prSaveEntry() {
+  const port = document.getElementById("prPort").value.trim();
+  const dest = document.getElementById("prDest").value.trim();
+  api("api/admin/price/entry", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ user: USER, month: PR.month, port, dest,
+        SOC: document.getElementById("prSOC").value.trim(),
+        COC: document.getElementById("prCOC").value.trim(),
+        currency: document.getElementById("prCur").value }) })
+    .then(j => {
+      if (!j.ok) return alert("保存失败：" + j.msg);
+      ["prPort","prDest","prSOC","prCOC"].forEach(id => document.getElementById(id).value = "");
+      loadPrice();
+    });
+}
+function prEdit(i) {
+  const r = PR.entries[i];
+  document.getElementById("prPort").value = r.port;
+  document.getElementById("prDest").value = r.dest;
+  document.getElementById("prSOC").value = r.SOC == null ? "" : r.SOC;
+  document.getElementById("prCOC").value = r.COC == null ? "" : r.COC;
+  document.getElementById("prCur").value = r.currency || "USD";
+  document.getElementById("prPort").focus();
+}
+function prDel(i) {
+  const r = PR.entries[i];
+  if (!confirm(`删除 ${PR.month} 的「${r.port} → ${r.dest}」价格？`)) return;
+  api("api/admin/price/entry/delete", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ user: USER, month: PR.month, port: r.port, dest: r.dest }) })
+    .then(j => j.ok ? loadPrice() : alert("删除失败：" + j.msg));
+}
+function prRecalc() {
+  if (!confirm(`重算 ${PR.month} 发班的记录价格？\n只覆盖由「算价/批量算价/重算」写入的行，手填价格不动；单价为空的行会补算。`)) return;
+  api("api/admin/price/recalc", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ user: USER, month: PR.month }) })
+    .then(j => j.ok
+      ? alert(`重算完成：扫描 ${j.scanned} 行，覆盖 ${j.updated} 行，补算 ${j.filled} 行，无匹配价 ${j.failed} 行`)
+      : alert("重算失败：" + j.msg));
+}
+function prUpload() {
+  const f = document.getElementById("prFile").files[0];
+  if (!f) return alert("请先选择模板文件（.xlsx）");
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("user", USER);
+  const view = document.getElementById("prPreview");
+  view.innerHTML = '<p class="muted">解析中…</p>';
+  fetch("api/admin/price/import?user=" + encodeURIComponent(USER), { method:"POST", body: fd })
+    .then(r => r.json()).then(j => {
+      if (!j.ok) { view.innerHTML = "❌ " + esc(j.msg); return; }
+      let html = "";
+      if (j.errors.length) html += `<div class="card" style="background:var(--danger-soft)"><h3>❌ 格式问题（这些行不会导入）</h3>${j.errors.map(e=>`<div>· ${esc(e)}</div>`).join("")}</div>`;
+      if (j.pending.length) html += `<div class="card" style="background:#fffbeb"><h3>⏳ 待确认行（不入库，请核对后改掉备注重新导）</h3>` +
+        j.pending.map(p=>`<div>· 第${p.row}行 ${esc(p.month)} ${esc(p.port)}→${esc(p.dest)} SOC:${p.SOC??"—"} COC:${p.COC??"—"} ${esc(p.note)}</div>`).join("") + "</div>";
+      if (j.diff.length) {
+        html += `<table><thead><tr><th>月份</th><th>文件条数</th><th>新增</th><th>修改</th><th>将删除</th></tr></thead><tbody>` +
+          j.diff.map(d=>`<tr><td>${esc(d.month)}</td><td>${d.total}</td><td class="ok">+${d.added}</td><td>${d.changed}</td><td class="${d.removed?'bad':''}">-${d.removed}</td></tr>`).join("") + "</tbody></table>";
+        const det = j.diff.map(d => {
+          let s = "";
+          if (d.changed_keys.length) s += `<div class="muted">【${esc(d.month)} 修改】${d.changed_keys.map(esc).join("、")}</div>`;
+          if (d.removed_keys.length) s += `<div class="bad">【${esc(d.month)} 将删除】${d.removed_keys.map(esc).join("、")}</div>`;
+          return s;
+        }).join("");
+        if (det) html += `<div style="margin-top:8px">${det}</div>`;
+      } else html += '<p class="muted">文件里没有可导入的价格行。</p>';
+      if (j.ex_diff.length) html += `<div style="margin-top:8px"><b>汇率变化：</b>` +
+        j.ex_diff.map(e=>`<div>· ${esc(e.month)} ${esc(e.currency)}：${e.old==null?"（未设）":e.old} → <b>${e.new}</b></div>`).join("") + "</div>";
+      if (j.diff.length || j.ex_diff.length)
+        html += `<div class="row" style="margin-top:12px"><button onclick="prConfirmImport()">✅ 确认导入（按月覆盖，写前自动备份）</button></div>`;
+      html += `<p class="muted" style="margin-top:8px">${esc(j.note)}</p>`;
+      view.innerHTML = html;
+    }).catch(e => view.innerHTML = "❌ " + esc(e));
+}
+function prConfirmImport() {
+  api("api/admin/price/import/confirm", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ user: USER }) })
+    .then(j => {
+      if (!j.ok) return alert("导入失败：" + j.msg);
+      alert("导入完成，覆盖月份：" + j.months.join("、"));
+      document.getElementById("prPreview").innerHTML = "";
+      document.getElementById("prFile").value = "";
+      loadPrice();
+    });
+}
+
+// ---------- 选项维护 ----------
+let OPT_OPTIONS = {};   // field -> [选项]
+let OPT_LABELS = {};    // field -> 显示名（别名）
+let OPT_CURRENT = "";   // 当前选中的字段
+function loadOptions() {
+  fetch("api/field_options").then(r => r.json()).then(d => {
+    d = d || [];
+    OPT_OPTIONS = {}; OPT_LABELS = {};
+    d.forEach(it => { OPT_OPTIONS[it.field] = it.options; OPT_LABELS[it.field] = it.label || it.field; });
+    const sel = document.getElementById("optField");
+    sel.innerHTML = d.map(it => `<option value="${esc(it.field)}">${esc(it.label || it.field)}</option>`).join("");
+    if (!OPT_CURRENT || !OPT_OPTIONS[OPT_CURRENT]) OPT_CURRENT = sel.value;
+    else sel.value = OPT_CURRENT;
+    renderOptions();
+  });
+}
+function renderOptions() {
+  OPT_CURRENT = document.getElementById("optField").value;
+  const list = OPT_OPTIONS[OPT_CURRENT] || [];
+  document.getElementById("optList").innerHTML = list.length
+    ? list.map((o,i) => `<div class="row" style="margin-bottom:4px"><span style="flex:1">${esc(o)}</span><button class="danger" onclick="removeOption(${i})">删</button></div>`).join("")
+    : '<span class="muted">暂无选项</span>';
+}
+function addOption() {
+  const inp = document.getElementById("optNew");
+  const v = inp.value.trim();
+  if (!v) return;
+  const arr = OPT_OPTIONS[OPT_CURRENT] || [];
+  if (arr.includes(v)) { alert("选项已存在"); return; }
+  arr.push(v);
+  OPT_OPTIONS[OPT_CURRENT] = arr;
+  inp.value = "";
+  renderOptions();
+}
+function removeOption(i) {
+  const arr = OPT_OPTIONS[OPT_CURRENT] || [];
+  arr.splice(i, 1);
+  renderOptions();
+}
+function saveOptions() {
+  const arr = OPT_OPTIONS[OPT_CURRENT] || [];
+  fetch("api/field_options", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ field: OPT_CURRENT, options: arr })
+  }).then(r => r.json()).then(j => {
+    if (j.ok) alert("已保存");
+    else alert("保存失败：" + (j.msg || ""));
+  });
+}
+document.getElementById("optField").addEventListener("change", renderOptions);
+
+// ---------- 回收站 ----------
+let TRASH = [];
+function loadTrash() {
+  const view = document.getElementById("trashView");
+  view.innerHTML = '<p class="muted">加载中…</p>';
+  api("api/trash").then(j => {
+    TRASH = Array.isArray(j) ? j : [];
+    const sel = TRASH.length
+      ? TRASH.map(r => `<tr id="trash-${r.id}">
+          <td><input type="checkbox" class="trash-sel" value="${r.id}"></td>
+          <td>${esc(r.seq)}</td>
+          <td>${esc(r["客编"]||r.客编||"")}</td>
+          <td>${esc(r["箱号"]||r.箱号||"")}</td>
+          <td>${esc(r["班列号"]||r.班列号||"")}</td>
+          <td>${esc(r["到站"]||r.到站||"")}</td>
+          <td>${esc(r["开票公司"]||r.开票公司||"")}</td>
+          <td class="muted">${esc(r.deleted_at||"")}</td>
+          <td class="muted">${esc(r.deleted_by||"")}</td>
+          <td><button class="ghost" onclick="restoreOne(${r.id})">恢复</button>
+              <button class="danger" onclick="purgeOne(${r.id})">彻底删除</button></td>
+        </tr>`).join("")
+      : "";
+    view.innerHTML = TRASH.length
+      ? `<table><thead><tr><th><input type="checkbox" id="trashAll" onclick="selAll(this)"></th>` +
+        `<th>序号</th><th>客编</th><th>箱号</th><th>班列号</th><th>到站</th><th>开票公司</th><th>删除时间</th><th>删除人</th><th style="width:150px">操作</th></tr></thead>` +
+        `<tbody>${sel}</tbody></table>`
+      : '<span class="ok">✅ 回收站是空的</span>';
+    document.getElementById("trashCount").textContent = TRASH.length ? "共 " + TRASH.length + " 条" : "";
+  }).catch(e => view.innerHTML = '❌ ' + esc(e));
+}
+function selAll(cb) {
+  document.querySelectorAll(".trash-sel").forEach(x => x.checked = cb.checked);
+}
+function selectedTrashIds() {
+  return [...document.querySelectorAll(".trash-sel:checked")].map(x => parseInt(x.value, 10));
+}
+function restoreOne(id) {
+  if (!confirm("确定恢复这条记录？它将回到主表。")) return;
+  api("api/trash/" + id + "/restore", { method:"POST" }).then(j => {
+    if (j.ok) loadTrash(); else alert("恢复失败：" + (j.msg || ""));
+  });
+}
+function purgeOne(id) {
+  if (!confirm("彻底删除后无法恢复，确定？")) return;
+  api("api/trash/" + id, { method:"DELETE" }).then(j => {
+    if (j.ok) loadTrash(); else alert("删除失败：" + (j.msg || ""));
+  });
+}
+function restoreSelected() {
+  const ids = selectedTrashIds();
+  if (!ids.length) return alert("请先勾选要恢复的记录");
+  if (!confirm("恢复选中的 " + ids.length + " 条记录？")) return;
+  Promise.all(ids.map(id => api("api/trash/" + id + "/restore", { method:"POST" })))
+    .then(() => loadTrash());
+}
+function purgeSelected() {
+  const ids = selectedTrashIds();
+  if (!ids.length) return alert("请先勾选要彻底删除的记录");
+  if (!confirm("彻底删除选中的 " + ids.length + " 条，不可恢复！")) return;
+  Promise.all(ids.map(id => api("api/trash/" + id, { method:"DELETE" })))
+    .then(() => loadTrash());
+}
+</script>
+</body>
+</html>
