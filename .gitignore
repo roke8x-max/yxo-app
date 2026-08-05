@@ -28,3 +28,12 @@ verify_out.txt
 # === Office 文档（含客户数据，不入库） ===
 *.xlsx
 *.xls
+
+# === OpenClaw 工作区内部文件（不应进项目仓库） ===
+# 把 OpenClaw workspace 指向本机 yxo-app 后，它会往项目根写这些内部文件，需屏蔽
+HEARTBEAT.md
+IDENTITY.md
+SOUL.md
+TOOLS.md
+USER.md
+openclaw-workspace-state.json
