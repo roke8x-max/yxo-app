@@ -8,6 +8,7 @@
 # 如果被转成 CRLF，在 Git Bash 里执行会报 "command not found"
 # （行尾的 \r 被当成命令的一部分），结果是 hook 静默失效，误推 main 时没人拦。
 scripts/hooks/* text eol=lf
+*.sh text eol=lf
 
 # PowerShell / 批处理脚本在 Windows 上用 CRLF 最稳
 *.ps1 text eol=crlf
