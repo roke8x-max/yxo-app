@@ -130,12 +130,14 @@
       </div>
     </div>
 
-    <!-- 3. 应用 -->
+    <!-- 3. 应用（分三类独立确认） -->
     <div class="applybar hidden" id="applyBar">
       <span class="sum" id="applySum"></span>
       <span class="grow"></span>
       <button class="btn" id="discardBtn">放弃</button>
-      <button class="btn btn-primary" id="applyBtn">✔ 确认应用（写库 + 快照）</button>
+      <button class="btn btn-primary" id="applyUpdatesBtn" style="display:none;">✔ 确认更新</button>
+      <button class="btn btn-primary" id="applyImportsBtn" style="display:none;">✔ 确认导入专列</button>
+      <button class="btn btn-primary" id="applyAlertsBtn" style="display:none;">✔ 确认后缀变更</button>
     </div>
 
     <!-- 4. 历史 -->
@@ -152,6 +154,13 @@ let LAST_DIFF = null;
 let UPLOADED_FILE = "";
 const destInputs = {};      // train_no -> 目的站 input 值
 const confirmedSuffix = {}; // record_id -> {new_code, 目的站} 已勾选的后缀变更
+
+// 内部字段名 → 中文显示名（用于报警区域"库内值"/"文件值"展示）
+const FIELD_LABELS = {
+  train: "班列号", port: "口岸", dep: "发班时间",
+  box: "箱号", seal: "封号", owner: "箱属",
+  dest: "目的站", suffix: "后缀", core: "客编核心"
+};
 
 function el(tag, attrs, children) {
   const e = document.createElement(tag);
@@ -213,7 +222,11 @@ function onFile(f) {
   fd.append("file", f);
   api("api/manifest/upload?user=" + encodeURIComponent(USER), { method:"POST", body:fd })
     .then(d => { LAST_DIFF = d; renderDiff(d); })
-    .catch(err => { info.textContent = "解析失败：" + err.message; });
+    .catch(err => {
+      info.innerHTML = '<span style="color:var(--danger);font-weight:600;">解析失败：</span>' + err.message;
+      // 尝试从缓存/错误响应中提取诊断信息
+      if (err.diagnostic) renderDiagnostic(err.diagnostic);
+    });
 }
 
 /* ---------- 差异渲染 ---------- */
@@ -227,13 +240,169 @@ function renderDiff(d) {
   document.getElementById("cUpdates").textContent = updates.length;
   document.getElementById("cImports").textContent = imports.length;
   document.getElementById("cAlerts").textContent = alerts.length;
-  document.getElementById("uploadInfo").textContent =
-    "已识别：" + (d.ftype === "manifest" ? "舱单模板" : d.ftype === "box_template" ? "箱号模板" : "未知类型") +
-    "，解析 " + (d.row_count || 0) + " 行。";
+
+  // 状态行（带颜色区分正常/异常）
+  const isAbnormal = (d.ftype !== "manifest" && d.ftype !== "box_template") || (d.row_count || 0) === 0;
+  const typeLabel = d.ftype === "manifest" ? "舱单模板"
+    : d.ftype === "box_template" ? "箱号模板"
+    : '<span style="color:var(--danger);font-weight:600;">未知类型</span>';
+  const countPart = "解析 " + (d.row_count || 0) + " 行";
+  document.getElementById("uploadInfo").innerHTML =
+    "已识别：" + typeLabel + "，" + countPart + "。";
+
+  // 异常时展示诊断面板
+  if (isAbnormal) {
+    renderDiagnostic(d.diagnostics || {});
+  } else {
+    // 正常时隐藏诊断面板（如果存在）
+    var diagPanel = document.getElementById("diagPanel");
+    if (diagPanel) diagPanel.classList.add("hidden");
+  }
+
   renderUpdates(updates);
   renderImports(imports);
   renderAlerts(alerts);
   updateApplySum();
+}
+
+/* ---------- 诊断面板渲染 ---------- */
+function renderDiagnostic(diag) {
+  var existing = document.getElementById("diagPanel");
+  if (!existing) {
+    existing = el("div", { id:"diagPanel", class:"card" });
+    existing.innerHTML = '<h3 style="color:var(--danger);">⚠ 解析异常诊断</h3>';
+    // 插入到 diffCard 前面
+    var main = document.getElementById("main");
+    var diffCard = document.getElementById("diffCard");
+    main.insertBefore(existing, diffCard);
+  }
+  existing.classList.remove("hidden");
+
+  var body = existing;
+  // 清除旧内容（保留 h3）
+  while (body.children.length > 1) body.removeChild(body.lastChild);
+
+  // 错误摘要
+  if (diag.error || diag.error_summary) {
+    body.appendChild(el("div", { class:"alert-box", style:"border-left:4px solid var(--danger);background:var(--danger-soft);" }, [
+      el("b", { text:"❌ " + (diag.error || diag.error_summary) })
+    ]));
+  }
+
+  // 步骤详情
+  if (diag.steps && diag.steps.length > 0) {
+    var stepTable = el("table");
+    var thead = el("thead", null, el("tr", null, [
+      el("th", { text:"步骤" }), el("th", { text:"状态" }), el("th", { text:"详情" })
+    ]));
+    stepTable.appendChild(thead);
+    var tbody = el("tbody");
+    diag.steps.forEach(function(s) {
+      var statusStyle = s.status === "OK" ? "tag-补" : s.status === "ERROR" ? "tag-错" : "tag-警";
+      tbody.appendChild(el("tr", null, [
+        el("td", { text:s.name }),
+        el("td", null, el("span", { class:"tag " + statusStyle, text:s.status })),
+        el("td", { style:"font-size:12px;", text:(s.detail || "") })
+      ]));
+    });
+    stepTable.appendChild(tbody);
+    body.appendChild(stepTable);
+  }
+
+  // 表头打分（前几行）
+  if (diag.header_scoring && diag.header_scoring.length > 0) {
+    body.appendChild(el("h4", { style:"font-size:13px;margin:10px 0 6px;", text:"表头行候选打分：" }));
+    var scTable = el("table");
+    var sthead = el("thead", null, el("tr", null, [
+      el("th", { text:"行#" }), el("th", { text:"分数" }), el("th", { text:"合法?" }),
+      el("th", { text:"命中列" }), el("th", { text:"预览(前5列)" }), el("th", { text:"选中?" })
+    ]));
+    scTable.appendChild(sthead);
+    var stbody = el("tbody");
+    diag.header_scoring.forEach(function(s) {
+      if (s.score === null) return; // 跳过空行
+      var selMark = s.selected ? '✅' : '';
+      stbody.appendChild(el("tr", null, [
+        el("td", { text:String(s.row) }),
+        el("td", { text:String(s.score) }),
+        el("td", { text:s.valid ? "是" : "否" }),
+        el("td", { text:(s.matched || []).join(", ") || "—" }),
+        el("td", { style:"font-size:11px;font-family:monospace;", text:(s.preview || []).join(" | ") }),
+        el("td", { style:"color:var(--primary);font-weight:bold;", text:selMark })
+      ]));
+    });
+    scTable.appendChild(stbody);
+    body.appendChild(scTable);
+  }
+
+  // 列检查
+  if (diag.column_check) {
+    body.appendChild(el("h4", { style:"font-size:13px;margin:10px 0 6px;", text:"关键字段匹配检查：" }));
+    var ccDiv = el("div", { style:"display:flex;flex-wrap:wrap;gap:6px;" });
+    for (var cn in diag.column_check) {
+      var ci = diag.column_check[cn];
+      var ccTag = ci.found ? "tag-补" : "tag-错";
+      ccDiv.appendChild(el("span", { class:"tag " + ccTag, text: cn + (ci.found ? " ✅" : " ❌") }));
+    }
+    body.appendChild(ccDiv);
+  }
+
+  // 数据统计
+  if (diag.data_stats) {
+    var ds = diag.data_stats;
+    body.appendChild(el("h4", { style:"font-size:13px;margin:10px 0 6px;", text:"数据行统计：" }));
+    body.appendChild(el("div", { class:"muted", text:
+      "有效数据行 " + ds.total_data_lines + " → 解析成功 " + ds.parsed_rows +
+      " 行（跳过空行 " + ds.skipped_empty + " + 客编为空 " + ds.skipped_no_code + "）"
+    }));
+  }
+
+  // 数据采样（被跳过的行）
+  if (diag.data_sample && diag.data_sample.length > 0) {
+    body.appendChild(el("h4", { style:"font-size:13px;margin:10px 0 6px;", text:"数据行采样（前几条处理结果）：" }));
+    var dsTable = el("table");
+    var dsHead = el("thead");
+    dsHead.appendChild(el("tr", null, [
+      el("th", { text:"行#" }), el("th", { text:"状态/客编" }), el("th", { text:"箱号" }), el("th", { text:"班列号" }), el("th", { text:"预览" })
+    ]));
+    dsTable.appendChild(dsHead);
+    var dsBody = el("tbody");
+    diag.data_sample.forEach(function(s) {
+      dsBody.appendChild(el("tr", null, [
+        el("td", { text:String(s.row_idx) }),
+        el("td", { style:s.reason ? "color:var(--warn);" : "", text:s.reason || s["客户编码"] || "" }),
+        el("td", { text:s["箱号"] || "" }),
+        el("td", { text:s["班列号"] || "" }),
+        el("td", { style:"font-size:11px;font-family:monospace;", text:(s.preview || []).join(" | ") })
+      ]));
+    });
+    dsTable.appendChild(dsBody);
+    body.appendChild(dsTable);
+  }
+
+  // 原始采样（前10行）
+  if (diag.raw_sample && diag.raw_sample.length > 0) {
+    body.appendChild(el("details", null, [
+      el("summary", { style:"cursor:pointer;font-size:13px;color:var(--text-secondary);margin:6px 0;",
+        text:"▶ 展开原始文件前10行内容" }),
+      (function() {
+        var rt = el("table");
+        var rh = el("thead");
+        rh.appendChild(el("tr", null, diag.raw_sample[0].map(function(_, i) {
+          return el("th", { text:"Col"+i, style:"font-size:11px;" });
+        })));
+        rt.appendChild(rh);
+        var rb = el("tbody");
+        diag.raw_sample.forEach(function(row) {
+          rb.appendChild(el("tr", null, row.map(function(c) {
+            return el("td", { style:"font-size:11px;font-family:monospace;", text:c || "" });
+          })));
+        });
+        rt.appendChild(rb);
+        return rt;
+      })()
+    ]));
+  }
 }
 
 function renderUpdates(updates) {
@@ -314,12 +483,18 @@ function renderAlerts(alerts) {
     box.appendChild(el("div", { class:"muted", style:"margin-top:4px;", text:a["说明"] || "" }));
     if (a["文件值"]) {
       const kv = el("div", { class:"kv" });
-      for (const k in a["文件值"]) kv.appendChild(el("span", { html:"<b>" + k + "</b> " + (a["文件值"][k] || "—") }));
+      for (const k in a["文件值"]) {
+        const label = FIELD_LABELS[k] || k;
+        kv.appendChild(el("span", { html:"<b>" + label + "</b> " + (a["文件值"][k] || "—") }));
+      }
       box.appendChild(kv);
     }
     if (a["库内值"]) {
       const kv = el("div", { class:"kv" });
-      for (const k in a["库内值"]) kv.appendChild(el("span", { html:"<b>库内." + k + "</b> " + (a["库内值"][k] || "—") }));
+      for (const k in a["库内值"]) {
+        const label = FIELD_LABELS[k] || k;
+        kv.appendChild(el("span", { html:"<b>库内·" + label + "</b> " + (a["库内值"][k] || "—") }));
+      }
       box.appendChild(kv);
     }
     if (a.type === "后缀变更" && a.record_id != null) {
@@ -347,9 +522,18 @@ function updateApplySum() {
   const im = (d.imports || []).length;
   const nInsert = (d.imports || []).reduce((s, g) => s + (g.rows ? g.rows.length : 0), 0);
   const suffix = Object.keys(confirmedSuffix).length;
+
+  // 控制三类按钮显隐
+  document.getElementById("applyUpdatesBtn").style.display = u > 0 ? "" : "none";
+  document.getElementById("applyImportsBtn").style.display = im > 0 ? "" : "none";
+  document.getElementById("applyAlertsBtn").style.display = suffix > 0 ? "" : "none";
+
+  const parts = [];
+  if (u) parts.push("<b>" + u + "</b> 项更新");
+  if (im) parts.push("<b>" + im + "</b> 趟专列（" + nInsert + " 箱）");
+  if (suffix) parts.push("<b>" + suffix + "</b> 个后缀变更");
   document.getElementById("applySum").innerHTML =
-    "待写：<b>" + u + "</b> 项更新 · <b>" + im + "</b> 趟专列（" + nInsert + " 箱）" +
-    (suffix ? " · <b>" + suffix + "</b> 个后缀变更" : "");
+    parts.length ? "待写：" + parts.join(" · ") : "无可应用内容";
 }
 
 /* ---------- tabs ---------- */
@@ -360,39 +544,60 @@ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () =>
   document.getElementById("panel-" + t.dataset.tab).classList.add("active");
 }));
 
-/* ---------- 应用 ---------- */
-document.getElementById("applyBtn").addEventListener("click", () => {
+/* ---------- 应用（分三类独立确认） ---------- */
+function _doApply(category) {
   if (!LAST_DIFF) return;
   const d = LAST_DIFF.diff;
-  if (!((d.updates || []).length || (d.imports || []).length || Object.keys(confirmedSuffix).length)) {
-    alert("没有可应用的内容。"); return;
-  }
-  if (!confirm("确认写库？系统会先整库快照，应用后可整批回退 / 快照还原。")) return;
-  const imports = (d.imports || []).map(g => ({
-    train_no: g.train_no, 目的站: destInputs[g.train_no] || g["目的站建议"] || "", rows: g.rows
-  }));
-  const alerts_applied = Object.keys(confirmedSuffix).map(rid => ({
-    record_id: parseInt(rid, 10), new_code: confirmedSuffix[rid].new_code, 目的站: confirmedSuffix[rid].目的站
-  }));
-  const payload = {
-    user: USER,
-    files: [UPLOADED_FILE],
-    diff: { updates: d.updates || [], imports, alerts_applied }
-  };
-  const btn = document.getElementById("applyBtn");
+  let payload, confirmMsg;
+
+  if (category === "updates") {
+    const u = d.updates || [];
+    if (!u.length) { alert("没有可更新的项。"); return; }
+    if (!confirm("确认应用 " + u.length + " 项更新？系统会先整库快照，可回退。")) return;
+    payload = { user: USER, files: [UPLOADED_FILE], diff: { updates: u, imports: [], alerts_applied: [] } };
+  } else if (category === "imports") {
+    const im = d.imports || [];
+    if (!im.length) { alert("没有待导入的专列。"); return; }
+    const nInsert = im.reduce((s, g) => s + (g.rows ? g.rows.length : 0), 0);
+    if (!confirm("确认导入 " + im.length + " 趟专列（" + nInsert + " 箱）？系统会先整库快照，可回退。")) return;
+    const imports = im.map(g => ({
+      train_no: g.train_no, 目的站: destInputs[g.train_no] || g["目的站建议"] || "", rows: g.rows
+    }));
+    payload = { user: USER, files: [UPLOADED_FILE], diff: { updates: [], imports, alerts_applied: [] } };
+  } else if (category === "alerts") {
+    const suffixKeys = Object.keys(confirmedSuffix);
+    if (!suffixKeys.length) { alert("没有已勾选的后缀变更。"); return; }
+    if (!confirm("确认应用 " + suffixKeys.length + " 个后缀变更？系统会先整库快照，可回退。")) return;
+    const alerts_applied = suffixKeys.map(rid => ({
+      record_id: parseInt(rid, 10), new_code: confirmedSuffix[rid].new_code, 目的站: confirmedSuffix[rid].目的站
+    }));
+    payload = { user: USER, files: [UPLOADED_FILE], diff: { updates: [], imports: [], alerts_applied } };
+  } else { return; }
+
+  const btnId = category === "updates" ? "applyUpdatesBtn"
+    : category === "imports" ? "applyImportsBtn" : "applyAlertsBtn";
+  const btn = document.getElementById(btnId);
   btn.disabled = true;
   api("api/manifest/apply", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) })
     .then(r => {
       alert("应用成功，批次号：" + r.batch_id);
-      LAST_DIFF = null;
-      document.getElementById("diffCard").classList.add("hidden");
-      document.getElementById("applyBar").classList.add("hidden");
-      document.getElementById("file").value = "";
+      // 从 LAST_DIFF 中移除已应用的类别数据，保留未应用的
+      if (category === "updates") { d.updates = []; }
+      else if (category === "imports") { d.imports = []; }
+      else if (category === "alerts") {
+        for (const rid of suffixKeys) delete confirmedSuffix[rid];
+      }
+      // 重新渲染差异面板 + 更新按钮状态
+      renderDiff(LAST_DIFF);
       loadBatches();
     })
     .catch(err => { alert("应用失败：" + err.message); })
     .finally(() => { btn.disabled = false; });
-});
+}
+
+document.getElementById("applyUpdatesBtn").addEventListener("click", () => _doApply("updates"));
+document.getElementById("applyImportsBtn").addEventListener("click", () => _doApply("imports"));
+document.getElementById("applyAlertsBtn").addEventListener("click", () => _doApply("alerts"));
 
 document.getElementById("discardBtn").addEventListener("click", () => {
   LAST_DIFF = null;

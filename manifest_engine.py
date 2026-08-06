@@ -90,6 +90,8 @@ def norm_date_dash(raw):
         except Exception:
             return None
     s = str(raw).strip()
+    # 预归一化分隔符：\ / . 统一转为 -（覆盖 Windows 反斜杠日期等边缘格式）
+    s = re.sub(r'[\\/\.]', '-', s)
     for p in _DATE_PATS:
         try:
             return datetime.strptime(s, p).strftime("%Y-%m-%d")
@@ -108,22 +110,35 @@ def norm_owner(s):
 
 # ==================== 文件识别与解析 ====================
 
+# 清洗正则：去掉空格/斜杠/反斜杠/括号(全半角)/连字符/下划线/冒号/中点/句号/全角空格等
+# 非字母数字字符，转大写。用于模糊匹配表头，使「客户/编码」「箱 号」「客户编码（必填）」
+# 都归一成「客户编码」，消除业务文件列名书写差异。
+_CLEAN_RE = re.compile(r'[\s/\\()（）\-_：:·．.\u3000\uFF0D]+')
+
+
+def clean_cell(s):
+    if s is None:
+        return ""
+    return _CLEAN_RE.sub('', str(s)).upper()
+
+
 COLUMN_MAP = {
-    "客户编码": ["客户编码", "客编", "客户代码"],
-    "箱号": ["箱号", "箱号/封号", "container no", "container"],
-    "封号": ["封号", "客户自备封", "自备封", "seal"],
-    "箱属": ["箱属", "箱柜类型", "箱型", "箱柜", "container type"],
-    "口岸": ["口岸", "口岸/车站", "起运口岸", "port"],
+    "客户编码": ["客户编码", "客编", "客户代码", "业务编号", "工作号", "工作单号",
+                "订舱号", "订舱编号", "委托号", "S/O号", "SO号", "提单号", "运单号", "客户/编码"],
+    "箱号": ["箱号", "箱号/封号", "container no", "container", "柜号", "箱柜号", "集装箱号"],
+    "封号": ["封号", "客户自备封", "自备封", "seal", "铅封号", "封条号"],
+    "箱属": ["箱属", "箱柜类型", "箱型", "箱柜", "箱种", "container type", "箱型尺寸"],
+    "口岸": ["口岸", "口岸/车站", "起运口岸", "起运港", "port", "始发站", "发运站", "起运地"],
     "发班时间": ["班列确定发车时间", "发班时间", "发车时间", "班列确定发车日",
-                "预计发车时间", "日期", "发班日期", "确定发车时间"],
-    "班列号": ["班列号", "班列", "train no", "train", "班列编号"],
+                "预计发车时间", "日期", "发班日期", "确定发车时间", "发车日", "发车日期", "班列日期"],
+    "班列号": ["班列号", "班列", "train no", "train", "班列编号", "车次", "车号", "列车号"],
 }
 
 
 def _has_any(headers, names):
-    """检查表头列表里是否包含 names 中任意一个（子串匹配）。"""
-    h = [str(x).strip() for x in headers]
-    return any(any(n in x for n in names) for x in h)
+    """检查表头（清洗后）是否包含 names 中任意一个（子串匹配）。清洗消除空格/斜杠/括号差异。"""
+    h = [clean_cell(x) for x in headers]
+    return any(any(clean_cell(n) in hc for n in names) for hc in h)
 
 
 def identify_file(headers):
@@ -144,30 +159,106 @@ def identify_file(headers):
     return "unknown"
 
 
+def _score_header_row(row):
+    """给一行打分：命中 COLUMN_MAP 关键字的列越多分越高，返回 (score, matched_set)。清洗后匹配。"""
+    cells = [clean_cell(x) for x in row if x is not None and str(x).strip() != ""]
+    score = 0
+    matched = set()
+    for tgt, names in COLUMN_MAP.items():
+        for cell in cells:
+            if any(clean_cell(n) in cell for n in names):
+                if tgt not in matched:
+                    matched.add(tgt)
+                    score += 1
+                break
+    return score, matched
+
+
+def _is_valid_header(matched):
+    """合法表头：必须有客编，且（箱号 / 班列号 / 发班时间）至少一个。"""
+    if "客户编码" not in matched:
+        return False
+    return bool(matched & {"箱号", "班列号", "发班时间"})
+
+
+def _find_header_row(all_rows, look=60):
+    """在前 look 行里找打分最高且合法的表头行；找不到则退回第 0 行。
+    扫描范围放大到 60 行，覆盖封面/说明等多层前置标题（业务舱单常见）。"""
+    best_idx, best_score = 0, 0
+    for i, row in enumerate(all_rows[:look]):
+        if row is None:
+            continue
+        if all(c is None or str(c).strip() == "" for c in row):
+            continue  # 空行跳过
+        score, matched = _score_header_row(row)
+        if _is_valid_header(matched) and score > best_score:
+            best_score, best_idx = score, i
+    return best_idx
+
+
 def _map_headers(headers):
+    """列映射：精确优先，子串兜底；同一列不被两个目标重复占用。清洗后匹配。"""
     idx = {}
-    for i, h in enumerate(headers):
-        h = str(h).strip()
-        for tgt, names in COLUMN_MAP.items():
-            if h in names:
+    used = set()
+    h = [clean_cell(x) if x is not None else "" for x in headers]
+    names_clean = {tgt: [clean_cell(n) for n in ns] for tgt, ns in COLUMN_MAP.items()}
+    for tgt, ncl in names_clean.items():
+        for i, cell in enumerate(h):
+            if i in used:
+                continue
+            if cell in ncl:
                 idx[tgt] = i
+                used.add(i)
+                break
+    for tgt, ncl in names_clean.items():
+        if tgt in idx:
+            continue
+        for i, cell in enumerate(h):
+            if i in used:
+                continue
+            if any(nc and nc in cell for nc in ncl):
+                idx[tgt] = i
+                used.add(i)
                 break
     return idx
 
 
-def parse_workbook(stream):
-    """从文件字节流解析 xlsx → (headers, rows, file_type)。"""
-    wb = openpyxl.load_workbook(stream, read_only=True, data_only=True)
-    ws = wb.active
-    rows_iter = ws.iter_rows(values_only=True)
+def _pick_sheet(stream):
+    """扫描所有 worksheet，返回 (ws_title, all_rows, sheet_names)。
+    优先选第一个能识别为舱单/箱号模板的 sheet；若都识别不了，返回第一个 sheet（哪怕 unknown）。
+    业务舱单常有封面 sheet，真实数据在后续 sheet 中。
+    注意：必须用 read_only=False，因部分 xlsx 文件(如缺默认样式)在 read_only=True 下只读首列首行。"""
+    wb = openpyxl.load_workbook(stream, read_only=False, data_only=True)
     try:
-        headers = next(rows_iter)
-    except StopIteration:
+        sheets = wb.worksheets
+        names = [s.title for s in sheets]
+        for ws in sheets:
+            all_rows = list(ws.iter_rows(values_only=True))
+            if not all_rows:
+                continue
+            hdr_idx = _find_header_row(all_rows)
+            if hdr_idx >= len(all_rows):
+                continue
+            if identify_file(list(all_rows[hdr_idx])) != "unknown":
+                return ws.title, all_rows, names
+        if sheets:
+            return sheets[0].title, list(sheets[0].iter_rows(values_only=True)), names
+        return None, [], names
+    finally:
+        wb.close()
+
+
+def parse_workbook(stream):
+    """从文件字节流解析 xlsx → (headers, rows, file_type)。支持多 sheet（优先识别第一个能认出类型的）。"""
+    _, all_rows, _ = _pick_sheet(stream)
+    if not all_rows:
         return [], [], "unknown"
+    hdr_idx = _find_header_row(all_rows)
+    headers = list(all_rows[hdr_idx])
     ftype = identify_file(headers)
     col = _map_headers(headers)
     rows = []
-    for raw in rows_iter:
+    for raw in all_rows[hdr_idx + 1:]:
         if raw is None:
             continue
         if all(c is None or str(c).strip() == "" for c in raw):
@@ -179,6 +270,165 @@ def parse_workbook(stream):
             continue
         rows.append(rec)
     return headers, rows, ftype
+
+
+def _diagnose_one(ws_title, all_rows):
+    """对单个 sheet 的 all_rows 做完整诊断，返回 (headers, rows, ftype, diag_dict)。"""
+    diag = {"steps": [], "error": None}
+    total = len(all_rows)
+    non_empty = sum(1 for r in all_rows if r is not None and any(c is not None and str(c).strip() != "" for c in r))
+    diag["steps"].append({"name": "文件读取", "status": "OK",
+                           "detail": f"[sheet:{ws_title}] 总{total}行, 非空{non_empty}行"})
+
+    if not all_rows:
+        diag["error"] = "文件为空（0行）"
+        return [], [], "unknown", diag
+
+    # 采样前10行原始内容（用于诊断）
+    sample = []
+    for i, row in enumerate(all_rows[:10]):
+        cells = [(_truncate(str(c), 25) if c is not None else "") for c in (row or [])]
+        sample.append(cells)
+    diag["raw_sample"] = sample
+
+    # 表头行定位
+    hdr_idx = _find_header_row(all_rows)
+
+    # 逐行打分详情（扫描范围与 _find_header_row 一致）
+    scoring = []
+    for i in range(min(60, len(all_rows))):
+        row = all_rows[i]
+        if row is None:
+            continue
+        if all(c is None or str(c).strip() == "" for c in row):
+            scoring.append({"row": i, "score": None, "valid": None, "note": "空行"})
+            continue
+        score, matched = _score_header_row(row)
+        valid = _is_valid_header(matched)
+        selected = (i == hdr_idx)
+        scoring.append({
+            "row": i, "score": score, "valid": valid,
+            "matched": sorted(matched),
+            "preview": [_truncate(str(c), 20) for c in list(row)[:8]],
+            "selected": selected,
+        })
+    diag["header_scoring"] = scoring
+    diag["header_row_index"] = hdr_idx
+
+    if hdr_idx >= len(all_rows):
+        diag["error"] = f"表头定位越界: hdr_idx={hdr_idx} >= 总行数={total}"
+        diag["steps"].append({"name": "表头定位", "status": "ERROR", "detail": diag["error"]})
+        return [], [], "unknown", diag
+
+    headers = list(all_rows[hdr_idx])
+    h_display = [str(h)[:30] for h in headers]
+    diag["steps"].append({
+        "name": "表头定位",
+        "status": "OK",
+        "detail": f"第{hdr_idx}行, 列数={len(headers)}, 内容={h_display[:10]}"
+    })
+    diag["detected_headers"] = h_display
+
+    # 文件类型识别
+    ftype = identify_file(headers)
+    col_check = {}
+    for tgt, names in COLUMN_MAP.items():
+        found = _has_any(headers, names)
+        col_check[tgt] = {"found": found, "aliases_tried": names}
+    diag["column_check"] = col_check
+    diag["steps"].append({"name": "文件识别", "status": "OK" if ftype != "unknown" else "WARN",
+                          "detail": f"type={ftype}"})
+
+    # 列映射
+    col = _map_headers(headers)
+    diag["column_mapping"] = col  # {目标列名: 源索引}
+    diag["steps"].append({"name": "列映射", "status": "OK" if len(col) >= 3 else "PARTIAL",
+                          "detail": f"映射了{len(col)}列: {list(col.keys())}"})
+
+    # 数据行解析
+    rows = []
+    skipped_empty = 0
+    skipped_no_code = 0
+    data_sample = []
+    for ri, raw in enumerate(all_rows[hdr_idx + 1:], start=hdr_idx+1):
+        if raw is None:
+            continue
+        if all(c is None or str(c).strip() == "" for c in raw):
+            skipped_empty += 1
+            continue
+        rec = {}
+        for tgt, ci in col.items():
+            rec[tgt] = raw[ci] if ci < len(raw) else None
+        if not rec.get("客户编码"):
+            skipped_no_code += 1
+            if len(data_sample) < 3:
+                data_sample.append({
+                    "row_idx": ri,
+                    "reason": "客编为空",
+                    "preview": [_truncate(str(c), 15) for c in (raw or [])[:5]],
+                })
+            continue
+        rows.append(rec)
+        if len(data_sample) < 3:
+            data_sample.append({
+                "row_idx": ri,
+                "客户编码": str(rec.get("客户编码", ""))[:25],
+                "箱号": str(rec.get("箱号", ""))[:15],
+                "班列号": str(rec.get("班列号", ""))[:10],
+            })
+
+    diag["data_stats"] = {
+        "parsed_rows": len(rows),
+        "skipped_empty": skipped_empty,
+        "skipped_no_code": skipped_no_code,
+        "total_data_lines": total - hdr_idx - 1,
+    }
+    diag["data_sample"] = data_sample
+    diag["steps"].append({
+        "name": "数据行解析",
+        "status": "OK" if len(rows) > 0 else "EMPTY",
+        "detail": f"解析{len(rows)}行, 跳过空行{skipped_empty}, 客编为空{skipped_no_code}"
+    })
+
+    # 综合判断
+    if ftype == "unknown":
+        diag["error"] = "文件类型无法识别: 表头未匹配到舱单/箱号模板的关键字段组合（见下方列检查/表头打分）"
+    elif len(rows) == 0:
+        diag["error"] = f"无有效数据行: 共{total-hdr_idx-1}行数据, 但全部被跳过(空行{skipped_empty}+客编缺失{skipped_no_code})"
+
+    return headers, rows, ftype, diag
+
+
+def parse_workbook_diagnostics(stream):
+    """带完整诊断的解析版本：返回 (headers, rows, ftype, diagnostics_dict)。
+    支持多 sheet（优先识别第一个能认出舱单/箱号模板的 sheet）。"""
+    diag = {"steps": [], "error": None}
+    try:
+        chosen_title, chosen_rows, sheet_names = _pick_sheet(stream)
+    except Exception as e:
+        diag["error"] = f"文件读取失败: {e}"
+        diag["steps"].append({"name": "文件读取", "status": "ERROR", "detail": str(e)})
+        return [], [], "unknown", diag
+
+    multi_step = {"name": "多Sheet扫描", "status": "OK",
+                  "detail": f"共{len(sheet_names)}个sheet({sheet_names})，使用「{chosen_title}」"}
+    if chosen_title is None or not chosen_rows:
+        diag["steps"].append(multi_step)
+        diag["error"] = "文件无任何工作表或无法读取"
+        return [], [], "unknown", diag
+
+    # 对选定 sheet 做完整诊断
+    headers, rows, ftype, sub = _diagnose_one(chosen_title, chosen_rows)
+    for k, v in sub.items():
+        diag[k] = v
+    diag["steps"] = [multi_step] + (sub.get("steps") or [])
+    return headers, rows, ftype, diag
+
+
+def _truncate(s, maxlen):
+    """截断字符串用于诊断显示。"""
+    s = str(s) if s is not None else ""
+    return (s[:maxlen-1] + "…") if len(s) > maxlen else s
 
 
 def normalize_row(raw, ftype):

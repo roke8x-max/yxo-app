@@ -656,8 +656,8 @@ def api_update(rid):
     # 改「发班时间」前先取原值年份：联动范围必须按【原年份】锁定，
     # 否则把 2026 年的班列改成 2027 年日期时，同班列其他行会因年份不匹配而漏改。
     old_year = departure_year(conn, rid) if field == "发班时间" else ""
-    # 写入侧归一：发班时间统一 YYYY-MM-DD，防止网页编辑又脏回去（体检C 1.2）
-    if field == "发班时间":
+    # 写入侧归一：所有日期字段统一 YYYY-MM-DD，防止网页编辑又脏回去（体检C 1.2）
+    if field in DATE_FIELDS:
         value = _norm_date(value)
     conn.execute(f'UPDATE records SET "{field}"=?, updated_at=?, updated_by=? WHERE id=?',
                  (value, now, user, rid))
@@ -688,8 +688,8 @@ def api_cells():
             continue
         value = e.get("value", "")
         old_year = departure_year(conn, rid) if field == "发班时间" else ""
-        # 写入侧归一：发班时间统一 YYYY-MM-DD（体检C 1.2）
-        if field == "发班时间":
+        # 写入侧归一：所有日期字段统一 YYYY-MM-DD（体检C 1.2）
+        if field in DATE_FIELDS:
             value = _norm_date(value)
         conn.execute(f'UPDATE records SET "{field}"=?, updated_at=?, updated_by=? WHERE id=?',
                      (value, now, user, rid))
@@ -844,13 +844,20 @@ def _tuoshu_forbid():
     return jsonify({"ok": False, "msg": "无权限：托书生成仅限指定人员使用"}), 403
 
 
+# 所有"日期"类型字段（config.FIELD_DEFS 里 type=="date"）：发班时间 / 入堆场 / 入站
+# 写入时统一归一成 YYYY-MM-DD，防止网页/导入又脏回斜杠、点、反斜杠等分隔符。
+DATE_FIELDS = {f["name"] for f in config.FIELD_DEFS if f.get("type") == "date"}
+
+
 def _norm_date(s):
-    """日期归一成 YYYY-MM-DD。系统里「发班时间」存的是 2026/08/29 斜杠格式，
-    而引擎按 %Y-%m-%d 解析，不归一会直接抛异常。"""
+    """日期归一成 YYYY-MM-DD（库现行标准，横杠）。
+
+    历史数据/网页旧逻辑曾用 2026/08/29 斜杠格式，引擎按 %Y-%m-%d 解析会抛异常，
+    故统一归一。这里同时兼容 / . \\ 三种分隔符，归一后只保留横杠。"""
     s = str(s or "").strip()[:10]
     if not s:
         return ""
-    s = s.replace("/", "-").replace(".", "-")
+    s = s.replace("/", "-").replace(".", "-").replace("\\", "-")
     parts = s.split("-")
     if len(parts) != 3:
         return ""
@@ -1293,19 +1300,34 @@ def api_manifest_upload():
         return jsonify({"ok": False, "msg": "未收到文件"}), 400
     import io
     try:
-        from manifest_engine import parse_workbook, normalize_row, build_diff
+        from manifest_engine import parse_workbook_diagnostics, normalize_row, build_diff
         data = f.read()
-        headers, rows, ftype = parse_workbook(io.BytesIO(data))
+        headers, rows, ftype, diag = parse_workbook_diagnostics(io.BytesIO(data))
         parsed = [normalize_row(r, ftype) for r in rows]
         conn = get_db()
         diff = build_diff(conn, parsed)
         conn.close()
-        return jsonify({
+        resp = {
             "ok": True, "ftype": ftype, "row_count": len(parsed),
             "headers": [str(h) for h in headers], "diff": diff,
-        })
+            "diagnostics": diag,
+        }
+        # 当结果异常时，确保前端能看到诊断信息
+        if ftype == "unknown" or len(parsed) == 0:
+            resp["diagnostics"]["error_summary"] = (
+                diag.get("error") or
+                (f"文件已读取但未能识别为舱单/箱号模板。"
+                 f"表头行第{diag.get('header_row_index','?')}行，"
+                 f"共{diag.get('data_stats',{}).get('total_data_lines','?')}行数据，"
+                 f"解析有效行{diag.get('data_stats',{}).get('parsed_rows',0)}。"
+                 f"请检查：(1)文件是否为xlsx格式(非xls) (2)首行是否包含「客户编码」列 "
+                 f"(3)是否有多余的标题行遮挡表头")
+            )
+        return jsonify(resp)
     except Exception as e:
-        return jsonify({"ok": False, "msg": "解析失败: " + str(e)}), 500
+        import traceback
+        return jsonify({"ok": False, "msg": "解析失败: " + str(e),
+                        "traceback": traceback.format_exc()}), 500
 
 
 @app.route("/api/manifest/apply", methods=["POST"])

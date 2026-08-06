@@ -12,10 +12,11 @@ config*.local.*
 .vscode/
 
 # === 业务数据（生产数据，绝不上云） ===
-data/tuoshu_out/
-data/*.db*
-data/*.zip
-data/tuoshu_templates/
+data/tuoshu_out/     # 客户委托书生成输出
+data/*.db*           # 数据库 + 所有备份
+data/*.zip           # 邮件附件/数据包
+data/tuoshu_templates/ # 客户委托书模板
+data/edge/           # 兜底屏蔽可疑目录
 
 # === 备份文件 ===
 *.bak

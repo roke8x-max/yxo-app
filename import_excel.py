@@ -15,7 +15,7 @@ import sqlite3
 import datetime as _dt
 import config
 
-# 日期类型字段（导入时统一格式为 YYYY/MM/DD）
+# 日期类型字段（导入时统一格式为 YYYY-MM-DD，与库现行标准一致）
 _DATE_FIELDS = {f["name"] for f in config.FIELD_DEFS if f.get("type") == "date"}
 # 新增 / 导入时自动填充的默认值
 DEFAULTS = {f["name"]: f["default"] for f in config.FIELD_DEFS if f.get("default")}
@@ -72,21 +72,21 @@ def _build_col_map(header):
 
 
 def _norm_date(raw, year, dep_date=None):
-    """日期字段规范化：datetime/date -> YYYY/MM/DD；文本 '6-29入站' -> YYYY/MM/DD
+    """日期字段规范化：datetime/date -> YYYY-MM-DD；文本 '6-29入站' -> YYYY-MM-DD
 
     跨年修正：无年份文本用发班年补全后，若与发班日期相差 300 天以上，
     说明跨了年（如 12 月发班、次年 1 月入站），自动把年份 ±1 修正。"""
     if raw is None:
         return ""
     if isinstance(raw, (_dt.datetime, _dt.date)):
-        return raw.strftime("%Y/%m/%d")
+        return raw.strftime("%Y-%m-%d")
     s = str(raw).strip()
     if not s:
         return ""
     # 已经是完整日期串
     for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
-            return _dt.datetime.strptime(s[:19], fmt).strftime("%Y/%m/%d")
+            return _dt.datetime.strptime(s[:19], fmt).strftime("%Y-%m-%d")
         except Exception:
             continue
     # 文本形如 '6-29入站' / '7-1入站' -> 提取月-日，用发班年份补全年
@@ -101,7 +101,7 @@ def _norm_date(raw, year, dep_date=None):
                     y += 1
                 elif (cand - dep_date).days > 300:    # 补出的日期比发班晚太多 → 实际是上一年
                     y -= 1
-            return f"{y}/{mo:02d}/{dd:02d}"
+            return f"{y}-{mo:02d}-{dd:02d}"
         except Exception:
             pass
     return s  # 实在解析不出就原样保留（不丢数据）
@@ -216,7 +216,7 @@ def run_import(conn, filepath=None, train_type=None):
         if not lm or not str(lm).strip():
             dep = rec.get("发班时间", "")
             if dep:
-                m = str(dep)[:7].replace("/", "-")
+                m = str(dep)[:7].replace("/", "-").replace(".", "-")
                 if re.match(r"^\d{4}-\d{2}$", m):
                     rec["台账月份"] = m
         exist = conn.execute('SELECT id FROM records WHERE "客户编码"=?', (key,)).fetchone() if key else None

@@ -151,37 +151,64 @@ function openCellEditor(r, c, td, prefill) {
   if (c.name === "备注") setTimeout(() => autoGrow(editor), 0);
 }
 
-// 矩形选区 → TSV（回 Excel 可铺矩阵）。无选区返回 null
+// 选区 → TSV（回 Excel 可铺矩阵）。同时支持：①矩形 _selection ②Ctrl+单击多选 _multiSelection。
+// 两者并存时取并集（外接网格），保证冻结列（position:sticky）单元格也能被正确复制。无选区返回 null。
 function buildSelectionTSV() {
-  if (!_selection) return null;
-  const {r1,c1,r2,c2} = normSel(_selection);
   const cols = userColumns();
   const view = getView();
+  const cellVal = (ri, ci) => {
+    const c = cols[ci]; const rec = view[ri];
+    if (!c || !rec) return "";
+    return String(rec[c.name] == null ? "" : rec[c.name]);
+  };
+  const pts = [];
+  // ① 矩形选区 → 展开为全部格子坐标
+  if (_selection) {
+    const {r1,c1,r2,c2} = normSel(_selection);
+    for (let ri = r1; ri <= r2; ri++)
+      for (let ci = c1; ci <= c2; ci++) pts.push({ ri, ci });
+  }
+  // ② Ctrl+单击多选（散点）
+  if (_multiSelection && _multiSelection.size) {
+    _multiSelection.forEach((key) => {
+      try {
+        const [id, field] = JSON.parse(key);
+        const ri = view.findIndex((x) => x.id === id);
+        const ci = cols.findIndex((c) => c.name === field);
+        if (ri >= 0 && ci >= 0) pts.push({ ri, ci });
+      } catch (_) {}
+    });
+  }
+  if (!pts.length) return null;
+  const rmin = Math.min.apply(null, pts.map((p) => p.ri));
+  const rmax = Math.max.apply(null, pts.map((p) => p.ri));
+  const cmin = Math.min.apply(null, pts.map((p) => p.ci));
+  const cmax = Math.max.apply(null, pts.map((p) => p.ci));
+  const grid = {};
+  pts.forEach((p) => { grid[p.ri + "_" + p.ci] = cellVal(p.ri, p.ci); });
   const rows = [];
-  for (let ri = r1; ri <= r2; ri++) {
-    const rec = view[ri];
-    if (!rec) continue;
+  for (let r = rmin; r <= rmax; r++) {
     const line = [];
-    for (let ci = c1; ci <= c2; ci++) {
-      const c = cols[ci];
-      line.push(c ? String(rec[c.name] == null ? "" : rec[c.name]) : "");
-    }
+    for (let c = cmin; c <= cmax; c++) line.push(grid[r + "_" + c] != null ? grid[r + "_" + c] : "");
     rows.push(line.join("\t"));
   }
-  return rows.length ? rows.join("\n") : null;
+  return rows.join("\n");
 }
 let _loadingMore = false; // 无限滚动加载更多时的锁
 
 /* ---------- 字段类型工具 ---------- */
 function colDef(name) { return META.columns.find((c) => c.name === name); }
-function d2input(v) {   // "2026/08/08" -> "2026-08-08"（input[type=date] 用）
+function d2input(v) {   // 任意 "2026/08/08"、"2026.08.08"、"2026\08\08" -> "2026-08-08"（input[type=date] 用）
   const s = String(v || "").trim().split(" ")[0];
   if (!s) return "";
-  const m = s.replace(/\//g, "-").match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const m = s.replace(/[\\/]/g, "-").replace(/\./g, "-").match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
   return m ? m[1] + "-" + m[2].padStart(2, "0") + "-" + m[3].padStart(2, "0") : "";
 }
-function input2d(v) {   // "2026-08-08" -> "2026/08/08"（库里统一存 YYYY/MM/DD）
-  return v ? v.replace(/-/g, "/") : "";
+function input2d(v) {   // 统一归一成 YYYY-MM-DD（库标准：横杠）再保存；手动输入的 / . \ 也一并归一
+  if (!v) return "";
+  const s = String(v).trim().replace(/[\\/]/g, "-").replace(/\./g, "-");
+  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  return m ? m[1] + "-" + m[2].padStart(2, "0") + "-" + m[3].padStart(2, "0") : s;
 }
 
 /* 目的站等"可手输+筛选"的字段：用 datalist 组合框（既能选也能自由输入） */
@@ -831,7 +858,9 @@ function renderBody(reset = true) {
       const td = el("td", { class: tdCls, "data-id": r.id, "data-field": c.name, "data-ri": gidx, "data-ci": ci });
       // 平时显示纯文本；点击单元格才进入编辑态（不一直显示输入框）
       const renderText = () => {
-        const cur = r[c.name] == null ? "" : String(r[c.name]);
+        let cur = r[c.name] == null ? "" : String(r[c.name]);
+        // 日期字段显示时统一归一为 YYYY-MM-DD（防止旧数据残留 \ / . 等格式）
+        if (c.type === "date" && cur) cur = input2d(cur);
         td.innerHTML = "";
         const span = el("span", { class: "cell-text" }, cur);
         if (cur) span.title = cur;
@@ -1091,7 +1120,13 @@ function renderActive() {
   else if (STATE.view === "dash") renderDashboard();
   else renderStats();
   renderMonthTabs();   // #140：每次渲染同步全局月份条可见性（Dashboard/专列表格隐藏）
+  // 调试面板已移除
+  // _renderFilterDiag();
 }
+
+// ---- 筛选诊断面板（已停用）----
+/* let _diagEl = null;
+function _renderFilterDiag() { ... 已移除 ... } */
 function renderAll() {
   if (STATE.view === "dash") { renderDashboard(); return; }
   renderBody(); renderBoard(); renderTabs(); renderStats(); renderMonthTabs();
@@ -2567,11 +2602,11 @@ function init() {
     const active = document.activeElement;
     // 编辑中或焦点在输入框 → 让浏览器原生复制选中文本，不拦截
     if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) return;
-    // 网格有矩形选区 → 写 TSV 矩阵（回 Excel 可铺开）
+    // 网格有选区（矩形 / Ctrl+多选）→ 写 TSV 矩阵（回 Excel 可铺开）
     const tsv = buildSelectionTSV();
     if (tsv != null) {
-      const {r1,c1,r2,c2} = normSel(_selection);
-      const n = (r2 - r1 + 1) * (c2 - c1 + 1);
+      let n = 0;
+      tsv.split("\n").forEach((ln) => { n += ln.split("\t").length; });
       e.preventDefault();
       if (e.clipboardData) e.clipboardData.setData("text", tsv);
       _systemClipboard = tsv;
