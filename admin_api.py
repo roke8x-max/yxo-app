@@ -34,16 +34,68 @@ ADMIN_USER = "毛骁洋"
 # 服务状态 / 转发日志 / 配置管理（飞书表）仍仅 ADMIN_USER 可用。
 LIMITED_ADMINS = {"杨雅雯", "冯茜", "韩文豪"}
 
-# ---------- 加载 WeComBot 的飞书配置（显式路径，避开模块名冲突） ----------
-_spec = importlib.util.spec_from_file_location("wb_config", r"D:\YXO_DATA\WeComBot\config.py")
-wb = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(wb)
+# ---------- 加载外部模块（可配置路径 + 优雅降级，2026-08-04 dev 改造） ----------
+# 原实现硬编码 D:\YXO_DATA\{WeComBot,MailBots}\*.py，本机 dev 环境无法 import。
+# 新实现：路径可经环境变量 / config_local.py 配置；文件缺失时加载"虚拟模块"降级，
+#         函数内所有 wb.XXX / atomic_write_json(...) 调用保持原样即可工作，
+#         飞书类接口因凭据为空在本机失败（dev 不调用），生产环境有真文件则完全不变。
+try:
+    import config_local  # 仅本地存在（.gitignore 屏蔽），生产/CI 无此文件
+except ImportError:
+    config_local = None
 
-# 公共原子写工具（来自 MailBots/common_io.py，单一实现；含 Windows 文件占用回退）
-_common_io_spec = importlib.util.spec_from_file_location("common_io", r"D:\YXO_DATA\MailBots\common_io.py")
-_common_io_mod = importlib.util.module_from_spec(_common_io_spec)
-_common_io_spec.loader.exec_module(_common_io_mod)
-atomic_write_json = _common_io_mod.atomic_write_json
+
+def _resolve_path(env_name, local_attr, default):
+    """路径解析优先级：环境变量 > config_local.<attr> > 默认 D 盘路径"""
+    if os.environ.get(env_name):
+        return os.environ[env_name]
+    if config_local is not None and hasattr(config_local, local_attr):
+        return getattr(config_local, local_attr)
+    return default
+
+
+def _load_optional_module(name, path):
+    """延迟加载外部模块：文件不存在或导入失败时返回 None（由调用方降级处理）。"""
+    if not os.path.exists(path):
+        print(f"[admin_api] WARNING: 外部模块 {path} 不存在，使用虚拟模块降级（dev 环境预期）")
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as e:
+        print(f"[admin_api] WARNING: 外部模块 {path} 加载失败: {e}，使用虚拟模块降级")
+        return None
+
+
+def _make_dummy_wb():
+    """虚拟飞书配置模块：所有属性返回空串，避免 wb.XXX 在 dev 环境 AttributeError。"""
+    import types
+    m = types.SimpleNamespace()
+    for _a in ("TABLE_CONFIG", "TABLE_DSK_CONFIG", "TABLE_LOG",
+               "FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_APP_TOKEN"):
+        setattr(m, _a, "")
+    return m
+
+
+def _fallback_atomic_write_json(path, data):
+    """无 common_io 时的简单实现（dev 环境用，无 Windows 文件占用回退）。"""
+    import tempfile, os
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+WECOMBOT_CONFIG_PATH = _resolve_path(
+    "WECOMBOT_CONFIG_PATH", "WECOMBOT_CONFIG_PATH", r"D:\YXO_DATA\WeComBot\config.py")
+COMMON_IO_PATH = _resolve_path(
+    "MAILBOTS_COMMON_IO_PATH", "MAILBOTS_COMMON_IO_PATH", r"D:\YXO_DATA\MailBots\common_io.py")
+
+wb = _load_optional_module("wb_config", WECOMBOT_CONFIG_PATH) or _make_dummy_wb()
+_common_io_mod = _load_optional_module("common_io", COMMON_IO_PATH)
+atomic_write_json = getattr(_common_io_mod, "atomic_write_json", None) or _fallback_atomic_write_json
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
