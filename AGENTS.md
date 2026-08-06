@@ -28,15 +28,15 @@
 1. **绝不**修改 `data/yxo.db`（生产数据，由人手动管）
 2. **绝不**修改 `config_local.py`（含企业微信 webhook URL、邮箱密码等敏感信息）
 3. **绝不**把含 `客户名 / 收发货人 / 运价 / 提单号` 的真实数据写入 patch 或测试用例——必须脱敏
-4. **绝不**直接 commit 到 main 分支——只能在 `feature/*` 或 `fix/*` 分支上工作
+4. **绝不**在服务器生产目录 `D:\YXO_DATA\yxo_app` 改代码——那里只跑业务，开发一律在 `E:\yxo_app_dev`
 5. **绝不**改 `requirements.txt` 里的核心依赖版本（requests、flask、sqlalchemy 等），除非用户明确同意
 
 ## 推荐工作流
-- 新需求 → 新建分支 `feature/YYYY-MM-DD-简短描述`
-- bug 修复 → 新建分支 `fix/YYYY-MM-DD-简短描述`
-- 改完跑 `python -m pytest tests/` （如果有）
-- 改完输出 diff 摘要给用户 review
-- 用户说"OK"或"合并"才能合到 main
+- **分支策略：只用 `main` 一条分支**，不开 `feature/*` / `fix/*` / `dev`（完整理由见 WORKFLOW.md 第三章）
+- 隔离靠的是「不同机器各有一份仓库」，不是分支：没 push 之前谁也看不见谁
+- commit 勤一点（存档，只在本机）、push 慎一点（发布，功能确认后再推）
+- 改完输出 diff 摘要给用户 review，用**业务语言**说清改了什么效果
+- 完整流程、部署方式、环境配置、故障自查 → 一律以 **WORKFLOW.md 为准**
 
 ## 沟通风格
 - 简体中文回复
