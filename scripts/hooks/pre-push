@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# pre-push hook —— 拦截直接推送到 main 的操作
+#
+# 为什么需要它：
+#   GitHub 免费版的私有仓库开不了服务端分支保护，
+#   所以用本地 hook 达到同样效果：main 只能通过 Pull Request 合入。
+#
+# 安装：在仓库根目录执行
+#   powershell -ExecutionPolicy Bypass -File scripts\install-hooks.ps1
+#
+
+while read -r local_ref local_sha remote_ref remote_sha
+do
+	if [ "$remote_ref" = "refs/heads/main" ]; then
+		echo ""
+		echo "  ======================================================"
+		echo "   已拦截：不允许直接 push 到 main"
+		echo "  ======================================================"
+		echo ""
+		echo "  main 是生产分支，只接受来自 dev 的 Pull Request。"
+		echo ""
+		echo "  正确做法："
+		echo "    git checkout dev"
+		echo "    git push origin dev"
+		echo "    gh pr create --base main --head dev --fill"
+		echo "    （然后等骁洋在 GitHub 上点合并）"
+		echo ""
+		echo "  只有生产事故抢修时才允许绕过："
+		echo "    git push --no-verify origin main"
+		echo "  绕过后必须立刻告诉骁洋，并把改动同步回 dev。"
+		echo ""
+		exit 1
+	fi
+done
+
+exit 0

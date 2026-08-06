@@ -12,11 +12,26 @@ config*.local.*
 .vscode/
 
 # === 业务数据（生产数据，绝不上云） ===
-data/tuoshu_out/     # 客户委托书生成输出
-data/*.db*           # 数据库 + 所有备份
-data/*.zip           # 邮件附件/数据包
-data/tuoshu_templates/ # 客户委托书模板
-data/edge/           # 兜底屏蔽可疑目录
+# 注意：.gitignore 不支持行尾注释！写成 "data/xxx/  # 说明" 的话
+# 整行（含空格和井号）会被当成路径，规则直接失效。注释必须独立成行。
+# 客户委托书生成输出
+data/tuoshu_out/
+# 客户委托书模板
+data/tuoshu_templates/
+# 兜底屏蔽可疑目录
+data/edge/
+# 数据库及其所有备份
+data/*.db*
+# 邮件附件 / 数据包
+data/*.zip
+data/*.rar
+data/*.7z
+# 兜底：data 目录下的一切文档格式，都可能含客户名/运价/提单号
+data/*.docx
+data/*.doc
+data/*.pdf
+data/*.csv
+data/*.json
 
 # === 备份文件 ===
 *.bak
@@ -41,3 +56,9 @@ openclaw-workspace-state.json
 
 # === Windows 保留设备名幻象（nul 无法真实删除，仅 git status 噪音） ===
 nul
+
+# === 部署脚本产生的本机状态文件 ===
+# deploy.ps1 用它记录"部署前是哪个版本"，rollback.ps1 靠它回滚，每台机器不同
+.last_deploy
+# 备份默认放在仓库外的 D:\YXO_DATA\backups，这条只是兜底
+backups/
