@@ -38,3 +38,6 @@ SOUL.md
 TOOLS.md
 USER.md
 openclaw-workspace-state.json
+
+# === Windows 保留设备名幻象（nul 无法真实删除，仅 git status 噪音） ===
+nul
