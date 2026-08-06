@@ -29,7 +29,7 @@
 2. **绝不**修改 `config_local.py`（含企业微信 webhook URL、邮箱密码等敏感信息）
 3. **绝不**把含 `客户名 / 收发货人 / 运价 / 提单号` 的真实数据写入 patch 或测试用例——必须脱敏
 4. **绝不**在服务器生产目录 `D:\YXO_DATA\yxo_app` 改代码——那里只跑业务，开发一律在 `E:\yxo_app_dev`
-5. **绝不**直接 push 到 `main`——`main` 只接受来自 `dev` 的 Pull Request（本地 pre-push hook 会拦截）
+5. **绝不**直接 push 到 `main`——`main` 只接受来自 `dev` 的 Pull Request（其他机器上 pre-push hook 会拦截；**本机 dev 盒 git 钩子当前整体不触发，必须靠纪律，绝不要手动 `git push origin main`**）
 6. **绝不**用 filebrowser / 远程桌面拖拽 / 手动复制的方式往服务器传代码——只能走 git
 7. **绝不**改 `requirements.txt` 里的核心依赖版本（requests、flask、sqlalchemy 等），除非用户明确同意
 
@@ -37,7 +37,8 @@
 - **分支策略：`dev` 开发 → Pull Request → `main` 生产**（完整说明见 WORKFLOW.md 第三章）
   - `dev` = 集成沙箱，允许有 bug，所有人往这里推
   - `main` = 生产真相，永远保持可运行，只能通过 PR 合入
-- 开工前先 `git checkout dev && git pull origin dev`，别基于旧代码开发
+- 开工前先 `git checkout dev && git sync`，别基于旧代码开发
+  （`git sync` 是本机专用别名 = fetch + 修复远端引用 + ff-merge，替代 `git pull`；原因见 WORKFLOW.md「⚠️ 本机 git bug 说明」）
 - commit 勤一点（存档，只在本机）、push 慎一点（发布，自测通过后再推）
 - 推之前必须本地跑一遍受影响的功能，不要把没验证的代码推上 dev
 - 申请上生产：`gh pr create --base main --head dev --fill`，等骁洋审核合并

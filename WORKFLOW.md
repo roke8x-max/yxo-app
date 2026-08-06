@@ -94,10 +94,19 @@ GitHub 仓库：`roke8x-max/yxo-app`（私有）
 
 ```powershell
 git checkout dev
-git pull origin dev
+git sync          # 取代 git pull / git fetch（见下方「⚠️ 本机 git bug 说明」）
 ```
 
+`git sync` = `git fetch` + 自动修复远端跟踪引用 + `git merge --ff-only @{upstream}`。
 **每次开工都要做。** 跳过这步 = 基于旧代码开发 = 待会儿一定冲突。
+
+> ⚠️ **本机 git bug 说明（必读）**
+> 本机 WorkBuddy 自带的 PortableGit 2.54.0 在改写 `.git/packed-refs` 时**静默失败**
+> （疑似 Windows Defender 拦截对 `packed-refs` 的删除/重命名，而 OS 层 rename 正常），
+> 导致每次 `git fetch` / `git pull` 推进 dev 后，`origin/dev`、`origin/main` 会变成
+> `[gone]` 或陈旧值，`git status` 跟踪断裂。**所以统一用 `git sync`，不要用 `git fetch`/`git pull`。**
+> 修复手段：`scripts/repair-refs.sh`（已被 `git sync` 自动调用）；根因修复需给仓库 `.git` 加
+> Defender 排除项（需管理员权限，问芙蕾雅）。详见 MEMORY.md「git ref 写入失效」一节。
 
 ### 4.2 边改边存档
 
@@ -145,7 +154,7 @@ git push origin dev
 `git pull` 时报 conflict，说明你和别人改了同一个地方。
 
 ```powershell
-git pull origin dev              # 报冲突
+git sync              # 报冲突
 git status                       # 看哪些文件冲突了
 # 打开冲突文件，找 <<<<<<< ======= >>>>>>> 三行标记
 # 手动决定保留哪部分，把三行标记全部删掉
@@ -203,7 +212,7 @@ gh pr merge --merge
 
 ```powershell
 git checkout dev
-git pull origin dev      # dev 此时和 main 一致了
+git sync      # dev 此时和 main 一致了
 ```
 
 ---
@@ -347,7 +356,7 @@ git config --global credential.helper store
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
 | push 时看到"已拦截：不允许直接 push 到 main" | 推错分支了 | `git checkout dev` 再推 |
-| `! [rejected] ... non-fast-forward` | 别人先推了，你本地落后 | `git pull origin dev` 解决冲突后再推 |
+| `! [rejected] ... non-fast-forward` | 别人先推了，你本地落后 | `git sync` 解决冲突后再推 |
 | `unable to auto-detect email address` | 没配 git 身份 | 见 9.3 |
 | `detected dubious ownership` | 目录属主和当前登录用户不一致 | `git config --global --add safe.directory '*'` |
 | push 卡住不动 / 超时 | 代理没配或 IP 变了 | 见 9.4，先 `Test-NetConnection` 验证 |
@@ -363,7 +372,7 @@ git config --global credential.helper store
 **开发（本机 / E 盘）**
 
 ```powershell
-git checkout dev && git pull origin dev     # 开工
+git checkout dev && git sync     # 开工
 git add . && git commit -m "fix: xxx"       # 存档（勤做）
 git push origin dev                          # 发布给队友（自测通过后）
 gh pr create --base main --head dev --fill   # 申请上生产

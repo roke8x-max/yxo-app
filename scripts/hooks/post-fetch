@@ -1,0 +1,17 @@
+#!/bin/sh
+# post-fetch — 在「钩子机制正常」的环境里，fetch 后自动修复远端引用。
+# 注意：本机 WorkBuddy PortableGit 2.54.0 实测不调用 post-fetch 钩子
+# （连同 pre-push 等钩子整体未被调用），故本机用 git alias "sync" 替代。
+# 此文件保留给 Linux 服务器（小叽）等钩子正常的環境，或作为备份。
+remote="$1"
+[ -z "$remote" ] && remote="origin"
+gitdir="$(git rev-parse --git-dir)" || exit 0
+refs="$(git ls-remote --refs "$remote" 'refs/heads/*' 2>/dev/null)" || exit 0
+[ -z "$refs" ] && exit 0
+printf '%s\n' "$refs" | while read -r sha ref; do
+    [ -z "$sha" ] && continue
+    branch="${ref#refs/heads/}"
+    mkdir -p "$gitdir/refs/remotes/$remote"
+    printf '%s\n' "$sha" > "$gitdir/refs/remotes/$remote/$branch"
+done
+exit 0
