@@ -1,11 +1,14 @@
+# 注意：gitattributes 是「后面的规则覆盖前面的」，
+# 所以通配规则必须写在最前面，特例写在后面。
+
+# 默认：文本文件交给 git 自动处理换行
+* text=auto
+
 # git hook 是 sh 脚本，必须保持 LF 换行。
-# 如果被转成 CRLF，在 Git Bash 里执行会报 "command not found"（行尾的 \r 被当成命令的一部分），
-# 结果就是 hook 静默失效，误推 main 时没人拦。
+# 如果被转成 CRLF，在 Git Bash 里执行会报 "command not found"
+# （行尾的 \r 被当成命令的一部分），结果是 hook 静默失效，误推 main 时没人拦。
 scripts/hooks/* text eol=lf
 
-# PowerShell 脚本在 Windows 上用 CRLF 最稳
+# PowerShell / 批处理脚本在 Windows 上用 CRLF 最稳
 *.ps1 text eol=crlf
 *.bat text eol=crlf
-
-# 其余文本文件交给 git 自动处理
-* text=auto
