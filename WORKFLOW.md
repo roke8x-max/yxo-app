@@ -50,7 +50,7 @@
 |---|---|
 | 只推 dev，不碰 main | 半成品代码进不了生产 |
 | PR 才能合 main | 每次进生产都有一次人工过目 |
-| 本地 hook 拦截直推 | 手滑推错分支会被当场拦下 |
+| 服务端分支保护拦截直推 main | main 由 GitHub 服务端强制，禁止直推，只能经 PR 合入 |
 | deploy.ps1 先备份 | 部署前数据库和配置有快照 |
 | rollback.ps1 | 出事 30 秒退回上一版 |
 | 禁用 filebrowser 传代码 | 不留任何绕过 git 的口子 |
@@ -67,7 +67,7 @@
 
 三个目录都是完整的 git 仓库，各自独立，**互不直接通信**——所有交流都经过 GitHub。
 
-GitHub 仓库：`roke8x-max/yxo-app`（私有）
+GitHub 仓库：`roke8x-max/yxo-app`（**公开仓库**，代码任何人可见；敏感信息一律走 `config_local.py` / 环境变量，代码内不硬编码）
 
 ---
 

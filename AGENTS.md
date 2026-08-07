@@ -29,7 +29,7 @@
 2. **绝不**修改 `config_local.py`（含企业微信 webhook URL、邮箱密码等敏感信息）
 3. **绝不**把含 `客户名 / 收发货人 / 运价 / 提单号` 的真实数据写入 patch 或测试用例——必须脱敏
 4. **绝不**在服务器生产目录 `D:\YXO_DATA\yxo_app` 改代码——那里只跑业务，开发一律在 `E:\yxo_app_dev`
-5. **绝不**直接 push 到 `main`——`main` 只接受来自 `dev` 的 Pull Request（其他机器上 pre-push hook 会拦截；**本机 dev 盒 git 钩子当前整体不触发，必须靠纪律，绝不要手动 `git push origin main`**）
+5. **绝不**直接 push 到 `main`——`main` 只接受来自 `dev` 的 Pull Request（**GitHub 服务端分支保护已强制禁止直推 main**，所有机器生效；本机 git 钩子实测不触发，故靠服务端保护即可，绝不要手动 `git push origin main`）
 6. **绝不**用 filebrowser / 远程桌面拖拽 / 手动复制的方式往服务器传代码——只能走 git
 7. **绝不**改 `requirements.txt` 里的核心依赖版本（requests、flask、sqlalchemy 等），除非用户明确同意
 
