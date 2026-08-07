@@ -706,7 +706,8 @@ def api_cells():
 # ====================== 时间戳回写接口（B方案P1：飞书→yxo.db 切换） ======================
 # 仅供本机 DSK/ATB 转发机器人调用，按「箱号」匹配最新未删除记录，写 dsk/ATB 列。
 # 带 token 校验，避免经 nginx 公网暴露被滥用。
-STAMP_TOKEN = "yxo_stamp_local_2026"
+# 令牌值来自 config.STAMP_TOKEN（环境变量 YXSTAMP_TOKEN 或 config_local.py 覆盖），代码内不再硬编码。
+STAMP_TOKEN = config.STAMP_TOKEN
 
 @app.route("/api/stamp", methods=["POST"])
 def api_stamp():

@@ -14,6 +14,11 @@ DB_PATH = os.path.join(DATA_DIR, "yxo.db")
 # 内部监听端口（由 nginx 的 /yxo/ 反代，无需新增公网端口）
 PORT = 5011
 
+# 时间戳回写接口（/api/stamp）校验令牌：经 nginx 公网暴露时防滥用。
+# 生产值请写到 config_local.py（不入库）覆盖，或设环境变量 YXSTAMP_TOKEN。
+# 下面的默认值是本地开发占位，仅本机可用，切勿用于生产公网环境。
+STAMP_TOKEN = os.environ.get("YXSTAMP_TOKEN", "yxo_stamp_local_2026")
+
 # Excel 数据源（首次启动 / 点"导入"时读取）
 IMPORT_FILE = r"D:\YXO_DATA\output\八月记录汇总.xlsx"
 
