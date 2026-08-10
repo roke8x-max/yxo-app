@@ -86,6 +86,8 @@ GitHub 仓库：`roke8x-max/yxo-app`（**公开仓库**，代码任何人可见�
 >
 > **另外提醒一句**：分支名不要带斜杠。之前有个 `dev/fix-admin-api-load` 分支，直接导致 `dev` 分支创建失败（git 的引用是按文件路径存的，`dev` 和 `dev/xxx` 不能共存），8/5 那次 `.git` 损坏也是它引起的。
 
+> **feature 分支命名**：临时从 `dev` 开功能分支时，用连字符 `feature-xxx-xiaoji`，**绝不用斜杠**（`feature/x` 会触发上面的 `.git` 损坏）。从 `dev` 拉、PR 回 `dev`，合并后删掉私人分支。
+
 ---
 
 ## 4. 日常开发（本机 / E 盘都一样）
@@ -94,19 +96,17 @@ GitHub 仓库：`roke8x-max/yxo-app`（**公开仓库**，代码任何人可见�
 
 ```powershell
 git checkout dev
-git sync          # 取代 git pull / git fetch（见下方「⚠️ 本机 git bug 说明」）
+git pull --ff-only origin dev     # 标准拉取；等价于 fetch + ff-merge
 ```
 
-`git sync` = `git fetch` + 自动修复远端跟踪引用 + `git merge --ff-only @{upstream}`。
+标准拉取就是 `git fetch origin` + `git merge --ff-only origin/dev`。
 **每次开工都要做。** 跳过这步 = 基于旧代码开发 = 待会儿一定冲突。
 
-> ⚠️ **本机 git bug 说明（必读）**
-> 本机 WorkBuddy 自带的 PortableGit 2.54.0 在改写 `.git/packed-refs` 时**静默失败**
-> （疑似 Windows Defender 拦截对 `packed-refs` 的删除/重命名，而 OS 层 rename 正常），
-> 导致每次 `git fetch` / `git pull` 推进 dev 后，`origin/dev`、`origin/main` 会变成
-> `[gone]` 或陈旧值，`git status` 跟踪断裂。**所以统一用 `git sync`，不要用 `git fetch`/`git pull`。**
-> 修复手段：`scripts/repair-refs.sh`（已被 `git sync` 自动调用）；根因修复需给仓库 `.git` 加
-> Defender 排除项（需管理员权限，问芙蕾雅）。详见 MEMORY.md「git ref 写入失效」一节。
+> ⚠️ **本机 git 引用损坏说明（历史，现已根治）**
+> 之前本机 WorkBuddy 自带的 PortableGit 在改写 `.git/packed-refs` 时**静默失败**，`origin/dev`、`origin/main` 会变成 `[gone]`。
+> 真因是**火绒(Huorong)实时防护**拦截了对 `packed-refs` 的删除/重命名（不是 Defender——Defender 当时已被火绒接管禁用，报 `0x800106ba`）。
+> **已根治**：在火绒「信任区 / 排除项」加入仓库 `.git` 路径后，git 原生 `fetch`/`pull` 恢复，不再需要 `git sync` 兜底（`git sync` 别名与 `scripts/repair-refs.sh` 现已无实际操作，保留无害）。
+> 若你机器未加排除项又出现 `[gone]`，把仓库 `.git` 加进火绒排除项即可，无需改用其他命令。
 
 ### 4.2 边改边存档
 
@@ -154,7 +154,7 @@ git push origin dev
 `git pull` 时报 conflict，说明你和别人改了同一个地方。
 
 ```powershell
-git sync              # 报冲突
+git pull --ff-only origin dev     # 报冲突（或 git fetch + merge）
 git status                       # 看哪些文件冲突了
 # 打开冲突文件，找 <<<<<<< ======= >>>>>>> 三行标记
 # 手动决定保留哪部分，把三行标记全部删掉
@@ -212,7 +212,7 @@ gh pr merge --merge
 
 ```powershell
 git checkout dev
-git sync      # dev 此时和 main 一致了
+git pull --ff-only origin dev     # dev 此时和 main 一致了
 ```
 
 ---
@@ -332,6 +332,8 @@ Test-NetConnection -ComputerName 10.183.1.185 -Port 7897
 
 看 `TcpTestSucceeded` 是不是 `True`。
 
+> **新方向（见 plans/01-remote-access-ladder.md）**：服务器后续改为**自身运行 mihomo 内核**直连出网（规则模式、内网 `10.0.0.0/8` 走 DIRECT），不再依赖本机 `10.183.1.185` 代理。落地前本条仍按上面本机代理配置执行。
+
 ### 9.5 配 GitHub 认证
 
 用 **PAT（个人访问令牌）**，不要走 OAuth 网页登录——服务器经代理访问，OAuth 会跳转到第三方域名，基本必超时。
@@ -356,7 +358,7 @@ git config --global credential.helper store
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
 | push 时看到"已拦截：不允许直接 push 到 main" | 推错分支了 | `git checkout dev` 再推 |
-| `! [rejected] ... non-fast-forward` | 别人先推了，你本地落后 | `git sync` 解决冲突后再推 |
+| `! [rejected] ... non-fast-forward` | 别人先推了，你本地落后 | `git pull --ff-only origin dev` 解决冲突后再推 |
 | `unable to auto-detect email address` | 没配 git 身份 | 见 9.3 |
 | `detected dubious ownership` | 目录属主和当前登录用户不一致 | `git config --global --add safe.directory '*'` |
 | push 卡住不动 / 超时 | 代理没配或 IP 变了 | 见 9.4，先 `Test-NetConnection` 验证 |
@@ -372,7 +374,7 @@ git config --global credential.helper store
 **开发（本机 / E 盘）**
 
 ```powershell
-git checkout dev && git sync     # 开工
+git checkout dev && git pull --ff-only origin dev     # 开工
 git add . && git commit -m "fix: xxx"       # 存档（勤做）
 git push origin dev                          # 发布给队友（自测通过后）
 gh pr create --base main --head dev --fill   # 申请上生产
@@ -390,7 +392,7 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1         # 出事�
 **关键位置**
 
 ```
-GitHub       roke8x-max/yxo-app（私有）
+GitHub       roke8x-max/yxo-app（公开）
 本机开发     C:\Users\Roke8x\Projects\yxo-app       dev
 服务器开发   E:\yxo_app_dev                          dev
 服务器生产   D:\YXO_DATA\yxo_app                     main
