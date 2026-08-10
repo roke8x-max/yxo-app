@@ -1,0 +1,19 @@
+# MailBots 本地密钥模板（不入库；复制为 config_local.py 后填真实值）
+# 飞书凭据(APP_ID/SECRET/TOKEN)来自 WeComBot/config，本文件仅放邮箱密码与 STAMP_TOKEN。
+# ⚠️ 真实密码请勿提交；config_local.py 已被 .gitignore 屏蔽。
+
+ACCOUNTS = {
+    "maoxiaoyang@cqtransit.com": "REPLACE_ME",
+    "yangyawen@cqtransit.com": "REPLACE_ME",
+    "fengqian@cqtransit.com": "REPLACE_ME",
+    "hanwenhao@cqtransit.com": "REPLACE_ME",
+}
+
+DSK_ACCOUNTS = {
+    "maoxiaoyang@cqtransit.com": "REPLACE_ME",
+    "yangyawen@cqtransit.com": "REPLACE_ME",
+    "fengqian@cqtransit.com": "REPLACE_ME",
+    "hanwenhao@cqtransit.com": "REPLACE_ME",
+}
+
+STAMP_TOKEN = "REPLACE_ME"

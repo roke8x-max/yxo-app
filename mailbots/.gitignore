@@ -1,0 +1,31 @@
+# === MailBots 运行时 / 敏感文件（不入库）===
+# 真实密钥（复制 config_local.py.example 得到，填真实值）
+config_local.py
+
+# 运行时状态
+*.db
+backoff_state.json
+pending_stamps.json
+LIVE
+
+# 机器人开关配置（运行时可变，含员工邮箱；模板后续补 config.example.json）
+*_robot_config.json
+syncer_config.json
+tracing_robot_config.json
+
+# 业务数据
+price_config.json
+price_config.json.bak_*
+price_backups/
+
+# 日志 / 缓存 / 临时
+logs/
+TracingLog/
+SyncerLog/
+error_logs/
+data/
+__pycache__/
+*.log
+*.bak_*
+*.tmp
+temp_sync_out.txt

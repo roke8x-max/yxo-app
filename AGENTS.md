@@ -37,8 +37,8 @@
 - **分支策略：`dev` 开发 → Pull Request → `main` 生产**（完整说明见 WORKFLOW.md 第三章）
   - `dev` = 集成沙箱，允许有 bug，所有人往这里推
   - `main` = 生产真相，永远保持可运行，只能通过 PR 合入
-- 开工前先 `git checkout dev && git sync`，别基于旧代码开发
-  （`git sync` 是本机专用别名 = fetch + 修复远端引用 + ff-merge，替代 `git pull`；原因见 WORKFLOW.md「⚠️ 本机 git bug 说明」）
+- 开工前先 `git checkout dev && git pull --ff-only origin dev`，别基于旧代码开发
+  （标准 `git fetch` + `git merge --ff-only`；本机曾因火绒实时防护拦截 `.git/packed-refs` 用过 `git sync` 别名，现已根治、原生 `git pull` 已恢复。`git sync` 仍保留为兼容别名，但不再必须）
 - commit 勤一点（存档，只在本机）、push 慎一点（发布，自测通过后再推）
 - 推之前必须本地跑一遍受影响的功能，不要把没验证的代码推上 dev
 - 申请上生产：`gh pr create --base main --head dev --fill`，等骁洋审核合并

@@ -22,6 +22,7 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
 import sqlite3
+import re
 import config  # 同目录 yxo_app 配置，提供本地库路径 DB_PATH
 
 from flask import Blueprint, request, jsonify, render_template
@@ -398,6 +399,132 @@ def _get_table_or_none(key, need_editable=False):
     return t
 
 
+# ====================== 本地配置表闭环（yxo.db bot_config，替代飞书） ======================
+# 背景：P4 已把路由数据从飞书迁到 yxo.db，机器人改读 yxo.db；但配置管理页仍写飞书导致闭环断裂。
+# 这里把 tracing_config / dsk_config 的增删改查改走 yxo.db，UI 加的路由机器人下次运行即生效。
+# 模型：tracing -> bot='tracking'（scope='train' 存 班列号->[公司]，scope='company' 存 公司->收件人）；
+#       dsk    -> bot in ('dsk','atb') scope='company'（DSK/ATB 共用历史表，写两边）。
+DB_TABLES = {
+    "tracing_config": {"label": "运踪配置表（按班列号）", "kind": "tracing",
+                       "fields": ["班列号", "公司名称", "收件人 (To)", "抄送人 (CC)"]},
+    "dsk_config":     {"label": "DSK/ATB 配置表（按公司）", "kind": "dsk",
+                       "fields": ["公司名称", "收件人 (To)", "抄送人 (CC)"]},
+}
+
+
+def _db_join_addrs(s):
+    try:
+        return ";".join(json.loads(s or "[]"))
+    except Exception:
+        return (s or "")
+
+
+def _db_parse_addrs(s):
+    if s is None:
+        return []
+    s = str(s).strip()
+    if not s:
+        return []
+    return [p.strip() for p in re.split(r"[;,]", s) if p.strip()]
+
+
+def _db_upsert_company(cur, bot, company, to_list, cc_list):
+    cur.execute(
+        """INSERT INTO bot_config(bot,scope,key,to_addrs,cc_addrs,source,updated_at)
+           VALUES(?,?,?,?,?,'manual',datetime('now','localtime'))
+           ON CONFLICT(bot,scope,key) DO UPDATE SET
+             to_addrs=excluded.to_addrs, cc_addrs=excluded.cc_addrs,
+             source='manual', updated_at=excluded.updated_at""",
+        (bot, "company", company,
+         json.dumps(to_list, ensure_ascii=False), json.dumps(cc_list, ensure_ascii=False)))
+
+
+def _db_cfg_list(kind):
+    conn = sqlite3.connect(config.DB_PATH); cur = conn.cursor()
+    rows = []
+    if kind == "tracing":
+        comp = {k: (to, cc) for k, to, cc in cur.execute(
+            "SELECT key,to_addrs,cc_addrs FROM bot_config WHERE bot='tracking' AND scope='company'")}
+        for tid, ex in cur.execute(
+                "SELECT key,extra FROM bot_config WHERE bot='tracking' AND scope='train' ORDER BY CAST(key AS INT)"):
+            try:
+                companies = json.loads(ex or "{}").get("companies", [])
+            except Exception:
+                companies = []
+            for c in companies:
+                to, cc = comp.get(c, ("[]", "[]"))
+                rows.append({"record_id": "TR|%s|%s" % (tid, c), "班列号": tid, "公司名称": c,
+                             "收件人 (To)": _db_join_addrs(to), "抄送人 (CC)": _db_join_addrs(cc)})
+    else:
+        for k, to, cc in cur.execute(
+                "SELECT key,to_addrs,cc_addrs FROM bot_config WHERE bot='dsk' AND scope='company' ORDER BY key"):
+            rows.append({"record_id": "DSK|%s" % k, "公司名称": k,
+                         "收件人 (To)": _db_join_addrs(to), "抄送人 (CC)": _db_join_addrs(cc)})
+    conn.close()
+    return rows
+
+
+def _db_cfg_upsert_tracing(train, company, to_list, cc_list):
+    conn = sqlite3.connect(config.DB_PATH); cur = conn.cursor()
+    _db_upsert_company(cur, "tracking", company, to_list, cc_list)
+    row = cur.execute("SELECT extra FROM bot_config WHERE bot='tracking' AND scope='train' AND key=?",
+                      (train,)).fetchone()
+    if row:
+        try:
+            comps = json.loads(row[0] or "{}").get("companies", [])
+        except Exception:
+            comps = []
+        if company not in comps:
+            comps.append(company)
+        cur.execute("UPDATE bot_config SET extra=?, updated_at=datetime('now','localtime') "
+                    "WHERE bot='tracking' AND scope='train' AND key=?",
+                    (json.dumps({"companies": comps}, ensure_ascii=False), train))
+    else:
+        cur.execute("INSERT INTO bot_config(bot,scope,key,to_addrs,cc_addrs,extra,source,updated_at) "
+                    "VALUES('tracking','train',?,'[]','[]',?,'manual',datetime('now','localtime'))",
+                    (train, json.dumps({"companies": [company]}, ensure_ascii=False)))
+    conn.commit(); conn.close()
+
+
+def _db_cfg_upsert_dsk(company, to_list, cc_list):
+    conn = sqlite3.connect(config.DB_PATH); cur = conn.cursor()
+    _db_upsert_company(cur, "dsk", company, to_list, cc_list)
+    _db_upsert_company(cur, "atb", company, to_list, cc_list)   # DSK/ATB 共用，写两边
+    conn.commit(); conn.close()
+    _clear_dsk_cache()
+
+
+def _db_cfg_delete(kind, record_id):
+    conn = sqlite3.connect(config.DB_PATH); cur = conn.cursor()
+    if kind == "tracing":
+        parts = record_id.split("|")
+        if len(parts) == 3:
+            _, train, company = parts
+            row = cur.execute("SELECT extra FROM bot_config WHERE bot='tracking' AND scope='train' AND key=?",
+                              (train,)).fetchone()
+            if row:
+                try:
+                    comps = json.loads(row[0] or "{}").get("companies", [])
+                except Exception:
+                    comps = []
+                comps = [c for c in comps if c != company]
+                if comps:
+                    cur.execute("UPDATE bot_config SET extra=?, updated_at=datetime('now','localtime') "
+                                "WHERE bot='tracking' AND scope='train' AND key=?",
+                                (json.dumps({"companies": comps}, ensure_ascii=False), train))
+                else:
+                    cur.execute("DELETE FROM bot_config WHERE bot='tracking' AND scope='train' AND key=?",
+                                (train,))
+    else:
+        parts = record_id.split("|")
+        if len(parts) == 2:
+            _, company = parts
+            cur.execute("DELETE FROM bot_config WHERE bot IN ('dsk','atb') AND scope='company' AND key=?",
+                        (company,))
+            _clear_dsk_cache()
+    conn.commit(); conn.close()
+
+
 @admin_bp.route("/api/admin/table/<key>", methods=["GET"])
 def api_table_list(key):
     if not _check_user():
@@ -405,6 +532,13 @@ def api_table_list(key):
     t = _get_table_or_none(key)
     if not t:
         return jsonify({"ok": False, "msg": "未知配置表"}), 404
+    if key in DB_TABLES:                      # 本地 yxo.db 闭环（替代飞书）
+        try:
+            rows = _db_cfg_list(DB_TABLES[key]["kind"])
+        except Exception as e:
+            return jsonify({"ok": False, "msg": "读取失败：" + str(e)})
+        return jsonify({"ok": True, "label": DB_TABLES[key]["label"],
+                        "fields": DB_TABLES[key]["fields"], "rows": rows})
     try:
         items = _feishu_list_records(t["table_id"])
     except Exception as e:
@@ -437,6 +571,27 @@ def api_table_create(key):
     if not t:
         return jsonify({"ok": False, "msg": "该表不可编辑"}), 400
     data = request.get_json(force=True, silent=True) or {}
+    if key in DB_TABLES:                      # 本地 yxo.db 闭环（替代飞书）
+        try:
+            f = {k: str(v).strip() for k, v in (data.get("fields") or {}).items()}
+            kind = DB_TABLES[key]["kind"]
+            if kind == "tracing":
+                train = f.get("班列号", ""); company = f.get("公司名称", "")
+                if not train or not company:
+                    return jsonify({"ok": False, "msg": "班列号与公司名称必填"}), 400
+                _db_cfg_upsert_tracing(train, company,
+                                      _db_parse_addrs(f.get("收件人 (To)", "")),
+                                      _db_parse_addrs(f.get("抄送人 (CC)", "")))
+            else:
+                company = f.get("公司名称", "")
+                if not company:
+                    return jsonify({"ok": False, "msg": "公司名称必填"}), 400
+                _db_cfg_upsert_dsk(company,
+                                   _db_parse_addrs(f.get("收件人 (To)", "")),
+                                   _db_parse_addrs(f.get("抄送人 (CC)", "")))
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"ok": False, "msg": "写入异常：" + str(e)})
     fields = {k: str(v) for k, v in (data.get("fields") or {}).items() if k in t["fields"]}
     if not fields:
         return jsonify({"ok": False, "msg": "没有可写入的字段"}), 400
@@ -460,9 +615,41 @@ def api_table_update(key, record_id):
     if not t:
         return jsonify({"ok": False, "msg": "该表不可编辑"}), 400
     data = request.get_json(force=True, silent=True) or {}
+    if key in DB_TABLES:                      # 本地 yxo.db 闭环（替代飞书）
+        try:
+            f = {k: str(v).strip() for k, v in (data.get("fields") or {}).items()}
+            kind = DB_TABLES[key]["kind"]
+            to = _db_parse_addrs(f.get("收件人 (To)", ""))
+            cc = _db_parse_addrs(f.get("抄送人 (CC)", ""))
+            if kind == "tracing":
+                parts = record_id.split("|")
+                if len(parts) != 3:
+                    return jsonify({"ok": False, "msg": "非法记录标识"}), 400
+                _, train, old_company = parts
+                new_company = (f.get("公司名称", "") or old_company).strip()
+                conn = sqlite3.connect(config.DB_PATH); cur = conn.cursor()
+                _db_upsert_company(cur, "tracking", new_company, to, cc)
+                if new_company != old_company:
+                    row = cur.execute("SELECT extra FROM bot_config WHERE bot='tracking' AND scope='train' AND key=?", (train,)).fetchone()
+                    comps = json.loads(row[0] or "{}").get("companies", []) if row else []
+                    comps = [c for c in comps if c != old_company]
+                    if new_company not in comps:
+                        comps.append(new_company)
+                    if comps:
+                        cur.execute("UPDATE bot_config SET extra=?, updated_at=datetime('now','localtime') WHERE bot='tracking' AND scope='train' AND key=?",
+                                    (json.dumps({"companies": comps}, ensure_ascii=False), train))
+                    else:
+                        cur.execute("DELETE FROM bot_config WHERE bot='tracking' AND scope='train' AND key=?", (train,))
+                conn.commit(); conn.close()
+            else:
+                company = (f.get("公司名称", "") or record_id.split("|")[-1]).strip()
+                _db_cfg_upsert_dsk(company, to, cc)
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"ok": False, "msg": "更新异常：" + str(e)})
     fields = {k: str(v) for k, v in (data.get("fields") or {}).items() if k in t["fields"]}
     if not fields:
-        return jsonify({"ok": False, "msg": "没有可更新的字段"}), 400
+        return jsonify({"ok": False, "msg": "没有可写入的字段"}), 400
     try:
         r = _feishu_req("PUT", f"/bitable/v1/apps/{wb.FEISHU_APP_TOKEN}/tables/{t['table_id']}/records/{record_id}",
                         payload={"fields": fields})
@@ -482,6 +669,12 @@ def api_table_delete(key, record_id):
     t = _get_table_or_none(key, need_editable=True)
     if not t:
         return jsonify({"ok": False, "msg": "该表不可编辑"}), 400
+    if key in DB_TABLES:                      # 本地 yxo.db 闭环（替代飞书）
+        try:
+            _db_cfg_delete(DB_TABLES[key]["kind"], record_id)
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"ok": False, "msg": "删除异常：" + str(e)})
     try:
         r = _feishu_req("DELETE", f"/bitable/v1/apps/{wb.FEISHU_APP_TOKEN}/tables/{t['table_id']}/records/{record_id}")
         if r.get("code") != 0:
