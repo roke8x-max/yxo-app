@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YXO 订舱系统 — 架构图 v2026-08-10</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+  .header {
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+    padding: 16px 24px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header h1 {
+    font-size: 18px;
+    color: #58a6ff;
+    margin-bottom: 4px;
+  }
+  .header .meta {
+    font-size: 12px;
+    color: #8b949e;
+  }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .tab {
+    padding: 8px 20px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid #30363d;
+    background: #21262d;
+    color: #8b949e;
+    transition: all .2s;
+  }
+  .tab.active {
+    background: #1f6feb;
+    color: #fff;
+    border-color: #1f6feb;
+  }
+  .tab:hover:not(.active) {
+    border-color: #58a6ff;
+    color: #c9d1d9;
+  }
+  .panel {
+    display: none;
+    padding: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  .panel.active {
+    display: block;
+  }
+
+  .d1-container {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .d1-legend {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .d1-legend .item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .d1-legend .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+  }
+  .d1-lane {
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #161b22;
+  }
+  .d1-lane-header {
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .d1-lane-body {
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .d1-box {
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    text-align: center;
+    position: relative;
+    min-width: 110px;
+    border: 1px solid transparent;
+    line-height: 1.5;
+  }
+  .d1-box .badge {
+    position: absolute;
+    top: -6px; right: -6px;
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 8px;
+    font-weight: 700;
+    color: #fff;
+  }
+  .d1-arrow {
+    color: #8b949e;
+    font-size: 16px;
+    font-weight: bold;
+  }
+  .d1-note {
+    background: #0c1c36;
+    border-left: 3px solid #1f6feb;
+    padding: 10px 14px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: #8b949e;
+    border-radius: 0 6px 6px 0;
+  }
+  .d1-note.warn { border-left-color: #da3633; background: #3d0d0d; }
+  .d1-note.ok { border-left-color: #238636; background: #0d2818; }
+
+  .bg-human { background: #3d2300; border-color: #9e6a03; color: #d29922; }
+  .bg-auto  { background: #0d2818; border-color: #238636; color: #3fb950; }
+  .bg-sys   { background: #0c1c36; border-color: #1f6feb; color: #58a6ff; }
+  .bg-data  { background: #211836; border-color: #8957e5; color: #a371f7; }
+  .bg-net   { background: #0d2818; border-color: #2ea043; color: #7ee787; }
+  .bg-warn  { background: #3d0d0d; border-color: #da3633; color: #f85149; }
+  .badge-human { background: #9e6a03; }
+  .badge-auto  { background: #238636; }
+  .badge-sys   { background: #1f6feb; }
+
+  .d2-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .d2-layer {
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #161b22;
+  }
+  .d2-header {
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .d2-body {
+    padding: 14px 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+  }
+  .d2-card {
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    border: 1px solid transparent;
+  }
+  .d2-card strong {
+    display: block;
+    font-size: 13px;
+    margin-bottom: 6px;
+  }
+  .d2-card ul {
+    margin: 6px 0 0 16px;
+    font-size: 11px;
+    color: #8b949e;
+  }
+  .d2-card li { margin-bottom: 3px; }
+  .d2-card .tag {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    font-weight: 600;
+  }
+  .tag-new { background: #23863630; color: #3fb950; border: 1px solid #238636; }
+  .tag-mod { background: #9e6a0330; color: #d29922; border: 1px solid #9e6a03; }
+  .tag-del { background: #da363330; color: #f85149; border: 1px solid #da3633; text-decoration: line-through; }
+  .tag-keep { background: #1f6feb30; color: #58a6ff; border: 1px solid #1f6feb; }
+  .d2-arrow {
+    text-align: center;
+    color: #8b949e;
+    font-size: 20px;
+    margin: 2px 0;
+  }
+  .d2-note {
+    background: #0c1c36;
+    border-left: 3px solid #1f6feb;
+    padding: 10px 14px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: #8b949e;
+    border-radius: 0 6px 6px 0;
+  }
+  .d2-note.warn { border-left-color: #da3633; background: #3d0d0d; }
+  .d2-note.ok { border-left-color: #238636; background: #0d2818; }
+
+  @media print {
+    body { background: #fff; color: #000; }
+    .header { background: #f5f5f5; border-bottom: 1px solid #ccc; }
+    .d1-lane, .d2-layer { background: #fff; border: 1px solid #ccc; }
+    .d1-lane-header, .d2-header { color: #000; }
+    .d1-box, .d2-card { border: 1px solid #ccc; color: #000; }
+    .bg-human { background: #fff8e1; border-color: #f9a825; color: #000; }
+    .bg-auto { background: #e8f5e9; border-color: #43a047; color: #000; }
+    .bg-sys { background: #e3f2fd; border-color: #1e88e5; color: #000; }
+    .bg-data { background: #f3e5f5; border-color: #8e24aa; color: #000; }
+    .bg-net { background: #e8f5e9; border-color: #43a047; color: #000; }
+    .bg-warn { background: #ffebee; border-color: #e53935; color: #000; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>YXO 订舱数据管理系统 — 架构图 v2026-08-10</h1>
+  <div class="meta">基于 00-项目说明 / 01-remote-access / 02-n8n-cicd / 03-spec-optimization 最新决策绘制</div>
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab(0)">图1 · 分布式开发全流程</div>
+    <div class="tab" onclick="switchTab(1)">图2 · 订舱数据管理新架构</div>
+  </div>
+</div>
+
+<!-- ==================== PANEL 1 ==================== -->
+<div class="panel active" id="panel-0">
+  <div class="d1-container">
+
+    <div class="d1-legend">
+      <div class="item"><span class="dot" style="background:#d29922"></span>人工操作</div>
+      <div class="item"><span class="dot" style="background:#3fb950"></span>自动处理</div>
+      <div class="item"><span class="dot" style="background:#58a6ff"></span>系统/平台</div>
+      <div class="item"><span class="dot" style="background:#a371f7"></span>数据/配置</div>
+      <div class="item"><span class="dot" style="background:#f85149"></span>安全红线</div>
+    </div>
+
+    <!-- Lane 1: Task -->
+    <div class="d1-lane">
+      <div class="d1-lane-header bg-human">任务层 — 需求来源与下发（ZeroTier 解耦）</div>
+      <div class="d1-lane-body">
+        <div class="d1-box bg-human">骁洋/芙蕾雅<br>提出需求<span class="badge badge-human">人工</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-sys">GitHub <code>tasks/</code><br>任务目录<span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-auto">n8n 轮询<br>读取任务<span class="badge badge-auto">自动</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-sys">企微通知<br>任务已下发<span class="badge badge-sys">系统</span></div>
+        <div style="flex:1"></div>
+        <div class="d1-box bg-human">企微审批<br>骁洋确认部署<span class="badge badge-human">人工</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-sys">WeComBot :5001<br>回调写 approve<span class="badge badge-sys">系统</span></div>
+      </div>
+    </div>
+
+    <!-- Lane 2: Local Dev -->
+    <div class="d1-lane">
+      <div class="d1-lane-header bg-sys">本机开发环境（芙蕾雅 / 骁洋）— C:\Users\Roke8x\Projects\yxo-app</div>
+      <div class="d1-lane-body">
+        <div class="d1-box bg-sys">git checkout<br><code>dev</code><span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-auto">git pull<br>origin dev<span class="badge badge-auto">自动</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-sys">切出 <code>feature-5.x-xxx</code><br>（连字符，禁斜杠）<span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-human">OpenCode TUI<br>编码开发<span class="badge badge-human">人工</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-human">本地 pytest<br>自测通过<span class="badge badge-human">人工</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-sys">git push<br><code>origin dev</code><span class="badge badge-sys">系统</span></div>
+      </div>
+    </div>
+
+    <!-- Lane 3: GitHub -->
+    <div class="d1-lane">
+      <div class="d1-lane-header bg-data">GitHub — 唯一真相源（公网，ZeroTier 无关）</div>
+      <div class="d1-lane-body">
+        <div class="d1-box bg-data"><code>dev</code> 分支<br>集成沙箱<span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&harr;</div>
+        <div class="d1-box bg-auto">GitHub Actions<br>pytest 自动测试<span class="badge badge-auto">自动</span></div>
+        <div class="d1-arrow">&harr;</div>
+        <div class="d1-box bg-auto">n8n WF1<br>AI 自动 Review<span class="badge badge-auto">自动</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-human">骁洋 PR 审核<br>Files changed<span class="badge badge-human">人工</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-warn"><code>main</code> 分支<br>生产真相<span class="badge badge-sys">系统</span></div>
+        <div style="flex:1"></div>
+        <div class="d1-box bg-warn">服务端分支保护<br>禁止直推 main<span class="badge badge-sys">系统</span></div>
+      </div>
+    </div>
+
+    <!-- Lane 4: Server Dev -->
+    <div class="d1-lane">
+      <div class="d1-lane-header bg-sys">服务器开发环境（小叽）— E:\yxo_app_dev</div>
+      <div class="d1-lane-body">
+        <div class="d1-box bg-sys">git checkout<br><code>dev</code><span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-auto">git pull<br><code>origin dev</code><span class="badge badge-auto">自动</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-sys">切出 <code>feature-5.x-xxx-xiaoji</code><br>独立 feature<span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-human">OpenCode / 小叽<br>编码开发<span class="badge badge-human">人工</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-human">本地验证<br>自测通过<span class="badge badge-human">人工</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-sys">git push<br><code>origin dev</code><span class="badge badge-sys">系统</span></div>
+      </div>
+    </div>
+
+    <!-- Lane 5: Production -->
+    <div class="d1-lane">
+      <div class="d1-lane-header bg-warn">生产环境（小叽）— D:\YXO_DATA\yxo_app — 只读！</div>
+      <div class="d1-lane-body">
+        <div class="d1-box bg-auto">n8n WF2<br>PR merged 触发<span class="badge badge-auto">自动</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-sys">企微通知<br>「可部署」<span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-human">骁洋企微审批<br>"确认部署"<span class="badge badge-human">人工</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-auto">WeComBot :5001<br>回调写入 approve<span class="badge badge-auto">自动</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-sys"><code>deploy.ps1</code><br>备份 + 拉 main<span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-warn">重启 Flask<br>业务恢复<span class="badge badge-sys">系统</span></div>
+      </div>
+    </div>
+
+    <!-- Lane 6: Infra -->
+    <div class="d1-lane">
+      <div class="d1-lane-header bg-net">远程通道与基础设施（分层兜底）</div>
+      <div class="d1-lane-body">
+        <div class="d1-box bg-net">SSH :22<br>计划安装·主力通道<span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-net">RDP :3389<br>仅 ZT 网段<span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-net">RustDesk<br>ZT 挂了用<span class="badge badge-sys">系统</span></div>
+        <div class="d1-arrow">&rarr;</div>
+        <div class="d1-box bg-net">智能插座<br>硬重启<span class="badge badge-human">人工</span></div>
+        <div style="width:20px"></div>
+        <div class="d1-box bg-auto">watchdog<br>5011/5001 守护<span class="badge badge-auto">自动</span></div>
+        <div class="d1-box bg-auto">mihomo<br>服务器梯子（禁 TUN）<span class="badge badge-auto">自动</span></div>
+        <div class="d1-box bg-auto">nssm<br>服务化<span class="badge badge-auto">自动</span></div>
+      </div>
+    </div>
+
+    <div class="d1-note warn">
+      <strong>安全红线：</strong>① 绝不用 filebrowser 传代码 ② 绝不在 D 盘直接改代码 ③ 绝不直推 main ④ 敏感信息不入库 ⑤ AI 生成代码只进 dev，经 PR 审核后进 main
+    </div>
+    <div class="d1-note ok">
+      <strong>ZeroTier 解耦：</strong>关键链路（任务下发 &rarr; GitHub &rarr; PR &rarr; 审批 &rarr; 部署）100% 走公网，不依赖 ZeroTier。ZT 仅用于 SSH/RDP 远程通道，有 RustDesk/iNode 备份。
+    </div>
+    <div class="d1-note">
+      <strong>08-10 更新：</strong>任务队列从 SMB 改 GitHub <code>tasks/</code>；WeComBot :5001 复用为审批通道（无需新建穿透）；deploy.ps1 统一纳管多服务；分支命名强制连字符禁斜杠。
+    </div>
+
+  </div>
+</div>
+
+<!-- ==================== PANEL 2 ==================== -->
+<div class="panel" id="panel-1">
+  <div class="d2-container">
+
+    <!-- User Layer -->
+    <div class="d2-layer">
+      <div class="d2-header bg-human">用户接入层</div>
+      <div class="d2-body">
+        <div class="d2-card bg-human">
+          <strong>企业微信<span class="tag tag-keep">保持</span></strong>
+          订舱群通知、审批指令、轻量查询
+          <ul>
+            <li>入站回调 :5001（已公网可达）</li>
+            <li>出站 notify_by_name / kf_send_text</li>
+            <li>新增：admin 审批/运行命令模式</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-human">
+          <strong>邮件系统<span class="tag tag-mod">改造</span></strong>
+          DSK/ATB/运踪邮件自动收发
+          <ul>
+            <li>MailBots 纳入统一仓库</li>
+            <li>协议：IMAP/SMTP（去 Outlook COM，防 RDP 抢占）</li>
+            <li>注销飞书凭据，移入环境变量</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-human">
+          <strong>Web 浏览器<span class="tag tag-new">新建</span></strong>
+          订舱数据管理平台
+          <ul>
+            <li>独立前端工程（沿用 web 命名）</li>
+            <li>seed = yxo_app 现有 templates/*.html + static/{app.js,style.css}</li>
+            <li>旧 /yxo/ Flask 原型归档，不并入</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="d2-arrow">&darr;</div>
+
+    <!-- App Layer -->
+    <div class="d2-layer">
+      <div class="d2-header bg-sys">应用服务层（统一仓库改造）</div>
+      <div class="d2-body">
+        <div class="d2-card bg-sys">
+          <strong>yxo_app（后端核心）<span class="tag tag-mod">改造</span></strong>
+          Flask API 业务引擎
+          <ul>
+            <li>订舱委托书、舱单、价格、配置</li>
+            <li>routes/ + models/ 拆分</li>
+            <li>补 pytest + WAL 模式 + 统一错误处理</li>
+            <li>输入校验 / 幂等性 / 权限控制</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-sys">
+          <strong>yxo_web（前端）<span class="tag tag-new">新建</span></strong>
+          独立前端工程
+          <ul>
+            <li>index / tuoshu / manifest / admin 四页</li>
+            <li>130KB app.js + style.css（洋设计）</li>
+            <li>技术栈待定（Vue/React/渐进演进）</li>
+            <li>状态同步：轮询 &rarr; WebSocket/SSE</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-sys">
+          <strong>wecombot（纳入）<span class="tag tag-mod">改造</span></strong>
+          企微机器人中枢
+          <ul>
+            <li>server.py :5001（waitress 生产化）</li>
+            <li>wx_crypto.py AES-256 解密</li>
+            <li>wecom_api.py 出站封装</li>
+            <li>新增 admin 审批/运行命令（白名单+留痕）</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-sys">
+          <strong>mailbots（纳入）<span class="tag tag-mod">改造</span></strong>
+          邮件自动化机器人
+          <ul>
+            <li>Database_Syncer（DSK/ATB/运踪）</li>
+            <li>去飞书化，改读本地 SQLite</li>
+            <li>飞书 APP_SECRET 硬编码 &rarr; 环境变量</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="d2-arrow">&darr;</div>
+
+    <!-- Gateway Layer -->
+    <div class="d2-layer">
+      <div class="d2-header bg-data">LLM 网关层（gate — 定位收窄）</div>
+      <div class="d2-body">
+        <div class="d2-card bg-data">
+          <strong>gate（合规出口）<span class="tag tag-mod">收窄</span></strong>
+          只守「手写 LLM 调用」
+          <ul>
+            <li>WeComBot 免费模型 NLP（识别自然语言/新命令）</li>
+            <li>PII 脱敏：客户名/手机/邮箱/BL/运价/身份证/密钥</li>
+            <li>模型白名单 + 审计日志</li>
+            <li>跨模型 timeout fallback（免费模型间切换）</li>
+            <li>dry_run 模式</li>
+            <li><strong>不走：</strong>agent 自身推理 / opencode 内置模型</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-auto">
+          <strong>AI Agent 集群<span class="tag tag-keep">保持</span></strong>
+          <ul>
+            <li>WorkBuddy 框架（芙蕾雅 / 小叽推理，各自模型自管）</li>
+            <li>opencode-zen（本机 + 服务器，自带免费模型编码）</li>
+            <li>免费模型路由：opencode-zen 内置档（不接付费 Gemini/Claude）</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="d2-arrow">&darr;</div>
+
+    <!-- Tools Layer -->
+    <div class="d2-layer">
+      <div class="d2-header bg-auto">业务工具层（Tools — 选择性复用）</div>
+      <div class="d2-body">
+        <div class="d2-card bg-auto">
+          <strong>daily_health.py<span class="tag tag-mod">改造</span></strong>
+          数据质量监控
+          <ul>
+            <li>查 records 脏数据（必填为空/非法枚举）</li>
+            <li>输出改发<strong>邮件</strong>给毛骁洋（HTML/表格）</li>
+            <li>不走企微纯文本（容量太少）</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-auto">
+          <strong>health_check.bat<span class="tag tag-mod">修正</span></strong>
+          服务端口监控
+          <ul>
+            <li>守 WeComBot 端口 5000 &rarr; <strong>5001</strong></li>
+            <li>纳管 yxo_app:5011 / n8n / mihomo</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-auto">
+          <strong>autotuoshu<span class="tag tag-keep">保持</span></strong>
+          托书自动化（原 todo/ 子目录评估纳入）
+        </div>
+        <div class="d2-card bg-warn">
+          <strong>不迁移<span class="tag tag-del">废弃</span></strong>
+          <ul>
+            <li>match_price（yxo_app 已有 compute_price，冗余）</li>
+            <li>数据清洗（yxo_app 已有舱单上传页取代）</li>
+            <li>sync_to_subtables / cache_manager（纯飞书已无意义）</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="d2-arrow">&darr;</div>
+
+    <!-- Platform Layer -->
+    <div class="d2-layer">
+      <div class="d2-header bg-sys">平台支撑层（新建统一）</div>
+      <div class="d2-body">
+        <div class="d2-card bg-sys">
+          <strong>config/<span class="tag tag-new">新建</span></strong>
+          统一配置中心
+          <ul>
+            <li>gate_config.json / price_config.json</li>
+            <li>secrets 外置模板（*.example.json）</li>
+            <li>环境变量覆盖</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-sys">
+          <strong>scripts/<span class="tag tag-new">新建</span></strong>
+          统一运维脚本
+          <ul>
+            <li>deploy.ps1（<strong>统一纳管多服务</strong>）</li>
+            <li>rollback.ps1 / start_all_services.bat</li>
+            <li>health_check.bat / notify.ps1</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-sys">
+          <strong>tasks/<span class="tag tag-new">新建</span></strong>
+          GitHub 任务队列
+          <ul>
+            <li>替代 SMB agent_queue</li>
+            <li>解耦 ZeroTier</li>
+            <li>dev&rarr;PR&rarr;main 后生产可见</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-sys">
+          <strong>tests/<span class="tag tag-new">新建</span></strong>
+          pytest 测试集
+          <ul>
+            <li>单元测试 + 集成测试</li>
+            <li>GitHub Actions 自动跑</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="d2-arrow">&darr;</div>
+
+    <!-- Data Layer -->
+    <div class="d2-layer">
+      <div class="d2-header bg-data">数据层（绝对不入 git）</div>
+      <div class="d2-body">
+        <div class="d2-card bg-data">
+          <strong>yxo.db（SQLite）<span class="tag tag-mod">改造</span></strong>
+          生产数据库
+          <ul>
+            <li>WAL 模式（防断电损坏）</li>
+            <li>部署前自动备份</li>
+            <li>定时备份到 D:\YXO_DATA\backups\</li>
+            <li>Schema 迁移机制（版本表+脚本）</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-warn">
+          <strong>.gitignore 铁律<span class="tag tag-keep">保持</span></strong>
+          <ul>
+            <li>data/ 目录</li>
+            <li>config_local.py / .env</li>
+            <li>secrets.json / *.db</li>
+            <li>*.xlsx</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="d2-arrow">&darr;</div>
+
+    <!-- Infra Layer -->
+    <div class="d2-layer">
+      <div class="d2-header bg-net">基础设施层</div>
+      <div class="d2-body">
+        <div class="d2-card bg-net">
+          <strong>watchdog<span class="tag tag-mod">扩展</span></strong>
+          进程守护
+          <ul>
+            <li>监控 5011 / 5001</li>
+            <li>崩溃自动拉起</li>
+            <li>扩展纳管 n8n / mihomo / opencode</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-net">
+          <strong>n8n<span class="tag tag-new">新建</span></strong>
+          工作流编排
+          <ul>
+            <li>服务器 Active（nssm 常驻）</li>
+            <li>本机 Inactive（设计台）</li>
+            <li>WF1 PR Review / WF2 部署通知</li>
+            <li>定时轮询 GitHub API（零穿透）</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-net">
+          <strong>mihomo<span class="tag tag-new">新建</span></strong>
+          服务器梯子
+          <ul>
+            <li>规则模式（只放 GitHub/LLM API）</li>
+            <li>nssm 服务化</li>
+            <li><strong>禁止 TUN / 系统代理</strong></li>
+          </ul>
+        </div>
+        <div class="d2-card bg-net">
+          <strong>nssm<span class="tag tag-new">新建</span></strong>
+          服务注册
+          <ul>
+            <li>n8n / mihomo / opencode 守护</li>
+            <li>AppExit Default Restart</li>
+          </ul>
+        </div>
+        <div class="d2-card bg-net">
+          <strong>智能插座<span class="tag tag-keep">保持</span></strong>
+          最后手段
+          <ul>
+            <li>BIOS 通电自启</li>
+            <li>硬重启（先 WAL 兜底）</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="d2-note ok">
+      <strong>改造总原则：</strong>不改造旧版，按模块 greenfield 重优化；旧代码仅作避坑参考。代码纳入统一仓库，secrets/生产库/本地绝对路径绝不入库。
+    </div>
+    <div class="d2-note">
+      <strong>gate 定位收窄（08-10 更新）：</strong>只守「手写 LLM 调用」（WeComBot 免费模型 NLP），含 PII 脱敏 + 审计 + 跨模型 timeout fallback。agent 自身推理、opencode 内置免费模型由各自框架管理，<strong>不走 gate</strong>。
+    </div>
+    <div class="d2-note warn">
+      <strong>WeComBot 隔离更新：</strong>代码纳入统一仓库（wecombot/ 子目录），但 secrets.json、生产 yxo.db、服务器本地绝对路径<strong>绝不入库</strong>——改用 secrets.example.json 模板 + .gitignore 屏蔽 + config/ 读环境变量。
+    </div>
+
+  </div>
+</div>
+
+<script>
+function switchTab(idx) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', i===idx));
+  document.querySelectorAll('.panel').forEach((p,i) => p.classList.toggle('active', i===idx));
+}
+</script>
+
+</body>
+</html>
