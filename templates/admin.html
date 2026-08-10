@@ -171,7 +171,7 @@
           <button class="ghost" onclick="loadCfg()">刷新</button>
           <button onclick="beginAddRow()">＋ 新增一行</button>
         </div>
-        <p class="muted" style="margin:4px 0 10px">改动直接写入飞书配置表，机器人下次运行自动生效（DSK/ATB 缓存会被自动清除）。收件人/抄送人多个邮箱用分号或逗号分隔。</p>
+        <p class="muted" style="margin:4px 0 10px">改动直接写入本地库（yxo.db）并即时生效，机器人下次运行自动读取（DSK/ATB 缓存会被自动清除）。收件人/抄送人多个邮箱用分号或逗号分隔。</p>
         <div id="cfgView">加载中…</div>
       </div>
     </section>
@@ -444,12 +444,12 @@ function tracingReset() {
   tracingGo(1);
 }
 
-// ---------- 配置管理（飞书表） ----------
+// ---------- 配置管理（本地库 yxo.db） ----------
 let CFG = { key:"", fields:[], rows:[] };
 function loadCfg() {
   const key = document.getElementById("cfgTable").value;
   const view = document.getElementById("cfgView");
-  view.innerHTML = '<p class="muted">加载中…（飞书接口略慢，请稍候）</p>';
+  view.innerHTML = '<p class="muted">加载中…</p>';
   api("api/admin/table/" + key).then(j => {
     if (!j.ok) { view.innerHTML = "❌ " + esc(j.msg); return; }
     CFG = { key, fields: j.fields, rows: j.rows };
