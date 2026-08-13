@@ -592,6 +592,7 @@ def run():
     plan = []
     for it, cat in to_process:
         subject = it["subject"]
+        box = ""   # 止血：WAY_B 分支也引用 box，必须在此初始化，否则 UnboundLocalError（8-03 退舱改动引入）
         if cat == "A":
             xls_bytes = get_attachment_bytes(it, XLS_RE)
             rows = parse_waybill_xls(xls_bytes) if xls_bytes else []
