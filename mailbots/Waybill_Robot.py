@@ -43,6 +43,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.header import decode_header
 from email.utils import parseaddr, parsedate_to_datetime
+from email import encoders
+from email.mime.base import MIMEBase
 from datetime import datetime
 
 from common_io import atomic_write_json, daemon_loop, to_local_naive
@@ -470,6 +472,145 @@ def parse_waybill_xls(raw_bytes):
     return rows
 
 
+# ---------- 完全拆分转发（2026-08-14 修复） ----------
+def _xls_all_rows(raw_bytes, name):
+    """返回 (headers, rows) 或 (None, None)。rows=list[list](全列), 兼容 .xlsx/.xls。"""
+    lower = (name or "").lower()
+    if lower.endswith(".xlsx"):
+        try:
+            import io, openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), read_only=True, data_only=True)
+            data = list(wb.active.iter_rows(values_only=True))
+            wb.close()
+            if data:
+                return [str(h or "").strip() for h in data[0]], [[c for c in row] for row in data[1:]]
+        except Exception as e:
+            log(f"  ⚠ openpyxl 读取失败: {e}")
+    else:
+        try:
+            import io, xlrd
+            book = xlrd.open_workbook(file_contents=raw_bytes)
+            sh = book.sheet_by_index(0)
+            headers = [str(sh.cell_value(0, c)).strip() for c in range(sh.ncols)]
+            rows = [[sh.cell_value(r, c) for c in range(sh.ncols)] for r in range(1, sh.nrows)]
+            return headers, rows
+        except Exception as e:
+            log(f"  ⚠ xlrd 读取失败: {e}")
+    return None, None
+
+
+def rewrite_xls_filtered(raw_bytes, name, keep_rows):
+    """保留原始表头与所有列, 仅保留 keep_rows 命中的行; 返回 (new_bytes, new_name) 或 (None, None)。
+    keep_rows: list[{客户编码,箱号,运单号}]。.xlsx 原样重写; .xls 优先 xlwt, 缺失则转 .xlsx 并告警。"""
+    if not keep_rows:
+        return None, None
+    headers, all_rows = _xls_all_rows(raw_bytes, name)
+    if headers is None:
+        return None, None
+    idx_code = _col_index(headers, ["客户编码", "客户代码", "code"])
+    idx_box = _col_index(headers, ["箱号", "箱", "container", "box"])
+    idx_rwb = _col_index(headers, ["rwb", "rwb no", "运单号", "运单", "waybill"])
+
+    def _idx_ok(i, row):
+        return i >= 0 and i < len(row) and row[i] is not None
+
+    def _key(row):
+        def _v(i):
+            return str(row[i]).strip().upper() if _idx_ok(i, row) else ""
+        return (_v(idx_code), _v(idx_box), _v(idx_rwb))
+
+    keep_set = set()
+    for r in keep_rows:
+        keep_set.add((str(r.get("客户编码", "")).strip().upper(),
+                      str(r.get("箱号", "")).strip().upper(),
+                      str(r.get("运单号", "")).strip().upper()))
+    kept = [row for row in all_rows if _key(row) in keep_set]
+    if not kept:
+        return None, None
+    lower = (name or "").lower()
+    if lower.endswith(".xlsx"):
+        try:
+            import io, openpyxl
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append([_cell_str(h) for h in headers])
+            for row in kept:
+                ws.append([_cell_str(c) for c in row])
+            buf = io.BytesIO()
+            wb.save(buf)
+            wb.close()
+            return buf.getvalue(), name
+        except Exception as e:
+            log(f"  ⚠ openpyxl 写失败: {e}")
+    else:
+        try:
+            import io, xlwt
+            wb = xlwt.Workbook()
+            ws = wb.add_sheet("Sheet1")
+            for c, h in enumerate(headers):
+                ws.write(0, c, _cell_str(h))
+            for ri, row in enumerate(kept, start=1):
+                for c, v in enumerate(row):
+                    ws.write(ri, c, _cell_str(v))
+            buf = io.BytesIO()
+            wb.save(buf)
+            return buf.getvalue(), name
+        except Exception as e:
+            log(f"  ⚠ xlwt 写失败(缺 xlwt? 转 .xlsx): {e}")
+            try:
+                import io, openpyxl
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.append([_cell_str(h) for h in headers])
+                for row in kept:
+                    ws.append([_cell_str(c) for c in row])
+                buf = io.BytesIO()
+                wb.save(buf)
+                wb.close()
+                base = name[:-4] if (name or "").lower().endswith(".xls") else name
+                return buf.getvalue(), base + ".xlsx"
+            except Exception as e2:
+                log(f"  ⚠ 回退写也失败: {e2}")
+    return None, None
+
+
+def build_split_forward(raw_bytes, category, keep_rows):
+    """完全拆分: 正文仅列 keep_rows 表格 + 附件为过滤后小 xls(仅 keep_rows)。返回 (msg, subject)。"""
+    orig = email.message_from_bytes(raw_bytes)
+    subject = decode_any(orig.get("Subject", ""))
+    out = MIMEMultipart("mixed")
+    lines = ["本邮件仅包含贵公司相关的运单号信息：", ""]
+    lines.append("客户编码 | 箱号 | 运单号")
+    lines.append("--- | --- | ---")
+    for r in keep_rows:
+        lines.append(f"{r.get('客户编码') or '-'} | {r.get('箱号') or '-'} | {r.get('运单号') or '-'}")
+    out.attach(MIMEText("\n".join(lines), "plain", "utf-8"))
+    # 提取原始 xls 附件并重写为过滤版(仅 keep_rows)
+    for part in orig.walk():
+        if part.is_multipart():
+            continue
+        fn = part.get_filename()
+        if fn and XLS_RE.search(fn):
+            payload = part.get_payload(decode=True)
+            if payload:
+                new_bytes, new_name = rewrite_xls_filtered(payload, fn, keep_rows)
+                if new_bytes:
+                    _np = MIMEBase("application", "octet-stream")
+                    _np.set_payload(new_bytes)
+                    encoders.encode_base64(_np)
+                    _np.add_header("Content-Disposition", "attachment", filename=("utf-8", "", new_name))
+                    out.attach(_np)
+                else:
+                    # 重写失败: 保守附原始 xls(正文已列明, 收件人仍能看到自己行)
+                    _np = MIMEBase(part.get_content_maintype(), part.get_content_subtype())
+                    _np.set_payload(payload)
+                    encoders.encode_base64(_np)
+                    _np.add_header("Content-Disposition", "attachment", filename=("utf-8", "", fn))
+                    out.attach(_np)
+            break  # 只处理第一个 xls 附件
+    return out, subject
+
+
 def classify(subject, sender, atts, body):
     """返回 'A' / 'B' / None。仅认白名单发件人, 零关键词兜底。"""
     if sender not in WHITELIST:
@@ -647,45 +788,80 @@ def run():
             p["pending_no"] = None
             notified.append(p)
             if p["category"] == "WAY_A":
-                # ── BUG-A 热修：高置信命中(full/num 且路由可解析) → 自动转发, 不进队列 ──
-                _auto = False
-                if (p.get("level") in ("full", "num") and resolve_recipients and _draft_smtp_send):
-                    _to, _cc, _src = resolve_recipients(
-                        p.get("box"), p.get("company"), _df_default_map, _df_box_map)
-                    if _to:
+                # ── 2026-08-14 完全拆分修复：逐行按公司归外部收件人分组, 每收件人只收自己那几行 ──
+                #    正文表格 + 过滤后的小 xls(仅含该收件人客编/箱号), 真正拆开, 互不串看。
+                groups = {}            # key(to,cc) -> {to,cc,company,owner,rows:[]}
+                unresolved_rows = []   # 无法解析公司/路由/退舱的行 → 回退待确认队列
+                rows_all = p.get("rows") or []
+                if not rows_all:
+                    # 无附件/解析失败 → 原低置信路径进待确认(与旧行为一致)
+                    unresolved_rows = [{"客户编码": p.get("code", ""), "箱号": p.get("box", ""), "运单号": ""}]
+                else:
+                    for r in rows_all:
+                        code = r.get("客户编码", "")
+                        box = r.get("箱号", "")
+                        num = CODE_NUM_RE.match(code).group(1) if (code and CODE_NUM_RE.match(code)) else ""
+                        _lvl, _rec = match_record(records, code, num, box)
+                        _company = _rec["company"] if _rec else ""
+                        # 退舱跳过(按行)
+                        if (_rec is not None and _rec.get("status") == "退舱") or (box and is_box_cancelled(box)):
+                            log(f"  ⏭ 退舱跳过(拆分): {code} (箱号 {box})")
+                            continue
+                        _owner = company_to_name(_company) if _company else None
+                        if not _company or not _owner:
+                            unresolved_rows.append(r)
+                            continue
+                        _to, _cc, _src = (resolve_recipients(box, _company, _df_default_map, _df_box_map)
+                                          if resolve_recipients else ([], [], ""))
+                        if not _to:
+                            log(f"  ⚠ 路由缺失(拆分): {code} 公司={_company} → 回退待确认")
+                            unresolved_rows.append(r)
+                            continue
+                        _gkey = (tuple(_to), tuple(_cc or []))
+                        groups.setdefault(_gkey, {"to": _to, "cc": _cc, "company": _company, "owner": _owner, "rows": []})
+                        groups[_gkey]["rows"].append(r)
+                for _gkey, g in groups.items():
+                    try:
+                        _fwd, _subj = build_split_forward(p["raw"], "WAY_A", g["rows"])
+                        _fwd["Subject"] = _subj
+                        _sen = sender_for_company(g["company"]) if g["company"] else None
+                        _ae, _ap = (_sen if (_sen and _sen[1]) else (ADMIN_MAILBOX, ACCOUNTS.get(ADMIN_MAILBOX)))
+                        _draft_smtp_send(_fwd, _ae, _ap, g["to"], g["cc"])
+                        _codes = " / ".join(r.get("客户编码", "") for r in g["rows"])
+                        conn.execute(
+                            "INSERT OR REPLACE INTO processed_mails VALUES (?,?,?,?,?,?,?,?,?)",
+                            (p["message_id"], p["subject"], "docwbfb@yxologistics.com",
+                             p["date"], p["category"], _codes, g["owner"], "auto_forwarded_split",
+                             int(datetime.now().timestamp())))
                         try:
-                            _fwd, _subj = build_forward(p["raw"], "WAY_A")
-                            _fwd["Subject"] = _subj
-                            _sen = sender_for_company(p["company"]) if p["company"] else None
-                            _ae, _ap = (_sen if (_sen and _sen[1]) else (ADMIN_MAILBOX, ACCOUNTS.get(ADMIN_MAILBOX)))
-                            _draft_smtp_send(_fwd, _ae, _ap, _to, _cc)
-                            conn.execute(
-                                "INSERT OR REPLACE INTO processed_mails VALUES (?,?,?,?,?,?,?,?,?)",
-                                (p["message_id"], p["subject"], "docwbfb@yxologistics.com",
-                                 p["date"], p["category"], p["code"], p["owner"], "auto_forwarded",
-                                 int(datetime.now().timestamp())))
-                            try:
-                                import forward_log
-                                forward_log.record(
-                                    "运单号", owner=p.get("owner") or "", company=p.get("company") or "",
-                                    code=p.get("code") or "", box=p.get("box") or "",
-                                    subject=p.get("subject") or "", to_list=_to, sender=_ae,
-                                    note=f"{p['category']} 自动转发(级别={p['level']})", test=False)
-                            except Exception:
-                                pass
-                            # 企微告知「已自动转发」(不含确认/跳过按钮)
-                            wecom_notify_person(p["owner"],
-                                f"✅ 运单号已自动转发（匹配级别={p['level']}，无需确认）\n"
-                                f"主题: {p['subject'][:60]}\n"
-                                f"客编: {p.get('code') or '-'} 箱号: {p.get('box') or '-'}\n"
-                                f"已发往: {', '.join(_to)}")
-                            mark_seen_everywhere(p["message_id"], p["boxes_seen"])
-                            log(f"  🚀 [WAY_A] {p['code'] or '-'} → {p['owner']} 自动转发(级别={p['level']}) 收件人={_to}")
-                            _auto = True
-                        except Exception as _e:
-                            log(f"  ⚠ [WAY_A] 自动转发失败({_e}), 回退到待确认队列")
-                if _auto:
+                            import forward_log
+                            forward_log.record(
+                                "运单号", owner=g["owner"], company=g["company"], code=_codes,
+                                box=" / ".join(r.get("箱号", "") for r in g["rows"]),
+                                subject=p["subject"], to_list=g["to"], sender=_ae,
+                                note=f"WAY_A 拆分转发({(_src or '?')}, {len(g['rows'])}行)", test=False)
+                        except Exception:
+                            pass
+                        # 企微告知「已按公司拆分自动转发」(不含确认/跳过按钮)
+                        wecom_notify_person(g["owner"],
+                            f"✅ 运单号已按公司拆分自动转发（{len(g['rows'])}行，无需确认）\n"
+                            f"主题: {p['subject'][:60]}\n"
+                            f"客编: {_codes}\n"
+                            f"已发往: {', '.join(g['to'])}")
+                        log(f"  🚀 [WAY_A拆分] {_codes} → {g['owner']} 收件人={g['to']} ({len(g['rows'])}行)")
+                    except Exception as _e:
+                        log(f"  ⚠ [WAY_A拆分] 发送失败({_e}), 该行组回退待确认")
+                        unresolved_rows.extend(g["rows"])
+                # 全部行已拆分发出 → 标已读并跳过(不进待确认)
+                if groups and not unresolved_rows:
+                    mark_seen_everywhere(p["message_id"], p["boxes_seen"])
                     continue
+                if not unresolved_rows:
+                    # 防御: groups 为空也无 unresolved(理论不存在) → 视为已处理跳过
+                    continue
+                # 存在未解析/发送失败行 → 沿用原低置信路径进待确认队列(下方逻辑)
+                log(f"  ℹ [WAY_A拆分] {len(unresolved_rows)} 行未匹配/失败, 回退待确认队列")
+
                 # 低/无置信 或 路由缺失 → 保持原行为: 进待确认队列, 等企微「确认/跳过」
                 info = {
                     "message_id": p["message_id"], "subject": p["subject"],
