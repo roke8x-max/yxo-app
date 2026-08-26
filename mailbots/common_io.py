@@ -15,6 +15,7 @@ import json
 import os
 import re
 import tempfile
+import traceback as _traceback
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 
@@ -146,6 +147,38 @@ class Backoff:
         return min(self.base * (2 ** self.n), self.cap)
 
 
+# ==================== 错误日志（spec 刀1/D4：根治隐身崩溃）====================
+ERROR_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "error_logs")
+
+
+def log_error(bot_name, text):
+    """把异常/告警文本追加写入 error_logs/{bot}_error_YYYYMMDD.log（UTF-8）。
+    目录首次自动创建；写日志自身失败只打控制台，绝不向上抛。"""
+    try:
+        os.makedirs(ERROR_LOG_DIR, exist_ok=True)
+        fname = os.path.join(
+            ERROR_LOG_DIR,
+            "{}_error_{}.log".format(bot_name, datetime.now().strftime("%Y%m%d")),
+        )
+        with open(fname, "a", encoding="utf-8") as f:
+            f.write("[{}] {}\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), text))
+    except Exception as e:
+        print("[{}] 写错误日志失败: {}".format(bot_name, e))
+
+
+def run_once(bot_name, run_fn):
+    """守护循环的一轮：网络类异常续跑；未知异常把完整 traceback 写入错误日志。
+    返回本轮处理邮件数（run_fn 返回 None 视为 0）。"""
+    try:
+        return run_fn() or 0
+    except (TimeoutError, OSError, ConnectionError) as e:
+        log_error(bot_name, "网络类异常，续跑: {!r}".format(e))
+        return 0
+    except Exception:
+        log_error(bot_name, "未知异常，本轮跳过:\n" + _traceback.format_exc())
+        return 0
+
+
 def daemon_loop(bot_name, run_fn, max_runtime=12 * 60, base=60, cap=900):
     """退避轮询守护循环。
 
@@ -159,14 +192,7 @@ def daemon_loop(bot_name, run_fn, max_runtime=12 * 60, base=60, cap=900):
     bo.n = min(int(state.get(bot_name, {}).get("n", 0)), bo.max_n)
     start = _time.time()
     while _time.time() - start < max_runtime:
-        try:
-            got = run_fn() or 0
-        except (TimeoutError, OSError, ConnectionError) as e:
-            print(f"[{bot_name}] 网络类异常，续跑: {e}")
-            got = 0
-        except Exception as e:
-            print(f"[{bot_name}] 未知异常，本轮跳过: {e}")
-            got = 0
+        got = run_once(bot_name, run_fn)
         # 命中重置/空转退避全权交给 Backoff.hit()/miss()（含 n 自增），勿手动改 n
         sleep_t = bo.hit() if got else bo.miss()
         state[bot_name] = {"n": bo.n}

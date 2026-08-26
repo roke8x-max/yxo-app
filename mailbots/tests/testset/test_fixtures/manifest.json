@@ -1,0 +1,634 @@
+[
+  {
+    "file": "draft/D01_A_full.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T1",
+    "action": "forward",
+    "note": "客编精确+箱号精确→自动转发；A因数字段260713004未进台账"
+  },
+  {
+    "file": "draft/D02_A_box_empty.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T1",
+    "action": "forward",
+    "note": "库CQWLJT260713005-SPB箱号为空，按T1客编主键仍转发（箱号只辅助）"
+  },
+  {
+    "file": "draft/D03_B_update.eml",
+    "type": "draft",
+    "category": "B",
+    "tier": "T1",
+    "action": "forward",
+    "note": "数字段260709001已在draft_nums_seed→B；正文须带'更新'提示"
+  },
+  {
+    "file": "draft/D04_C1_feedback.eml",
+    "type": "draft",
+    "category": "C1",
+    "tier": "-",
+    "action": "forward",
+    "note": "yxologistics.com且无草单附件→C1反馈，转发负责同事"
+  },
+  {
+    "file": "draft/D05_C2_reply.eml",
+    "type": "draft",
+    "category": "C2",
+    "tier": "-",
+    "action": "record_only",
+    "note": "非yxologistics.com域且无草单附件→C2确认回复，只记录不转发"
+  },
+  {
+    "file": "draft/D06_W_waybill_no.eml",
+    "type": "draft",
+    "category": "W",
+    "tier": "-",
+    "action": "record_only",
+    "note": "主题含'运单号'→W，只记录留给运单号模块（注意：此件若落入运单号机器人则归WAY_A）"
+  },
+  {
+    "file": "draft/D07_tc_excluded.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T4",
+    "action": "alarm",
+    "note": "客编260713006-VXN记录状态=退舱，解析范围排除→未命中→T4报警"
+  },
+  {
+    "file": "draft/D08_softdel_excluded.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T4",
+    "action": "alarm",
+    "note": "客编260713007-MOS is_deleted=1，解析范围排除→未命中→T4报警"
+  },
+  {
+    "file": "draft/D09_T2_suffix.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T2",
+    "action": "pending",
+    "note": "序号260810001在库同时命中-SPB与-VXN(两active,同箱)→T2待办"
+  },
+  {
+    "file": "draft/D10_T3_box.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T3",
+    "action": "pending",
+    "note": "客编260810002-SPB库箱号ABCU2222222，来信箱号ABCU9999999→T3待办"
+  },
+  {
+    "file": "draft/D11_T4_unknown.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T4",
+    "action": "alarm",
+    "note": "序号999999999不在库→T4报警（不进待办）"
+  },
+  {
+    "file": "draft/D12_T5_box_only.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T5",
+    "action": "alarm",
+    "note": "主题无可解析客编，但箱号ABCU4444444唯一命中→T5报警（不进待办）"
+  },
+  {
+    "file": "draft/D13_T6_box_reuse.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T6",
+    "action": "pending",
+    "note": "箱号ABCU5555555命中2条active(不同客编)→T6待办人工挑"
+  },
+  {
+    "file": "draft/D14_T7_cross_suffix.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T7",
+    "action": "pending",
+    "note": "序号260810005跨-SPB/-VXN两active后缀(同箱)→T7防御性guard待办"
+  },
+  {
+    "file": "draft/D15_T0_nothing.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T0",
+    "action": "alarm",
+    "note": "无可解析客编且无可解析箱号→T0报警"
+  },
+  {
+    "file": "draft/D16_draft_criterion2.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T1",
+    "action": "forward",
+    "note": "判据2兜底：箱号.pdf + 正文含'更新草单'→仍识别为草单件"
+  },
+  {
+    "file": "draft/D17_multi_att.eml",
+    "type": "draft",
+    "category": "A",
+    "tier": "T1",
+    "action": "forward",
+    "note": "多附件，只要有一个命中加密PDF即判草单件"
+  },
+  {
+    "file": "waybill/W01_single_external.eml",
+    "type": "waybill",
+    "category": "WAY_A",
+    "tier": "T1",
+    "action": "split_forward",
+    "note": "外部公司(东盟/call56)按客编分组转发小xls+正文；单行即单封",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 0,
+      "parts": [
+        {
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "rows": [
+            "CQWLJT260816001-MA"
+          ],
+          "has_xls": true
+        }
+      ],
+      "skip_rows": [],
+      "alarm_rows": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": []
+    }
+  },
+  {
+    "file": "waybill/W02_internal_only.eml",
+    "type": "waybill",
+    "category": "WAY_A",
+    "tier": "T1",
+    "action": "split_forward",
+    "note": "内部子公司(布拉茨克)→外部无收件人，仅企微通知负责同事",
+    "split": {
+      "email_parts": 0,
+      "wecom_only_parts": 1,
+      "parts": [
+        {
+          "company": "布拉茨克子公司",
+          "route": "internal",
+          "rows": [
+            "CQWLJT260816003-BLLST"
+          ],
+          "has_xls": false
+        }
+      ],
+      "skip_rows": [],
+      "alarm_rows": []
+    },
+    "forward": {
+      "emails": [],
+      "wecom": [
+        "布拉茨克子公司负责同事"
+      ]
+    }
+  },
+  {
+    "file": "waybill/W03_multi_external.eml",
+    "type": "waybill",
+    "category": "WAY_A",
+    "tier": "T1",
+    "action": "split_forward",
+    "note": "一封含多客编(均东盟外部)→按外部公司拆1封(同公司合并)带小xls(2行)",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 0,
+      "parts": [
+        {
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "rows": [
+            "CQWLJT260816001-MA",
+            "CQWLJT260816002-MA"
+          ],
+          "has_xls": true
+        }
+      ],
+      "skip_rows": [],
+      "alarm_rows": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": []
+    }
+  },
+  {
+    "file": "waybill/W04_no_xls.eml",
+    "type": "waybill",
+    "category": "WAY_A",
+    "tier": "T1",
+    "action": "split_forward",
+    "note": "无xls附件→按客编转发正文（无小xls），不应崩溃"
+  },
+  {
+    "file": "waybill/W05_unknown.eml",
+    "type": "waybill",
+    "category": "WAY_A",
+    "tier": "T4",
+    "action": "alarm_or_pending",
+    "note": "客编不在库→运单号侧报警/待确认（依运单号机器人实现）"
+  },
+  {
+    "file": "waybill/W06_multirow_mixed.eml",
+    "type": "waybill",
+    "category": "WAY_A",
+    "tier": "T1",
+    "action": "split_forward",
+    "note": "一封xls含3行：2行东盟(call56外部)+1行布拉茨克(内部)→拆成2份：1封外部邮件(小xls含2行)+1个内部企微通知(不收邮件)",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 1,
+      "parts": [
+        {
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "rows": [
+            "CQWLJT260816001-MA",
+            "CQWLJT260816002-MA"
+          ],
+          "has_xls": true
+        },
+        {
+          "company": "布拉茨克子公司",
+          "route": "internal",
+          "rows": [
+            "CQWLJT260816003-BLLST"
+          ],
+          "has_xls": false
+        }
+      ],
+      "skip_rows": [],
+      "alarm_rows": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": [
+        "布拉茨克子公司负责同事"
+      ]
+    }
+  },
+  {
+    "file": "waybill/W07_multirow_one_co.eml",
+    "type": "waybill",
+    "category": "WAY_A",
+    "tier": "T1",
+    "action": "split_forward",
+    "note": "一封xls含2行(均东盟外部)→按外部公司拆1封，小xls含全部2行",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 0,
+      "parts": [
+        {
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "rows": [
+            "CQWLJT260816001-MA",
+            "CQWLJT260816002-MA"
+          ],
+          "has_xls": true
+        }
+      ],
+      "skip_rows": [],
+      "alarm_rows": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": []
+    }
+  },
+  {
+    "file": "waybill/W08_multirow_with_cancel.eml",
+    "type": "waybill",
+    "category": "WAY_A",
+    "tier": "T1",
+    "action": "split_forward",
+    "note": "一封xls含3行，第2行CQWLJT260713006-VXN状态=退舱→跳过该行；其余2行正常拆(东盟邮件+布拉茨克企微)",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 1,
+      "parts": [
+        {
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "rows": [
+            "CQWLJT260816001-MA"
+          ],
+          "has_xls": true
+        },
+        {
+          "company": "布拉茨克子公司",
+          "route": "internal",
+          "rows": [
+            "CQWLJT260816003-BLLST"
+          ],
+          "has_xls": false
+        }
+      ],
+      "skip_rows": [
+        "CQWLJT260713006-VXN(退舱)"
+      ],
+      "alarm_rows": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": [
+        "布拉茨克子公司负责同事"
+      ]
+    }
+  },
+  {
+    "file": "waybill/W09_multirow_with_unknown.eml",
+    "type": "waybill",
+    "category": "WAY_A",
+    "tier": "T4",
+    "action": "split_forward",
+    "note": "一封xls含3行，第2行CQWLJT999999998-MA不在库→该行报警/待确认；其余2行正常拆(东盟邮件+布拉茨克企微)",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 1,
+      "parts": [
+        {
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "rows": [
+            "CQWLJT260816001-MA"
+          ],
+          "has_xls": true
+        },
+        {
+          "company": "布拉茨克子公司",
+          "route": "internal",
+          "rows": [
+            "CQWLJT260816003-BLLST"
+          ],
+          "has_xls": false
+        }
+      ],
+      "skip_rows": [],
+      "alarm_rows": [
+        "CQWLJT999999998-MA(库内无客编)"
+      ]
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": [
+        "布拉茨克子公司负责同事"
+      ]
+    }
+  },
+  {
+    "file": "tracing/T01_standard.eml",
+    "type": "tracing",
+    "category": "-",
+    "tier": "-",
+    "action": "fanout_forward",
+    "note": "按train 611扇出转发给该班列对应公司；整封(含xls)透传，不解析xls"
+  },
+  {
+    "file": "tracing/T02_no_box.eml",
+    "type": "tracing",
+    "category": "-",
+    "tier": "-",
+    "action": "fanout_forward",
+    "note": "正文无箱号→box_no为空，仍照常扇出转发（容错）"
+  },
+  {
+    "file": "tracing/T03_segment.eml",
+    "type": "tracing",
+    "category": "-",
+    "tier": "-",
+    "action": "fanout_forward",
+    "note": "主题含-1分段标记；机器人不解析K段，每封独立扇出，-1/-2/-3互不合并"
+  },
+  {
+    "file": "dsk/K01_box_html.eml",
+    "type": "dsk",
+    "category": "-",
+    "tier": "-",
+    "action": "split_forward",
+    "note": "发件kasa@rtsb.de；箱号TGLU7755223 in HTML表格→按箱号拆分转发"
+  },
+  {
+    "file": "dsk/K02_no_box.eml",
+    "type": "dsk",
+    "category": "-",
+    "tier": "-",
+    "action": "record_only",
+    "note": "无箱号→不拆分，记录/跳过（依DSK机器人实现）"
+  },
+  {
+    "file": "dsk/K03_multi_box.eml",
+    "type": "dsk",
+    "category": "-",
+    "tier": "-",
+    "action": "split_forward",
+    "note": "HTML含多箱号→逐箱拆分转发"
+  },
+  {
+    "file": "atb/A01_box_html.eml",
+    "type": "atb",
+    "category": "-",
+    "tier": "-",
+    "action": "forward",
+    "note": "发件atb@yxologistics.com；箱号TEMU9000001 in HTML→原内容整封转发",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 0,
+      "parts": [
+        {
+          "box": "TEMU9000001",
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "kind": "full_original"
+        }
+      ],
+      "skip_boxes": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": []
+    }
+  },
+  {
+    "file": "atb/A02_subject_fallback.eml",
+    "type": "atb",
+    "category": "-",
+    "tier": "-",
+    "action": "forward",
+    "note": "HTML无箱号→回退到主题提取箱号TEMU9000002→转发",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 0,
+      "parts": [
+        {
+          "box": "TEMU9000002",
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "kind": "full_original"
+        }
+      ],
+      "skip_boxes": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": []
+    }
+  },
+  {
+    "file": "atb/A03_multi_box.eml",
+    "type": "atb",
+    "category": "-",
+    "tier": "-",
+    "action": "forward",
+    "note": "HTML含2箱号→逐箱号各发一封整封原样转发(每封To按该箱号路由)",
+    "split": {
+      "email_parts": 2,
+      "wecom_only_parts": 0,
+      "parts": [
+        {
+          "box": "TEMU9000001",
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "kind": "full_original"
+        },
+        {
+          "box": "TEMU9000003",
+          "company": "布拉茨克子公司",
+          "route": "internal",
+          "kind": "full_original"
+        }
+      ],
+      "skip_boxes": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)",
+        "布拉茨克子公司负责同事(内部原样)"
+      ],
+      "wecom": []
+    }
+  },
+  {
+    "file": "atb/A04_multi_box_3co.eml",
+    "type": "atb",
+    "category": "-",
+    "tier": "-",
+    "action": "forward",
+    "note": "HTML含3箱号(东盟/布拉茨克/明斯克)→逐箱号各发一封整封原样转发",
+    "split": {
+      "email_parts": 3,
+      "wecom_only_parts": 0,
+      "parts": [
+        {
+          "box": "TEMU9000001",
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "kind": "full_original"
+        },
+        {
+          "box": "TEMU9000003",
+          "company": "布拉茨克子公司",
+          "route": "internal",
+          "kind": "full_original"
+        },
+        {
+          "box": "TEMU9000004",
+          "company": "明斯克子公司",
+          "route": "external",
+          "kind": "full_original"
+        }
+      ],
+      "skip_boxes": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)",
+        "布拉茨克子公司负责同事(内部原样)",
+        "明斯克子公司外部收件人"
+      ],
+      "wecom": []
+    }
+  },
+  {
+    "file": "atb/A05_multi_box_unrouted.eml",
+    "type": "atb",
+    "category": "-",
+    "tier": "-",
+    "action": "forward",
+    "note": "HTML含2箱号，ZZLU0000001不在箱号→公司映射(无路由)→该行跳过；TEMU9000001照发",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 0,
+      "parts": [
+        {
+          "box": "TEMU9000001",
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "kind": "full_original"
+        }
+      ],
+      "skip_boxes": [
+        "ZZLU0000001(无路由配置)"
+      ]
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": []
+    }
+  },
+  {
+    "file": "atb/A06_dup_box.eml",
+    "type": "atb",
+    "category": "-",
+    "tier": "-",
+    "action": "forward",
+    "note": "主题与HTML均含TEMU9000001→extract_boxes去重只1个箱号→仅发1封",
+    "split": {
+      "email_parts": 1,
+      "wecom_only_parts": 0,
+      "parts": [
+        {
+          "box": "TEMU9000001",
+          "company": "东盟子公司",
+          "route": "external(call56)",
+          "kind": "full_original"
+        }
+      ],
+      "skip_boxes": []
+    },
+    "forward": {
+      "emails": [
+        "东盟子公司外部收件人(call56)"
+      ],
+      "wecom": []
+    }
+  }
+]
