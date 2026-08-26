@@ -7,8 +7,11 @@ from core.models import MailEvent, ProcessResult, Processor
 
 
 @pytest.fixture(autouse=True)
-def _reset_root_cache():
-    """detect_root 缓存不跨用例污染（monkeypatch 只还原 env，不还原模块状态）。"""
+def _reset_root_cache(monkeypatch):
+    """detect_root 缓存与 YXO_ROOT env 不跨用例污染。
+    monkeypatch 只还原自身改动，故 env 清除与缓存重置都要在此显式做：
+    开发/CI 若导出 YXO_ROOT，会让 candidates 注入类用例失效（env 在 candidates 之前返回）。"""
+    monkeypatch.delenv("YXO_ROOT", raising=False)
     paths._cached_root = None
     yield
     paths._cached_root = None
@@ -38,6 +41,25 @@ def test_env_override_and_cache(monkeypatch, tmp_path):
     monkeypatch.setenv("YXO_ROOT", str(tmp_path))
     assert paths.detect_root() == str(tmp_path)
     assert paths.detect_root(candidates=[str(tmp_path / "x")]) == str(tmp_path)
+
+
+def test_detect_root_negative_not_cached(monkeypatch, tmp_path):
+    # 负结果不写缓存：两次无命中调用都完整重探（若负缓存存在，第二次将短路不再触发 isfile）
+    monkeypatch.setattr(paths, "_CANDIDATE_ROOTS",
+                        [str(tmp_path / "a"), str(tmp_path / "b")])
+    probes = []
+    real_isfile = os.path.isfile
+
+    def counting_isfile(path):
+        probes.append(path)
+        return real_isfile(path)
+
+    monkeypatch.setattr(paths.os.path, "isfile", counting_isfile)
+    with pytest.raises(paths.StartupError):
+        paths.detect_root()
+    with pytest.raises(paths.StartupError):
+        paths.detect_root()
+    assert len([p for p in probes if p.startswith(str(tmp_path))]) == 4
 
 
 def test_process_result_and_protocol():
