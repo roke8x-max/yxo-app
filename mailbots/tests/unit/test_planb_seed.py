@@ -126,3 +126,51 @@ def test_missing_default_map_errors(tmp_path):
         assert False, "缺 default_map 应报错"
     except SystemExit:
         pass
+
+
+def _apply_cache(tmp_path, capsys, default_map):
+    """用给定 default_map 跑一次 apply，返回 (dbp, report, stdout)。"""
+    dbp = _make_db(tmp_path)
+    p = tmp_path / "cache_fix.json"
+    p.write_text(json.dumps({"default_map": default_map}), encoding="utf-8")
+    mod = _load_mod("scripts_seed_fix_{}".format(abs(hash(str(default_map))) % 10**8))
+    out = mod.main(["scripts_seed_routing.py", "--db", dbp,
+                    "--from-cache", str(p), "--into", "draft", "--apply"])
+    return dbp, out, capsys.readouterr().out
+
+
+def test_malformed_nondict_value_skipped_with_warning(tmp_path, capsys):
+    default_map = {"坏公司": "oops",
+                   "港九港铁": {"to": ["chenkai@atrailimt.com"], "cc": ["watch@qq.com"]}}
+    dbp, out, stdout = _apply_cache(tmp_path, capsys, default_map)
+    assert _rows(dbp, "draft") == {"港九港铁": json.dumps(["chenkai@atrailimt.com"])}
+    assert out["draft"]["new"] == 1
+    assert "警告" in stdout and "坏公司" in stdout
+
+
+def test_malformed_str_to_skipped_valid_neighbor_kept(tmp_path, capsys):
+    default_map = {"裸串公司": {"to": "ops@x.com", "cc": []},
+                   "港九港铁": {"to": ["chenkai@atrailimt.com"], "cc": ["watch@qq.com"]}}
+    dbp, out, stdout = _apply_cache(tmp_path, capsys, default_map)
+    rows = _rows(dbp, "draft")
+    assert "裸串公司" not in rows and "港九港铁" in rows   # 只跳过畸形键
+    assert out["draft"]["new"] == 1 and "警告" in stdout and "裸串公司" in stdout
+
+
+def test_empty_recipients_dead_row_skipped_with_warning(tmp_path, capsys):
+    default_map = {"空壳公司": {"to": [], "cc": []},
+                   "港九港铁": {"to": ["chenkai@atrailimt.com"], "cc": ["watch@qq.com"]}}
+    dbp, out, stdout = _apply_cache(tmp_path, capsys, default_map)
+    assert _rows(dbp, "draft") == {"港九港铁": json.dumps(["chenkai@atrailimt.com"])}
+    assert out["draft"]["new"] == 1
+    assert "警告" in stdout and "空壳公司" in stdout
+
+
+def test_all_malformed_source_hard_fails_after_warnings(tmp_path, capsys):
+    """全部畸形 → 逐条警告后硬失败：闸门不允许在零有效源时静默通过。"""
+    try:
+        _apply_cache(tmp_path, capsys, {"坏公司": "oops"})
+        assert False, "零有效源应报错"
+    except SystemExit:
+        pass
+    assert "警告" in capsys.readouterr().out

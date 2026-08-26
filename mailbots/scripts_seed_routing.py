@@ -23,7 +23,8 @@ def _fail(msg):
 
 
 def _load_cache_map(path):
-    """读 dsk_config_cache.json 的 default_map：{公司: {'to': [...], 'cc': [...]}}。"""
+    """读 dsk_config_cache.json 的 default_map：{公司: {'to': [...], 'cc': [...]}}。
+    畸形值一律跳过并告警——闸门脚本不写无收件人的死行（运行期 no_route_config 兜底已存在）。"""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -37,9 +38,19 @@ def _load_cache_map(path):
         comp = str(comp or "").strip()
         if not comp:
             continue
-        info = info if isinstance(info, dict) else {}
-        out[comp] = ([str(x) for x in (info.get("to") or [])],
-                     [str(x) for x in (info.get("cc") or [])])
+        if not isinstance(info, dict):
+            print("警告: 跳过 {}: 值不是对象(dict)".format(comp))
+            continue
+        to, cc = info.get("to"), info.get("cc")
+        if not isinstance(to, list) or not isinstance(cc, list):
+            print("警告: 跳过 {}: to/cc 需为列表(裸字符串也算畸形)".format(comp))
+            continue
+        to = [str(x) for x in to]
+        cc = [str(x) for x in cc]
+        if not to and not cc:
+            print("警告: 跳过 {}: to 与 cc 均为空，拒绝写入死行".format(comp))
+            continue
+        out[comp] = (to, cc)
     return out
 
 
