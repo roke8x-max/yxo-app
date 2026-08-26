@@ -10,12 +10,30 @@ class StartupError(RuntimeError):
 
 _CANDIDATE_ROOTS = [r"D:\YXO_DATA", r"\\10.0.199.184\yxo_data"]
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # mailbots/
+_cached_root = None  # 同进程探测成功缓存，避免 notify/identity 每次调用重复探测
 
 
 def detect_root(candidates=None):
-    """返回首个含 WeComBot\\config.py 的根目录；显式传 candidates 供测试注入。"""
-    for cand in (candidates or _CANDIDATE_ROOTS):
+    """返回首个含 WeComBot\\config.py 的根目录；显式传 candidates 供测试注入。
+    环境变量 YXO_ROOT 非空时直接返回该值（对齐 Waybill_Robot.py 既有约定：
+    env 为显式覆盖，不强校验 WeComBot\\config.py）。
+    默认探测的成功结果缓存于模块级 _cached_root，同一进程内不重复探测；
+    显式传 candidates 时绕过缓存（测试语义不变）。"""
+    global _cached_root
+    env_root = os.environ.get("YXO_ROOT")
+    if env_root:
+        return env_root
+    if candidates is not None:
+        for cand in candidates:
+            if os.path.isfile(os.path.join(cand, "WeComBot", "config.py")):
+                return cand
+        raise StartupError(
+            "未找到运行根目录（候选 {} 均无 WeComBot\\config.py）".format(candidates))
+    if _cached_root:
+        return _cached_root
+    for cand in _CANDIDATE_ROOTS:
         if os.path.isfile(os.path.join(cand, "WeComBot", "config.py")):
+            _cached_root = cand
             return cand
     raise StartupError(
         "未找到运行根目录（候选 {} 均无 WeComBot\\config.py）".format(_CANDIDATE_ROOTS))

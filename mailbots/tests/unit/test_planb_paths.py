@@ -6,6 +6,14 @@ from core import paths
 from core.models import MailEvent, ProcessResult, Processor
 
 
+@pytest.fixture(autouse=True)
+def _reset_root_cache():
+    """detect_root 缓存不跨用例污染（monkeypatch 只还原 env，不还原模块状态）。"""
+    paths._cached_root = None
+    yield
+    paths._cached_root = None
+
+
 def test_detect_root_picks_candidate_with_wecombot(tmp_path):
     # 候选1 无 WeComBot\config.py；候选2 有 → 返回候选2
     cand2 = tmp_path / "root2"
@@ -20,8 +28,16 @@ def test_detect_root_raises_when_none(tmp_path):
         paths.detect_root(candidates=[str(tmp_path)])
 
 
-def test_load_accounts_never_raises():
+def test_load_accounts_never_raises(monkeypatch, tmp_path):
+    # YXO_ROOT 注入避免探测真实候选（含 UNC 网络路径超时）
+    monkeypatch.setenv("YXO_ROOT", str(tmp_path))
     assert isinstance(paths.load_accounts(), dict)
+
+
+def test_env_override_and_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("YXO_ROOT", str(tmp_path))
+    assert paths.detect_root() == str(tmp_path)
+    assert paths.detect_root(candidates=[str(tmp_path / "x")]) == str(tmp_path)
 
 
 def test_process_result_and_protocol():
