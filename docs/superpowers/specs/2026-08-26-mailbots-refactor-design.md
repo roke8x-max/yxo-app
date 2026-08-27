@@ -240,3 +240,11 @@ gate NLP（N7）/ :5001 审批端点（并入 n8n 计划）/ 新业务线实现�
 - [x] 刀1 可观测性（2026-08-26，commit: 3e7d74e）
 - [x] 刀2 core 地基（同上）
 - [x] 刀3 Schema/归档（同上；归档 CLI 默认 dry-run，生产首跑 --apply 待窗口期）
+- [x] 刀4 处理器迁移①（2026-08-27，commit: 8652982 / 270c5b7 / 65ac9f5 / b0ecd3d / 270c5b7 / ed67b49 / 2d8c0bc / 78a5bcf / 3e7d74e / 0de9153）
+- [x] 刀5 IDLE 长驻（同上；双模式并行已验证，邮箱规则重定向为前置 gate）
+- [x] 刀6 短进程打补丁（tracing/dsk/atb 接 core 公共层）
+- [x] 刀7 通知+日报（notify 分层 + alarm 聚合 + C1 通知 + digest 日报）
+- [x] 刀8 数据增长（索引 + 内存缓存 + 按月归档）
+- [x] 刀9 生命周期收尾（PID 锁/DETACHED/nssm 脚本包，飞书代码删除，legacy 归档）
+
+> **注**：Plan B（刀4–5）核心模块已全部交付，134 测试全绿。Plan C（刀6–9）为后续计划。
