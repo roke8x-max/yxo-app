@@ -1,0 +1,44 @@
+Content-Type: multipart/mixed; boundary="===============4305735486683961954=="
+MIME-Version: 1.0
+Subject: 
+ =?utf-8?b?6L+Q5Y2V6I2J5Y2VX1lYTy0yMDI2LTY2Nl9DUVdMSlQyNjA3MTMwMDUtU1BCX1hY?=
+ =?utf-8?b?TFUwMDAwMDAy?=
+From: =?utf-8?b?5YiY5am3?= <liuting@yxologistics.com>
+To: maoxiaoyang@cqtransit.com, yangyawen@cqtransit.com,
+ fengqian@cqtransit.com, hanwenhao@cqtransit.com
+Date: Wed, 26 Aug 2026 01:00:00 +0800
+Message-ID: <178767991552.81488.8392015796538632704@yxologistics.com>
+
+--===============4305735486683961954==
+Content-Type: multipart/alternative;
+ boundary="===============2628902660547180206=="
+MIME-Version: 1.0
+
+--===============2628902660547180206==
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: base64
+
+6I2J5Y2V5Y+K6KGl5YWF6LWE5paZ44CC
+
+--===============2628902660547180206==--
+
+--===============4305735486683961954==
+Content-Type: application/octet-stream
+MIME-Version: 1.0
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment;
+ filename*=utf-8''XXLU0000002-260811-070000%E5%B7%B2%E5%8A%A0%E5%AF%86.pdf
+
+JVBERi0xLjQKJXRlc3QtZml4dHVyZQo=
+
+--===============4305735486683961954==
+Content-Type: application/octet-stream
+MIME-Version: 1.0
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment;
+ filename*=utf-8''%E8%A1%A5%E5%85%85%E8%AF%B4%E6%98%8E.docx
+
+UEsgdGVzdCBkb2N4
+
+--===============4305735486683961954==--

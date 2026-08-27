@@ -29,3 +29,6 @@ __pycache__/
 *.bak_*
 *.tmp
 temp_sync_out.txt
+
+# test db snapshot kept in repo (anti-loss P0)
+!tests/data/*.db

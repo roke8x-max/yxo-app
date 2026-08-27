@@ -182,40 +182,41 @@ def run_robot():
                 if not match: continue
                 train_id = match.group(1)
 
-                if train_id in train_companies:
-                    print(f"   🎯 匹配到班列 [{train_id}]，准备分发...")
-                    for comp in train_companies[train_id]:
-                        # ── 运踪退舱跳过（2026-08-03）：该公司本班列箱号全部退舱则不发 ──
-                        if tracing_company_all_cancelled(train_id, comp):
-                            print(f"      ⏭ 班列 [{train_id}] 公司 [{comp}] 本班列箱号全部为退舱，跳过运踪转发")
-                            continue
-                        info = default_map.get(comp)
-                        if not info or not info['to']:
-                            print(f"      ⚠ 公司 {comp} 无 DEFAULT 路由，跳过")
-                            continue
-                        cfg = {'to': info['to'], 'cc': info['cc'], 'tag': comp}
-                        # 发件人：按接收公司负责人发信（与 ATB/DSK 一致）
-                        sen = sender_for_company(cfg['tag'])
-                        s_email, s_pwd = (sen if (sen and sen[1]) else (email_addr, password))
-                        try:
-                            # 1. 执行发送
-                            forward_email_via_smtp(msg, cfg['to'], cfg['cc'], s_email, s_pwd)
-                            print(f"      ✅ 转发成功 -> {cfg['tag']} | 由:{s_email}")
-                            
-                            # 2. 写入本地 yxo.db tracing_log（P4①：已摘除飞书 TABLE_LOG 写入，本地即为唯一落点）
-                            now = datetime.now()
-                            log_id_val = f"{train_id}_{cfg['tag']}_{now.strftime('%H%M%S')}"
-                            fwd_detail = f"发至:{','.join(cfg['to'])} | 由:{s_email}"
-                            write_tracing_log(log_id_val, train_id, cfg['tag'], msg_id, fwd_detail, now.strftime("%Y-%m-%d %H:%M"), _msg_text(msg))
-                            forwarded += 1
-                        except Exception as e_send:
-                            print(f"      ❌ 发送失败 -> {cfg['tag']}: {e_send}")
+                companies = resolve_train_companies(train_id, train_companies)
+                if not companies:
+                    print(f"   ⚠️ 班列 [{train_id}] 无路由（bot_config 与 records 均无公司），跳过。")
+                    continue
+                print(f"   🎯 匹配到班列 [{train_id}]，准备分发...")
+                for comp in companies:
+                    # ── 运踪退舱跳过（2026-08-03）：该公司本班列箱号全部退舱则不发 ──
+                    if tracing_company_all_cancelled(train_id, comp):
+                        print(f"      ⏭ 班列 [{train_id}] 公司 [{comp}] 本班列箱号全部为退舱，跳过运踪转发")
+                        continue
+                    info = default_map.get(comp)
+                    if not info or not info['to']:
+                        print(f"      ⚠ 公司 {comp} 无 DEFAULT 路由，跳过")
+                        continue
+                    cfg = {'to': info['to'], 'cc': info['cc'], 'tag': comp}
+                    # 发件人：按接收公司负责人发信（与 ATB/DSK 一致）
+                    sen = sender_for_company(cfg['tag'])
+                    s_email, s_pwd = (sen if (sen and sen[1]) else (email_addr, password))
+                    try:
+                        # 1. 执行发送
+                        forward_email_via_smtp(msg, cfg['to'], cfg['cc'], s_email, s_pwd)
+                        print(f"      ✅ 转发成功 -> {cfg['tag']} | 由:{s_email}")
 
-                    # 全部发完后标为已读
-                    mail_conn.store(m_id, '+FLAGS', '\\Seen')
-                    mark('tracking', msg_id)
-                else:
-                    print(f"   ⚠️ 班列 [{train_id}] 暂无配置，跳过。")
+                        # 2. 写入本地 yxo.db tracing_log（P4①：已摘除飞书 TABLE_LOG 写入，本地即为唯一落点）
+                        now = datetime.now()
+                        log_id_val = f"{train_id}_{cfg['tag']}_{now.strftime('%H%M%S')}"
+                        fwd_detail = f"发至:{','.join(cfg['to'])} | 由:{s_email}"
+                        write_tracing_log(log_id_val, train_id, cfg['tag'], msg_id, fwd_detail, now.strftime("%Y-%m-%d %H:%M"), _msg_text(msg))
+                        forwarded += 1
+                    except Exception as e_send:
+                        print(f"      ❌ 发送失败 -> {cfg['tag']}: {e_send}")
+
+                # 全部发完后标为已读
+                mail_conn.store(m_id, '+FLAGS', '\\Seen')
+                mark('tracking', msg_id)
             mail_conn.close()
             mail_conn.logout()
         except Exception as e: print(f"   ❌ 异常: {e}")
@@ -357,6 +358,37 @@ def load_tracing_routing():
             train_companies[k] = comps
     conn.close()
     return default_map, train_companies
+
+
+def resolve_train_companies(train_id, train_companies=None):
+    """运踪 Layer1：这封邮件归哪些公司。
+    优先 bot_config 覆盖层；否则从主数据 records(班列号->开票子公司名称) 推导。
+    train_id 形如 '793'（来自主题中 "train" 后接数字的模式，如 YXO-2026-793）。
+    """
+    if train_companies is None:
+        _, train_companies = load_tracing_routing()
+    override = train_companies.get(train_id)
+    if override:
+        return list(override)
+    comps, seen = [], set()
+    try:
+        conn = get_conn()
+        try:
+            for pat in (f"WB{train_id}", train_id):
+                rows = conn.execute(
+                    "SELECT DISTINCT 开票子公司名称 FROM records "
+                    "WHERE (班列号=? OR 班列号 LIKE ?) AND (is_deleted IS NULL OR is_deleted=0)",
+                    (pat, f"%{pat}%"),
+                ).fetchall()
+                for (name,) in rows:
+                    if name and name not in seen:
+                        seen.add(name)
+                        comps.append(name)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  ⚠ [resolve] records 查询异常(班列 {train_id}): {e}")
+    return comps
 
 
 def seed_tracking_history(fs, table_id):

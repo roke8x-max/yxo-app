@@ -1,0 +1,14 @@
+# WeComBot 运行时数据 / 真凭据（绝不入库）
+secrets.json
+*.db
+*.db-journal
+logs/
+data/
+cache/
+backups/
+temp/
+__pycache__/
+*.pyc
+wecom_out.log
+*.docx
+*.doc
