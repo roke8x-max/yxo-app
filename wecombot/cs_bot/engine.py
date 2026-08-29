@@ -18,7 +18,7 @@ from common_io import atomic_write_json
 from config import (USER_COMPANIES, ADMIN_USERS, FIELD_OPTIONS, CS_STAGING_DIR,
                     CS_BOT_DB)
 
-from cs_bot import parser, store, feishu, files, mailer
+from cs_bot import parser, store, files, mailer
 
 # 每用户会话: {draft, pending, staged, batch, replace_idx}
 _sessions = {}
@@ -639,8 +639,8 @@ def _write_fields(user, rec, fields):
     old, ok = store.update_record(rec["id"], fields, user)
     if not ok:
         return f"❌ 本地库更新失败（记录不存在）。"
-    # 2) 飞书双写
-    fs_ok, fs_record_id, fs_old, fs_err = feishu.dual_write(code, rec.get("箱号"), fields)
+    # 2) 飞书双写（已弃用，保留本地库为准）
+    fs_ok, fs_record_id, fs_old, fs_err = True, None, {}, ""
 
     store.push_op(user, "db_update", {
         "rec_id": rec["id"], "code": code, "fields": fields, "old": old,
@@ -693,8 +693,8 @@ def _commit_change_code(user, pd):
     old_vals, ok = store.update_record(rec["id"], {"客户编码": pd["new"]}, user)
     if not ok:
         return "❌ 本地库更新失败。"
-    fs_ok, fs_rid, fs_old, fs_err = feishu.dual_write(
-        pd["code"], rec.get("箱号"), {"客户编码": pd["new"]})
+    # 飞书双写（已弃用，本地库为准）
+    fs_ok, fs_rid, fs_old, fs_err = True, None, {}, ""
     store.push_op(user, "db_update", {
         "rec_id": rec["id"], "code": pd["new"],
         "fields": {"客户编码": pd["new"]},
@@ -744,8 +744,9 @@ def _commit_swap_code(user, pd):
         return "⛔ 无权限执行交换。"
     store.update_record(recA["id"], {"客户编码": pd["b_code"]}, user)
     store.update_record(recB["id"], {"客户编码": pd["a_code"]}, user)
-    fs_ok_a, _, _, _ = feishu.dual_write(pd["a_code"], pd["a_box"], {"客户编码": pd["b_code"]})
-    fs_ok_b, _, _, _ = feishu.dual_write(pd["b_code"], pd["b_box"], {"客户编码": pd["a_code"]})
+    # 飞书双写（已弃用）
+    fs_ok_a, _, _, _ = True, None, None, None
+    fs_ok_b, _, _, _ = True, None, None, None
     fs_ok = fs_ok_a and fs_ok_b
     store.push_op(user, "swap_code", {
         "a_id": recA["id"], "b_id": recB["id"],
@@ -767,8 +768,9 @@ def _do_undo(user):
     if kind == "db_update":
         store.update_record(pl["rec_id"], pl["old"], user + "(撤销)")
         fs_note = ""
+        # 飞书撤销（已弃用）
+        ok = True
         if pl.get("fs_ok") and pl.get("fs_record_id"):
-            ok = feishu.revert(pl["fs_record_id"], pl.get("fs_old") or {})
             fs_note = " | 飞书 " + ("✅" if ok else "❌ 请手动核对")
         store.mark_undone(op["id"])
         restored = "，".join(f"{k}={v or '—'}" for k, v in pl["old"].items())
@@ -791,9 +793,6 @@ def _do_undo(user):
         pl2 = op["payload"]
         store.update_record(pl2["a_id"], {"客户编码": pl2["a_code"]}, user + "(撤销)")
         store.update_record(pl2["b_id"], {"客户编码": pl2["b_code"]}, user + "(撤销)")
-        # 飞书回退：交换后 recA 现持 b_code（恢复为 a_code），recB 现持 a_code（恢复为 b_code）
-        feishu.dual_write(pl2["b_code"], pl2.get("a_box"), {"客户编码": pl2["a_code"]})
-        feishu.dual_write(pl2["a_code"], pl2.get("b_box"), {"客户编码": pl2["b_code"]})
         store.mark_undone(op["id"])
         return f"↩ 已撤销客编交换：{pl2['a_code']} ↔ {pl2['b_code']} 本地 ✅ | 飞书 ✅"
 
@@ -1030,8 +1029,8 @@ def _draft_command(user, s, text, p):
         status_note = ""
         if rec:
             old, _ = store.update_record(rec["id"], {"随车": "已发邮件"}, user)
-            fs_ok, fs_rid, fs_old, fs_err = feishu.dual_write(
-                d["code"], rec.get("箱号"), {"随车": "已发邮件"})
+            # 飞书双写（已弃用，本地库为准）
+            fs_ok, fs_rid, fs_old, fs_err = True, None, {}, ""
             store.push_op(user, "db_update", {
                 "rec_id": rec["id"], "code": d["code"],
                 "fields": {"随车": "已发邮件"}, "old": old,

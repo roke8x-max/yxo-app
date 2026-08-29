@@ -132,12 +132,6 @@ MANIFEST_WRITABLE = ["班列号", "口岸", "发班时间", "箱号", "封号", 
 MANIFEST_ADMIN = "毛骁洋"
 
 # ==================== WeComBot 相关配置 ====================
-# 企业微信应用配置（从环境变量或 config_local 读取）
-FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
-FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
-FEISHU_APP_TOKEN = os.environ.get("FEISHU_APP_TOKEN", "")
-FEISHU_APP_AES_KEY = os.environ.get("FEISHU_APP_AES_KEY", "")
-
 # 企微通讯录/应用配置
 WECOM_CORP_ID = os.environ.get("WECOM_CORP_ID", "")
 WECOM_AGENT_ID = os.environ.get("WECOM_AGENT_ID", "")
