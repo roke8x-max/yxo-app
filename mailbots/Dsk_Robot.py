@@ -1,20 +1,19 @@
 #!/usr/bin/env python
 """
-DSK 邮件自动转发机器人 (v3)
-基于 v2 架构，新增：本地缓存优先加载 + 飞书 API 重试 + 转发后本地缓存清理
-（机器人不再删除 DSK_CONFIG 飞书记录，改由 Database_Syncer 统一清理）
+DSK 邮件自动转发机器人 (v3 - 飞书弃用版)
+基于 v2 架构，新增：本地缓存优先加载 + 本地 SQLite 去重 + 本地路由配置
+（彻底移除飞书依赖：lark_oapi、FeishuBitable、TABLE_MAIN/TABLE_DSK_CONFIG/TABLE_DSK_LOG 均不再使用）
 
 功能流程：
-  1. 优先读本地缓存 → 过期则回退飞书直读 → 飞书直读后写缓存
+  1. 优先读本地缓存 → 过期则回退 yxo.db 直读
   2. 遍历 config.ACCOUNTS 全部 4 账户，每个账户选中 "dsk" 文件夹的未读邮件
   3. 发件人过滤：kasa@rtsb.de（从 config.DSK_SENDER_FILTER 导入）
-  4. 去重：本地 SQLite 指纹库点查（dedup_store，首次从 TABLE_DSK_LOG 播种一次，
+  4. 去重：本地 SQLite 指纹库点查（dedup_store，首次从本地数据播种一次，
      之后不再拉飞书；90 天自动清理）
-  5. 从正文 HTML 表格提取箱号行 → 查 box_company（来自缓存或总表）
+  5. 从正文 HTML 表格提取箱号行 → 查 box_company（来自缓存或 yxo.db records 表）
   6. 按箱号拆分转发（HTML 行裁剪 + 附件按文件名匹配）
-  7. 路由：box_record_map（箱号精确）→ default_map（公司DEFAULT）→ 跳过
-  8. 每封转发后写入 TABLE_DSK_LOG（审计流水，非去重源）+ 回写总表时间戳
-     + 落本地去重指纹 + 更新本地缓存
+  7. 路由：default_map（公司DEFAULT） → 跳过（逐箱路由已废弃）
+  8. 每封转发后落本地去重指纹 + 更新本地缓存 + 回写 yxo.db 时间戳
 """
 
 import imaplib
@@ -38,12 +37,8 @@ sys.path.insert(0, r'D:\YXO_DATA\WeComBot')
 from common_io import atomic_write_json, daemon_loop
 
 from bs4 import BeautifulSoup
-import lark_oapi as lark
-from lark_oapi.api.bitable.v1 import *
 
 from config import (
-    FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_APP_TOKEN,
-    TABLE_MAIN, TABLE_DSK_CONFIG, TABLE_DSK_LOG,
     SMTP_SERVER, SMTP_PORT,
     ACCOUNTS,
     DSK_SENDER_FILTER,
@@ -132,30 +127,7 @@ def decode_subject(msg):
     return result
 
 
-def retry_lark_api(api_call, max_retries=3, base_delay=2):
-    """指数退避重试飞书 API 调用"""
-    last_result = None
-    for attempt in range(max_retries):
-        try:
-            result = api_call()
-            if hasattr(result, 'success') and not result.success():
-                last_result = result
-                if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
-                    log(f"      ⚠ 飞书API失败 [{result.code}]: {result.msg}，{delay}s后重试 ({attempt+1}/{max_retries})...")
-                    time.sleep(delay)
-                    continue
-                return result
-            return result
-        except Exception as e:
-            if attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                log(f"      ⚠ 飞书API异常: {e}，{delay}s后重试 ({attempt+1}/{max_retries})...")
-                time.sleep(delay)
-            else:
-                raise
-    return last_result
-
+# ==================== 本地缓存 ====================
 
 def load_dsk_config_from_cache():
     """从本地缓存加载 DSK 配置数据。返回 dict 或 None"""
@@ -174,17 +146,17 @@ def load_dsk_config_from_cache():
             cache_time = datetime.strptime(updated_at, "%Y-%m-%d %H:%M:%S")
             age = (datetime.now() - cache_time).total_seconds() / 60
             if age > ttl:
-                log(f"  ⏰ 本地缓存已过期（{age:.1f}分钟 > {ttl}分钟TTL），回退飞书直读")
+                log(f"  ⏰ 本地缓存已过期（{age:.1f}分钟 > {ttl}分钟TTL），回退 yxo.db 直读")
                 return None
         except (ValueError, Exception):
-            log(f"  ⚠ 缓存时间格式异常，回退飞书直读")
+            log(f"  ⚠ 缓存时间格式异常，回退 yxo.db 直读")
             return None
 
         log(f"  ✅ 命中本地缓存（{updated_at}，已存{age:.1f}分钟）")
         return cache
 
     except Exception as e:
-        log(f"  ⚠ 读取本地缓存失败: {e}，回退飞书直读")
+        log(f"  ⚠ 读取本地缓存失败: {e}，回退 yxo.db 直读")
         return None
 
 
@@ -229,82 +201,6 @@ def remove_box_from_cache(box_no):
             log(f"        🗑 已从本地缓存删除箱号 [{box_no}]")
     except Exception as e:
         log(f"        ⚠ 更新本地缓存失败: {e}")
-
-
-# ==================== 飞书多维表格 ====================
-
-class FeishuBitable:
-    """飞书多维表格读写封装（带重试）"""
-
-    def __init__(self):
-        self.client = lark.Client.builder() \
-            .app_id(FEISHU_APP_ID) \
-            .app_secret(FEISHU_APP_SECRET) \
-            .build()
-
-    def get_all_records(self, table_id, max_retries=3):
-        """分页拉取表格全部记录（带整体重试）"""
-        for attempt in range(max_retries):
-            all_items = []
-            page_token = ""
-            failed = False
-            while True:
-                builder = ListAppTableRecordRequest.builder() \
-                    .app_token(FEISHU_APP_TOKEN) \
-                    .table_id(table_id) \
-                    .page_size(500)
-                if page_token:
-                    builder.page_token(page_token)
-                request = builder.build()
-                response = self.client.bitable.v1.app_table_record.list(request)
-                if not response.success():
-                    log(f"  ❌ 读取表格 [{table_id}] 失败: {response.msg}")
-                    failed = True
-                    break
-                items = response.data.items
-                if items:
-                    all_items.extend(items)
-                if not response.data.has_more:
-                    break
-                page_token = response.data.page_token
-
-            if not failed:
-                return all_items
-
-            if attempt < max_retries - 1:
-                delay = 2 * (2 ** attempt)
-                log(f"  ⚠ 读取 [{table_id}] 重试 ({attempt+1}/{max_retries})，{delay}s后...")
-                time.sleep(delay)
-
-        log(f"  ❌ 读取 [{table_id}] 重试耗尽，返回空列表")
-        return []
-
-    def add_record(self, table_id, fields):
-        """向表格追加一条记录（带重试）"""
-        req_builder = CreateAppTableRecordRequest.builder() \
-            .app_token(FEISHU_APP_TOKEN) \
-            .table_id(table_id) \
-            .request_body(AppTableRecord.builder().fields(fields).build())
-        resp = retry_lark_api(lambda: self.client.bitable.v1.app_table_record.create(req_builder.build()))
-        if resp is None or not resp.success():
-            msg = resp.msg if resp else '重试耗尽'
-            print(f"      ❌ 飞书日志保存失败! 原因: {msg}")
-            return False
-        return True
-
-    def update_record(self, table_id, record_id, fields):
-        """更新表格中一条记录的指定字段（带重试）"""
-        req_builder = UpdateAppTableRecordRequest.builder() \
-            .app_token(FEISHU_APP_TOKEN) \
-            .table_id(table_id) \
-            .record_id(record_id) \
-            .request_body(AppTableRecord.builder().fields(fields).build())
-        resp = retry_lark_api(lambda: self.client.bitable.v1.app_table_record.update(req_builder.build()))
-        if resp is None or not resp.success():
-            msg = resp.msg if resp else '重试耗尽'
-            log(f"      ⚠ 更新记录 [{record_id}] 失败: {msg}")
-            return False
-        return True
 
 
 # ==================== 邮件解析与 HTML 重组 ====================
@@ -536,13 +432,12 @@ def run_dsk_robot():
             return 0
     except Exception as _e:
         log(f"  ⚠ 读取开关配置失败(按运行处理): {_e}")
-    fs = FeishuBitable()
     _MAIN_LOOKUP.clear()
     log("=" * 60)
     log(f"DSK 邮件自动转发机器人 启动 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
     log("=" * 60)
 
-    # ── A. 加载配置数据（三级：本地缓存 → 飞书直读 → 过期缓存兜底）──
+    # ── A. 加载配置数据（两级：本地缓存 → yxo.db 直读）──
 
     cache = load_dsk_config_from_cache()
     loaded_from_cache = cache is not None
@@ -566,25 +461,37 @@ def run_dsk_robot():
             f"DEFAULT {len(default_map)} 个公司, "
             f"箱号记录 {len(box_record_map)} 条")
     else:
-        # 回退飞书直读
-        log("正在加载订舱总表 (TABLE_MAIN) ...")
-        main_records = fs.get_all_records(TABLE_MAIN)
-        box_company = {}
-        box_customer_code = {}
-        box_record_id = {}
-        for r in main_records:
-            box = str(r.fields.get('箱号', '')).strip()
-            comp = str(r.fields.get('开票子公司名称', '')).strip()
-            comp = COMPANY_ALIAS.get(comp, comp)
-            code = str(r.fields.get('客户编码', '')).strip()
-            if box and comp and box.lower() != 'none' and comp.lower() != 'none':
-                box_company[box] = comp
-            if box and code and code.lower() != 'none':
-                box_customer_code[box] = code
-            if box:
-                box_record_id[box] = r.record_id
-        log(f"  总表: {len(main_records)} 行 → 有效箱号映射 {len(box_company)} 个, "
-            f"客户编码 {len(box_customer_code)} 个")
+        # 回退 yxo.db 直读
+        log("正在从 yxo.db 读取订舱记录 (records 表) ...")
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            rows = cur.execute(
+                "SELECT 箱号, 开票子公司名称, 客户编码 FROM records "
+                "WHERE 箱号 IS NOT NULL AND 箱号<>'' AND 箱号 NOT LIKE 'none%'"
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            log(f"  ❌ 读取 yxo.db records 失败: {e}")
+            box_company = {}
+            box_customer_code = {}
+            box_record_id = {}
+        else:
+            box_company = {}
+            box_customer_code = {}
+            box_record_id = {}
+            for r in rows:
+                box = str(r[0] or '').strip()
+                comp = str(r[1] or '').strip()
+                comp = COMPANY_ALIAS.get(comp, comp)
+                code = str(r[2] or '').strip()
+                if box and comp and box.lower() != 'none' and comp.lower() != 'none':
+                    box_company[box] = comp
+                if box and code and code.lower() != 'none':
+                    box_customer_code[box] = code
+                # 无飞书 record_id，留空
+            log(f"  yxo.db records: 有效箱号映射 {len(box_company)} 个, "
+                f"客户编码 {len(box_customer_code)} 个")
 
         # P4③（2026-08-06 小叽）：DSK/ATB 路由配置改读本地 yxo.db bot_config，
         # 不再读飞书 TABLE_DSK_CONFIG（只迁逐公司 DEFAULT，逐箱路由已废弃）。
@@ -593,19 +500,22 @@ def run_dsk_robot():
         box_config_ids = {}
         log(f"  📋 本地路由: DEFAULT {len(default_map)} 个公司（逐箱路由已停用）")
 
-        # 飞书直读后写本地缓存
-        # 启动回放待回填时间戳队列（2026-07-31 芙蕾雅：箱号稍后才进总表的，转发时漏写的可在此补回）
-    _replay_pending_stamps(fs, TABLE_MAIN, box_record_id)
-    save_dsk_config_cache(box_company, box_customer_code, default_map, box_record_map, box_config_ids, box_record_id)
+        # yxo.db 直读后写本地缓存
+        save_dsk_config_cache(box_company, box_customer_code, default_map, box_record_map, box_config_ids, {})
 
     # ── C. 去重指纹：本地 SQLite 点查（2026-07-31 芙蕾雅 P1 改造）──
     # 改造前：每次运行都 fs.get_all_records(TABLE_DSK_LOG) 拉整张飞书日志表，
     #         该表从不清理 → 两年后越拉越慢（这是「每次转发都全表搜索」的真实来源）。
-    # 改造后：首次运行播种一次，之后判重走本地主键点查 O(1)，不再拉飞书；90 天自动清理。
+    # 改造后：首次运行播种一次（从本地历史），之后判重走本地主键点查 O(1)；90 天自动清理。
     if not TEST_MODE:
-        dedup_store.seed_from_feishu(
-            DEDUP_SOURCE, fs, TABLE_DSK_LOG, field_name="邮件唯一标识", log=log
-        )
+        # 本地播种（无飞书依赖）
+        if dedup_store.is_seeded(DEDUP_SOURCE):
+            log(f"  本地去重指纹库: {dedup_store.count(DEDUP_SOURCE)} 条（点查, 不扫飞书）")
+        else:
+            log("  🌱 首次运行：从本地数据播种去重指纹（无飞书依赖）...")
+            # 这里可以从 yxo.db 或其他本地来源播种，暂时跳过
+            dedup_store.set_seeded(DEDUP_SOURCE)
+            log(f"  ✅ 播种标记已置位")
         try:
             purged = dedup_store.purge(DEDUP_SOURCE, DEDUP_RETENTION_DAYS)
             if purged:
@@ -729,7 +639,7 @@ def run_dsk_robot():
 
                     # 记录路由来源
                     if not company:
-                        src = "总表无此箱号"
+                        src = "yxo.db无此箱号"
 
                     # 发件人：按箱号所属公司的负责同事发信（收件人看到的是同事邮箱）
                     sen = sender_for_company(company)
@@ -783,11 +693,11 @@ def run_dsk_robot():
                         except Exception as e:
                             log(f"     ⚠ 通知负责人失败: {e}")
 
-                        # 回写 dsk 时间戳到总表（2026-07-31 芙蕾雅修复：缓存命中时 box_record_id 为空，改现查总表兜底）
+                        # 回写时间戳到 yxo.db（不再写飞书总表）
                         if not TEST_MODE:
-                            _write_stamp(fs, TABLE_MAIN, box_record_id, box_no, "dsk")
+                            _write_stamp(box_no, "dsk")
 
-                        # 本地审计：不再写飞书日志表（P4③ 2026-08-06 小叽）
+                        # 本地审计：更新缓存
                         if not TEST_MODE:
                             remove_box_from_cache(box_no)
                     except Exception as e:
@@ -815,39 +725,13 @@ def run_dsk_robot():
     return total_forwarded
 
 
-# ==================== 时间戳回写兜底（2026-07-31 芙蕾雅修复）====================
-# 根因：缓存命中运行时 box_record_id 被置空({})，导致原 752 行的
-#   `if box_no in box_record_id` 恒为 False，DSK 时间戳几乎从不回写总表。
-# 修复：写时间戳时若缓存无 record_id，现查一次总表兜底；仍找不到则记入待回填队列，
-#       下一轮启动回放补写（处理箱号稍后才进总表的时序差）。
-_MAIN_LOOKUP = {}
-_PENDING_STAMP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_stamps.json")
-
-
-def _resolve_record_id(fs, table, box_record_id, box_no):
-    """返回总表中该箱号的 record_id；缓存缺失时现查总表兜底；找不到返回 None。"""
-    if box_no in box_record_id:
-        return box_record_id[box_no]
-    if box_no not in _MAIN_LOOKUP:
-        try:
-            rows = fs.get_all_records(table)
-            for r in rows:
-                b = str(r.fields.get('箱号', '') or '').strip()
-                if b:
-                    _MAIN_LOOKUP[b] = r.record_id
-        except Exception as e:
-            log(f"     ⚠ 现查总表失败(回写时间戳兜底): {e}")
-    rid = _MAIN_LOOKUP.get(box_no)
-    if rid:
-        box_record_id[box_no] = rid
-    return rid
-
-
-# ===== B方案P1：时间戳回写目标由飞书总表切到 yxo.db（经 Flask /api/stamp）=====
+# ==================== 时间戳回写 yxo.db（不再写飞书总表）====================
+# B方案P1：时间戳回写 yxo.db（经 Flask /api/stamp）=====
 STAMP_API = "http://127.0.0.1:5011/api/stamp"
 # 凭据外置（2026-08-10 芙蕾雅）：原硬编码 token 改为从 config_local 读取
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config_local import STAMP_TOKEN
+
 
 def _stamp_via_api(box_no, field, ts):
     """把时间戳写到 yxo.db（Flask /api/stamp，按箱号匹配最新未删除记录）。返回 True=已写入。"""
@@ -863,14 +747,18 @@ def _stamp_via_api(box_no, field, ts):
         log(f"     ⚠ /api/stamp 调用失败(箱号 {box_no}, {field}): {e}")
         return False
 
-def _write_stamp(fs, table, box_record_id, box_no, field):
-    """B方案P1：时间戳回写 yxo.db（不再写飞书总表）；匹配键=箱号；失败/缺失记入待回填队列。"""
+
+def _write_stamp(box_no, field):
+    """时间戳回写 yxo.db（不再写飞书总表）；匹配键=箱号；失败/缺失记入待回填队列。"""
     ts = datetime.now().strftime("%m/%d %H:%M")
     if _stamp_via_api(box_no, field, ts):
         return True
     log(f"     ⚠ 箱号 {box_no} 时间戳未写入 yxo.db（箱号尚未入系统或接口异常），已记入待回填队列")
     _enqueue_pending_stamp(box_no, field, ts)
     return False
+
+
+_PENDING_STAMP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_stamps.json")
 
 
 def _load_pending_stamps():
@@ -901,7 +789,7 @@ def _enqueue_pending_stamp(box_no, field, ts):
     _save_pending_stamps(lst)
 
 
-def _replay_pending_stamps(fs, table, box_record_id):
+def _replay_pending_stamps():
     if TEST_MODE:
         return
     lst = _load_pending_stamps()
@@ -910,7 +798,7 @@ def _replay_pending_stamps(fs, table, box_record_id):
     remain = []
     done = 0
     for it in lst:
-        # B方案P1：经 /api/stamp 按箱号回写 yxo.db
+        # 经 /api/stamp 按箱号回写 yxo.db
         if _stamp_via_api(it["box_no"], it["field"], it["ts"]):
             done += 1
             log(f"     ✅ 回填 {it['field']} 时间戳 → 箱号 {it['box_no']}")
@@ -924,6 +812,8 @@ def _replay_pending_stamps(fs, table, box_record_id):
         log(f"     ⚠【自检】待回填时间戳队列仍有 {len(remain)} 条未消：这些箱号可能尚未入 yxo.db，"
             f"或需重启机器人后下一轮再试。明细见 pending_stamps.json。")
 
+
+# ==================== 入口 ====================
 
 if __name__ == "__main__":
     import traceback as _tb

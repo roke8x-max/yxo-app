@@ -185,61 +185,6 @@ def purge(source=None, days=DEFAULT_RETENTION_DAYS):
         conn.close()
 
 
-# ==================== 一次性播种 ====================
-
-def seed_from_feishu(source, fs, table_id, field_name="邮件唯一标识",
-                     extra_ids=None, log=print):
-    """
-    首次运行时从飞书日志表播种一次；已播种过则直接跳过（不再拉飞书）。
-
-    参数
-    ----
-    fs         : FeishuBitable 实例
-    table_id   : 飞书日志表 ID
-    extra_ids  : 额外要合并的历史指纹（如 ATB 旧的 atb_forwarded.json）
-    返回
-    ----
-    True 表示本次执行了播种；False 表示此前已播种、跳过。
-    """
-    if is_seeded(source):
-        if extra_ids:
-            mark_many(source, extra_ids)
-        return False
-
-    log("  🌱 首次运行：从飞书日志表播种去重指纹（仅此一次）...")
-    if extra_ids:
-        n = mark_many(source, extra_ids)
-        if n:
-            log(f"     合并本地历史指纹 {n} 条")
-
-    try:
-        rows = fs.get_all_records(table_id)
-    except Exception as e:
-        log(f"  ⚠ 播种失败（下次启动重试）: {e}")
-        return False
-
-    ids = []
-    for r in rows:
-        mid = str(r.fields.get(field_name, "") or "").strip()
-        if mid:
-            ids.append(mid)
-
-    # ⚠ 关键：FeishuBitable.get_all_records 读取失败时**返回空列表而非抛异常**
-    # （见 Atb_Robot/Dsk_Robot 中该方法「重试耗尽，返回空列表」分支）。
-    # 若此时贸然置 seeded 标记，历史指纹会被永久丢弃 → 有重复转发风险。
-    # 因此拉到 0 条一律视为「未成功播种」，不置标记，下次启动重试。
-    # 代价仅是空表时每次多拉 1 页，可忽略。
-    if not ids:
-        log("  ⚠ 飞书日志表返回 0 条（可能是读取失败），本次不置播种标记，下次启动重试")
-        return False
-
-    mark_many(source, ids)
-    log(f"     从飞书导入 {len(ids)} 条")
-    set_seeded(source)
-    log(f"  ✅ 播种完成，本地指纹库共 {count(source)} 条；后续不再拉取飞书日志表")
-    return True
-
-
 if __name__ == "__main__":
     # 简易自检：python dedup_store.py
     print("DB:", DB_PATH)

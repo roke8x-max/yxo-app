@@ -33,18 +33,6 @@ ENCODING_AES_KEY = _SECRETS["ENCODING_AES_KEY"]
 # 微信客服可独立配置 Secret；若空则复用上面的 SECRET
 KF_SECRET = _SECRETS.get("KF_SECRET", "")
 
-# ==================== Feishu Bitable ====================
-FEISHU_APP_ID = _SECRETS.get("FEISHU_APP_ID", "")
-FEISHU_APP_SECRET = _SECRETS.get("FEISHU_APP_SECRET", "")
-FEISHU_APP_TOKEN = _SECRETS.get("FEISHU_APP_TOKEN", "")
-
-# Table IDs
-TABLE_CONFIG = "tbl4wFdo9scMmUM7"        # Tracing config table
-TABLE_LOG = "tblm1skrYicbmNqk"           # Tracing log table
-TABLE_MAIN = "tbl73fJJQmk4S8ly"          # Booking master table
-TABLE_DSK_CONFIG = "tblpp0CHtSYDDKru"    # DSK config table
-TABLE_DSK_LOG = "tblejy6w0NXMNoje"       # DSK log table
-
 # ==================== Mail config ====================
 SMTP_SERVER = "smtp.qiye.aliyun.com"
 SMTP_PORT = 465

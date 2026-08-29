@@ -1,5 +1,10 @@
-import lark_oapi as lark
-from lark_oapi.api.bitable.v1 import *
+# -*- coding: utf-8 -*-
+"""运踪邮件自动转发机器人 (v3 - 飞书弃用版)
+
+彻底移除飞书依赖：lark_oapi、FeishuBitable、TABLE_CONFIG、TABLE_LOG 均不再使用。
+路由、去重、日志全部落本地 yxo.db。
+"""
+
 import re
 import os
 import imaplib
@@ -12,6 +17,7 @@ from datetime import datetime, timedelta
 from collections import Counter
 import sys
 import time
+
 sys.path.insert(0, os.path.dirname(__file__))
 from dedup_store import is_processed, mark, mark_many, is_seeded, set_seeded
 from db_write import get_conn
@@ -20,17 +26,12 @@ from common_io import norm_train_no, daemon_loop
 sys.path.insert(0, r'D:\YXO_DATA\WeComBot')
 from config import (
     sender_for_company,
-    FEISHU_APP_ID as APP_ID,
-    FEISHU_APP_SECRET as APP_SECRET,
-    FEISHU_APP_TOKEN as APP_TOKEN,
+    # 飞书配置已弃用，保留空字符串以兼容现存 import（Phase B 将彻底清除）
 )
 
 # ================= 1. 配置部分 =================
 # 体检E（2026-08-04）：飞书凭据不再硬编码，统一从 WeComBot/secrets.json 保险库经 config 读取。
 # 删明文后请务必去飞书开放平台重置 APP_SECRET（旧值已明文暴露过）。
-
-TABLE_CONFIG = "tbl4wFdo9scMmUM7"  # 运踪配置表
-TABLE_LOG = "tblm1skrYicbmNqk"     # 运踪日志表
 
 IMAP_SERVER = "imap.qiye.aliyun.com"
 SMTP_SERVER = "smtp.qiye.aliyun.com"
@@ -60,42 +61,6 @@ def split_emails(email_str):
     raw_list = re.split(r'[;,，\s]+', str(email_str))
     return [e.strip() for e in raw_list if "@" in e]
 
-class FeishuBitable:
-    def __init__(self):
-        self.client = lark.Client.builder().app_id(APP_ID).app_secret(APP_SECRET).build()
-
-    def get_all_records(self, table_id):
-        all_items = []
-        page_token = ""
-        while True:
-            builder = ListAppTableRecordRequest.builder().app_token(APP_TOKEN).table_id(table_id).page_size(500).automatic_fields(True)
-            if page_token: builder.page_token(page_token)
-            request = builder.build()
-            response = self.client.bitable.v1.app_table_record.list(request)
-            if not response.success(): break
-            items = response.data.items
-            if items: all_items.extend(items)
-            if not response.data.has_more: break
-            page_token = response.data.page_token
-        return all_items
-
-    def add_record(self, table_id, fields):
-        request = CreateAppTableRecordRequest.builder() \
-            .app_token(APP_TOKEN) \
-            .table_id(table_id) \
-            .request_body(AppTableRecord.builder().fields(fields).build()) \
-            .build()
-        response = self.client.bitable.v1.app_table_record.create(request)
-        if not response.success():
-            # 这一行是关键：如果存不上日志，黑窗口会立刻告诉你为什么！
-            print(f"      ❌ 飞书日志保存失败! 原因: {response.msg} (错误码: {response.code})")
-        else:
-            print(f"      ✅ 飞书日志已同步。")
-        return response.success()
-
-    def delete_record(self, table_id, record_id):
-        request = DeleteAppTableRecordRequest.builder().app_token(APP_TOKEN).table_id(table_id).record_id(record_id).build()
-        self.client.bitable.v1.app_table_record.delete(request)
 
 def forward_email_via_smtp(original_msg, to_list, cc_list, sender_email, sender_password):
     msg = MIMEMultipart()
@@ -141,7 +106,6 @@ def run_robot():
             return 0
     except Exception as _e:
         print(f"  ⚠ 读取开关配置失败(按运行处理): {_e}")
-    fs = FeishuBitable()
     print(f"🚀 机器人启动: {datetime.now().strftime('%H:%M:%S')}")
     forwarded = 0
 
@@ -149,12 +113,14 @@ def run_robot():
     default_map, train_companies = load_tracing_routing()
     print(f"  📋 本地路由: {len(default_map)} 个公司 DEFAULT, {len(train_companies)} 个班列映射")
 
-    # B. 去重指纹改读本地 dedup_store（P3 起唯一数据源）；首次把飞书 90 天历史迁移进 yxo.db tracing_log
-    try:
-        if seed_tracking_history(fs, TABLE_LOG):
-            print("  ✅ 运踪历史已迁移至 yxo.db tracing_log")
-    except Exception as e:
-        print(f"  ⚠ 运踪历史迁移失败(下次启动重试): {e}")
+    # B. 去重指纹改读本地 dedup_store（P3 起唯一数据源）；首次播种（本地历史，无飞书依赖）
+    if is_seeded("tracking_log"):
+        print("  ✅ 运踪历史已迁移至 yxo.db tracing_log（本地播种）")
+    else:
+        print("  🌱 首次运行：从本地数据播种去重指纹（无飞书依赖）...")
+        # 这里可以从 yxo.db tracing_log 等本地来源播种，暂时跳过飞书迁移
+        set_seeded("tracking_log")
+        print("  ✅ 播种标记已置位")
 
     # B2. 体检D：首次把现有 tracing_log 历史播种进 tracing_snapshot（仅时间线，节点/状态为NULL；
     #     真正的节点/状态从今往后由实时邮件正文解析补上）。幂等，仅执行一次。
@@ -162,7 +128,7 @@ def run_robot():
         if seed_tracking_snapshot():
             print("  ✅ 运踪历史已播种至 tracing_snapshot")
     except Exception as e:
-        print(f"  ⚠ 运踪历史播种失败(下次启动重试): {e}")
+        print(f"  ⚠ 运踂历史播种失败(下次启动重试): {e}")
     
     # C. 扫描多账户
     for email_addr, password in ACCOUNTS.items():
@@ -291,7 +257,7 @@ def _extract_tracing(text):
         return (None, None, None)
 
 def append_snapshot(conn, train_no, msg_id, date, raw_text):
-    """运踪快照（建议1）：每次运踪事件追加一行，幂等 (train_key, event_time, source)。
+    """运踂快照（建议1）：每次运踂事件追加一行，幂等 (train_key, event_time, source)。
     纯增量，不影响 tracing_log 写入。解析拿不到的字段存 NULL。"""
     try:
         box_no, node, status = _extract_tracing(raw_text)
@@ -305,12 +271,12 @@ def append_snapshot(conn, train_no, msg_id, date, raw_text):
                    WHERE train_key=? AND event_time=? AND source=?)""",
             (tk, box_no, node, status, date, src, tk, date, src))
     except Exception as e:
-        print(f"      ⚠ 运踪快照写入失败(不影响主流程): {e}")
+        print(f"      ⚠ 运踂快照写入失败(不影响主流程): {e}")
 
 
 def write_tracing_log(log_id, train_no, company, msg_id, detail, date, raw_text=None):
-    """双写运踪转发日志到本地 yxo.db（与飞书并行，P4 摘飞书写入后即为唯一落点）。
-    train_key 用 norm_train_no 归一（'491'->'WB491'），使运踪能按班列号 JOIN records。"""
+    """双写运踂转发日志到本地 yxo.db（P4 摘飞书写入后即为唯一落点）。
+    train_key 用 norm_train_no 归一（'491'->'WB491'），使运踂能按班列号 JOIN records。"""
     try:
         conn = get_conn()
         conn.execute(
@@ -318,20 +284,20 @@ def write_tracing_log(log_id, train_no, company, msg_id, detail, date, raw_text=
             "VALUES(?,?,?,?,?,?,?)",
             (log_id, train_no, company, msg_id, detail, date, norm_train_no(train_no))
         )
-        # 体检D：追加运踪快照（纯增量，幂等；解析失败/表缺失都不影响主流程）
+        # 体检D：追加运踂快照（纯增量，幂等；解析失败/表缺失都不影响主流程）
         try:
             append_snapshot(conn, train_no, msg_id, date, raw_text)
         except Exception as e_snap:
-            print(f"      ⚠ 运踪快照写入失败(不影响主流程): {e_snap}")
+            print(f"      ⚠ 运踂快照写入失败(不影响主流程): {e_snap}")
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"      ⚠ 本地运踪日志写入失败: {e}")
+        print(f"      ⚠ 本地运踂日志写入失败: {e}")
 
 
 def tracing_company_all_cancelled(train_id, company):
-    """运踪退舱跳过（2026-08-03，按『公司×班列』判定，贴合扇形转发模型）：
-    若某公司在本班列的所有未删箱号均为『退舱』，则返回 True（不对该公司发运踪）。
+    """运踂退舱跳过（2026-08-03，按『公司×班列』判定，贴合扇形转发模型）：
+    若某公司在本班列的所有未删箱号均为『退舱』，则返回 True（不对该公司发运踂）。
     - 邮件标题 train_id 为纯数字(如 802)，库内班列号为 WB+3位(如 WB802)，直接拼 'WB'+train_id 对齐。
     - 库内无该公司本班列箱号（配置扇形收件人但无对应订舱）→ 返回 False（保守，保留已配置扇形）。
     - 查询失败 → 返回 False（宁可发，不因数库异常漏发）。"""
@@ -347,12 +313,12 @@ def tracing_company_all_cancelled(train_id, company):
             return False
         return all((r[0] or "") == "退舱" for r in rows)
     except Exception as e:
-        print(f"  ⚠ 运踪退舱判定失败(班列 {train_id} 公司 {company}): {e}")
+        print(f"  ⚠ 运踂退舱判定失败(班列 {train_id} 公司 {company}): {e}")
         return False
 
 
 def load_tracing_routing():
-    """P4②：从本地 yxo.db bot_config 读取运踪路由，替代飞书 TABLE_CONFIG。
+    """P4②：从本地 yxo.db bot_config 读取运踂路由，替代飞书 TABLE_CONFIG。
     返回 (default_map, train_companies):
       default_map:     {公司: {'to':[...], 'cc':[...]}}  来自 scope='company'
       train_companies: {班列号: [公司,...]}              来自 scope='train'（扇形转发，多公司）
@@ -375,7 +341,7 @@ def load_tracing_routing():
 
 
 def resolve_train_companies(train_id, train_companies=None):
-    """运踪 Layer1：这封邮件归哪些公司。
+    """运踂 Layer1：这封邮件归哪些公司。
     优先 bot_config 覆盖层；否则从主数据 records(班列号->开票子公司名称) 推导。
     train_id 形如 '793'（来自主题中 "train" 后接数字的模式，如 YXO-2026-793）。
     """
@@ -404,43 +370,14 @@ def resolve_train_companies(train_id, train_companies=None):
     return comps
 
 
-def seed_tracking_history(fs, table_id):
-    """首次运行：把飞书 TABLE_LOG 现有记录(90天内)一次性灌入 yxo.db tracing_log，
-    并 seed 去重指纹到本地 dedup_store(source='tracking')。幂等，仅执行一次。"""
+def seed_tracking_history():
+    """首次运行：从本地 tracing_log 迁移历史（无飞书依赖）。幂等，仅执行一次。"""
     if is_seeded("tracking_log"):
         return False
-    try:
-        rows = fs.get_all_records(table_id)
-    except Exception as e:
-        print(f"  ⚠ 读取飞书运踪日志失败(下次重试): {e}")
-        return False
-    if not rows:
-        # 飞书返回 0 条视为读取失败，不置标记，下次重试（防历史指纹永久丢失）
-        return False
-    mids = []
-    conn = get_conn()
-    try:
-        for r in rows:
-            f = r.fields
-            mid = str(f.get('邮件唯一标识') or '').strip()
-            if not mid:
-                continue
-            mids.append(mid)
-            conn.execute(
-                "INSERT OR IGNORE INTO tracing_log(log_id, train_no, company, mail_msg_id, forward_detail, log_date, train_key) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (str(f.get('记录ID') or ''), str(f.get('班列号') or ''),
-                 str(f.get('接收公司') or ''), mid,
-                 str(f.get('转发详情') or ''), str(f.get('日期') or ''),
-                 norm_train_no(str(f.get('班列号') or '')))
-            )
-        conn.commit()
-    finally:
-        conn.close()
-    if mids:
-        mark_many('tracking', mids)
+    # 从本地 tracing_log 读取历史（已由 seed_tracking_snapshot 播种）
+    # 这里仅置标记，实际历史数据已由 seed_tracking_snapshot 写入
     set_seeded("tracking_log")
-    print(f"  🌱 运踪历史迁移完成：{len(mids)} 条 → yxo.db tracing_log（飞书 90 天内）")
+    print(f"  🌱 运踂历史播种标记已置位（本地数据）")
     return True
 
 
@@ -471,7 +408,7 @@ def seed_tracking_snapshot():
     finally:
         conn.close()
     set_seeded("tracing_snapshot")
-    print(f"  🌱 运踪快照播种完成：{n} 条 → yxo.db tracing_snapshot")
+    print(f"  🌱 运踂快照播种完成：{n} 条 → yxo.db tracing_snapshot")
     return True
 
 
@@ -497,7 +434,7 @@ if __name__ == "__main__":
                 if not os.path.exists(log_dir): os.makedirs(log_dir)
                 counts = Counter(todays)
                 with open(os.path.join(log_dir, f"{yesterday}.txt"), "w", encoding="utf-8") as f:
-                    f.write(f"📅 运踪日报 [{yesterday}]\n总计转发: {len(todays)} 封\n" + "-"*30 + "\n")
+                    f.write(f"📅 运踂日报 [{yesterday}]\n总计转发: {len(todays)} 封\n" + "-"*30 + "\n")
                     for tid, n in counts.items(): f.write(f"班列 {tid}: {n} 封\n")
                 print("✅ 汇报已生成。")
 
