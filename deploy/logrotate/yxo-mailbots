@@ -1,0 +1,13 @@
+/var/log/yxo/*.log {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 640 yxo yxo
+    sharedscripts
+    postrotate
+        systemctl reload yxo-mailbot > /dev/null 2>&1 || true
+    endscript
+}
