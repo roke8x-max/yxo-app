@@ -1,0 +1,58 @@
+# -*- coding: utf-8 -*-
+"""
+生产环境配置文件模板
+复制为 config_local.py 并填入真实值
+绝不提交到 git（已在 .gitignore 中）
+"""
+
+# 邮箱账号密码
+ACCOUNTS = {
+    "maoxiaoyang@cqtransit.com": "your_password_here",
+    "yangyawen@cqtransit.com": "your_password_here",
+    "fengqian@cqtransit.com": "your_password_here",
+    "hanwenhao@cqtransit.com": "your_password_here",
+}
+
+# DSK/ATB 专用账号（如有独立账号）
+DSK_ACCOUNTS = {
+    "maoxiaoyang@cqtransit.com": "your_password_here",
+    "yangyawen@cqtransit.com": "your_password_here",
+    "fengqian@cqtransit.com": "your_password_here",
+    "hanwenhao@cqtransit.com": "your_password_here",
+}
+
+# 邮戳 API token
+STAMP_TOKEN = "your_stamp_token_here"
+
+# 企微配置
+WECOM_CORP_ID = "your_corp_id"
+WECOM_AGENT_ID = "your_agent_id"
+WECOM_SECRET = "your_secret_here"
+
+# 邮戳 API
+STAMP_TOKEN = "your_stamp_token_here"
+
+# 企微配置
+WECOM_CORP_ID = "your_corp_id"
+WECOM_AGENT_ID = "your_agent_id"
+WECOM_SECRET = "your_secret_here"
+
+# IMAP/SMTP 配置
+IMAP_SERVER = "imap.qiye.aliyun.com"
+SMTP_SERVER = "smtp.qiye.aliyun.com"
+IMAP_PORT = 993
+SMTP_PORT = 465
+
+# 企微配置
+WECOM_CORP_ID = "your_corp_id"
+WECOM_AGENT_ID = "your_agent_id"
+WECOM_SECRET = "your_secret_here"
+
+# 邮戳 API
+STAMP_API = "http://127.0.0.1:5011/api/stamp"
+STAMP_TOKEN = "your_stamp_token_here"
+
+# 企微配置
+WECOM_CORP_ID = "your_corp_id"
+WECOM_AGENT_ID = "your_agent_id"
+WECOM_SECRET = "your_secret_here"

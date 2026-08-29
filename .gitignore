@@ -62,3 +62,9 @@ nul
 .last_deploy
 # 备份默认放在仓库外的 D:\YXO_DATA\backups，这条只是兜底
 backups/
+
+# === 调试/临时文件 ===
+tmp/
+*.new
+check_imports.py
+test_*.py

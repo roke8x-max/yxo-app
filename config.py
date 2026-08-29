@@ -10,6 +10,7 @@ import os
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE, "data")
 DB_PATH = os.path.join(DATA_DIR, "yxo.db")
+YXO_DB_PATH = DB_PATH
 
 # 内部监听端口（由 nginx 的 /yxo/ 反代，无需新增公网端口）
 PORT = 5011
@@ -129,3 +130,77 @@ MANIFEST_WRITABLE = ["班列号", "口岸", "发班时间", "箱号", "封号", 
 
 # 舱单导入入口仅毛骁洋可见可用（设计文档 10.2，比受限管理员更严格）。
 MANIFEST_ADMIN = "毛骁洋"
+
+# ==================== WeComBot 相关配置 ====================
+# 企业微信应用配置（从环境变量或 config_local 读取）
+FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
+FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
+FEISHU_APP_TOKEN = os.environ.get("FEISHU_APP_TOKEN", "")
+FEISHU_APP_AES_KEY = os.environ.get("FEISHU_APP_AES_KEY", "")
+
+# 企微通讯录/应用配置
+WECOM_CORP_ID = os.environ.get("WECOM_CORP_ID", "")
+WECOM_AGENT_ID = os.environ.get("WECOM_AGENT_ID", "")
+WECOM_SECRET = os.environ.get("WECOM_SECRET", "")
+
+# 企微用户映射：真实姓名 -> 企微 UserID
+WECOM_USER_MAP = {
+    "MaoXiaoYang": "MaoXiaoYang",
+    "wulala": "吴拉拉",
+    "BanXian": "半仙",
+    "HanWenHao": "韩文豪",
+}
+
+# real name -> managed company keywords (substring match on 开票子公司名称)
+USER_COMPANIES = {
+    "毛骁洋": ["太平洋", "港九港铁"],
+    "吴拉拉": ["同程配", "东盟"],
+    "冯茜": ["保时达"],
+    "韩文豪": ["沙坪坝", "中欧木业"],
+}
+
+# real name -> sender email (password in ACCOUNTS)
+USER_EMAILS = {
+    "毛骁洋": "maoxiaoyang@cqtransit.com",
+    "杨雅雯": "yangyawen@cqtransit.com",
+    "冯茜": "fengqian@cqtransit.com",
+    "韩文豪": "hanwenhao@cqtransit.com",
+}
+
+# 公司关键词 -> 负责同事的发件邮箱（用于转发/发送时以对应同事身份发信）
+COMPANY_TO_EMAIL = {}
+for _real_name, _keywords in USER_COMPANIES.items():
+    _email = USER_EMAILS.get(_real_name)
+    if _email:
+        for _kw in _keywords:
+            COMPANY_TO_EMAIL[_kw] = _email
+
+# 公司关键词 -> 负责同事真名（用于企微通知）
+_COMPANY_KEYWORDS = []
+for _real_name, _keywords in USER_COMPANIES.items():
+    for _kw in _keywords:
+        _COMPANY_KEYWORDS.append((_kw, _real_name))
+
+def sender_for_company(company_name):
+    """返回 (email, password) 供 SMTP 以对应同事身份发信；找不到同事返回 None。
+    用途：ATB/DSK 邮件转发、订舱助手手动发信，都按箱号所属公司的负责同事发信。
+    """
+    if not company_name:
+        return None
+    c = str(company_name)
+    for kw, email in COMPANY_TO_EMAIL.items():
+        if kw in c:
+            pwd = os.environ.get(f"MAIL_PWD_{email.replace('@', '_').replace('.', '_')}")
+            return email, pwd or os.environ.get("MAIL_PWD_DEFAULT", "")
+    return None
+
+
+def company_to_name(company_name):
+    """根据公司名返回负责同事真名（用于企微通知），找不到返回 None"""
+    if not company_name:
+        return None
+    c = str(company_name)
+    for kw, real_name in _COMPANY_KEYWORDS:
+        if kw in c:
+            return real_name
+    return None

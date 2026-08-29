@@ -33,7 +33,7 @@ NOISE_RE = re.compile(r"出区放行|报关单|INVOICE|clipboard|货协运单", 
 # 提取正则自备（core/matching 只有 ISO 形态判定，无搜索式正则）
 CODE_TOKEN_RE = re.compile(r"[A-Za-z]+\d+(?:-[0-9A-Za-z]+)*")
 CONTAINER_RE = re.compile(r"[A-Z]{4}\d{7}(?![A-Za-z0-9])")
-ENC_PDF_RE = re.compile(r"^[A-Z]{4}\d{7}-\d{6}-\d{6}.*\.pdf$", re.I)
+ENC_PDF_RE = re.compile(r"^[A-Z]{4}\d{7}-\d{6}-\d{6}已加密\.pdf$", re.I)
 BOX_PDF_RE = re.compile(r"^[A-Z]{4}\d{7}\.pdf$", re.I)
 UPDATE_KEYWORDS = ("更新草单", "草单更新", "最新的草单", "请查收更新")
 
