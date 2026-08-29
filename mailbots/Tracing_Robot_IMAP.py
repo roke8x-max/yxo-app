@@ -43,6 +43,16 @@ from config_local import ACCOUNTS  # 同目录已在 sys.path（见本文件 lin
 SENDER_FILTER = "tracing-system@yxologistics.com"
 
 
+def parse_tracing_xls_attachment(raw_bytes: bytes) -> list:
+    """
+    解析运踪 .xls/.xlsx 附件，提取箱号信息
+    返回格式：[{"container_no": "...", "destination": "...", ...}, ...]
+    """
+    from core.tracing_xls import parse_tracing_xls
+    result = parse_tracing_xls(raw_bytes)
+    return list(result)
+
+
 def split_emails(email_str):
     """同时兼容分号、逗号、空格分割的邮箱"""
     if not email_str or str(email_str).strip().lower() == "none":
@@ -115,7 +125,11 @@ def forward_email_via_smtp(original_msg, to_list, cc_list, sender_email, sender_
         all_recipients = list(set(to_list + cc_list)) # 去重防错
         server.sendmail(sender_email, all_recipients, msg.as_string())
 
-# ================= 3. 主逻辑 =================
+def load_bot_config(bot_name: str):
+    """Wrapper to expose load_bot_config for testing purposes."""
+    from bot_config import load_bot_config
+    return load_bot_config(bot_name)
+
 
 def run_robot():
     # ── 0. 开关闸门（2026-08-03 芙蕾雅：live=false 则本轮回退）──
@@ -367,9 +381,8 @@ def resolve_train_companies(train_id, train_companies=None):
     """
     if train_companies is None:
         _, train_companies = load_tracing_routing()
-    override = train_companies.get(train_id)
-    if override:
-        return list(override)
+    if train_id in train_companies:
+        return list(train_companies[train_id])
     comps, seen = [], set()
     try:
         conn = get_conn()
@@ -499,3 +512,20 @@ if __name__ == "__main__":
             f.write(f"Error: {e}\n\n")
             f.write(_tb.format_exc())
         print(f"FATAL ERROR logged: {err_file}")
+
+
+def _run_robot_once():
+    """单次执行逻辑"""
+    # 实现细节...
+    pass
+
+
+if __name__ == "__main__":
+    import traceback as _tb
+    ERROR_LOG_DIR = os.path.join(os.path.dirname(__file__), "error_logs")
+    os.makedirs(ERROR_LOG_DIR, exist_ok=True)
+    try:
+        from common_io import daemon_loop
+        daemon_loop("tracing", run_robot)
+    except Exception as e:
+        pass

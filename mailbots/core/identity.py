@@ -20,8 +20,11 @@ def _wecombot_maps():
     try:
         from core import paths
         root = paths.detect_root()
-        import sys
         wb = os.path.join(root, "WeComBot")
+        config_py = os.path.join(wb, "config.py")
+        if not os.path.isfile(config_py):
+            return kw_email, kw_name
+        import sys
         if wb not in sys.path:
             sys.path.insert(0, wb)
         from config import COMPANY_TO_EMAIL, company_to_name  # type: ignore
