@@ -68,3 +68,9 @@ tmp/
 *.new
 check_imports.py
 test_*.py
+
+# === mailbots_next 运行产物 ===
+mailbots_next/secrets.json
+mailbots_next/data/*.db*
+mailbots_next/data/*.json
+mailbots_next/logs/*.log
