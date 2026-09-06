@@ -16,17 +16,139 @@ import sqlite3
 import socket
 from datetime import datetime
 
-from flask import Flask, request, jsonify, render_template, send_file
+from flask import Flask, request, jsonify, render_template, send_file, g
 
 import config
 from import_excel import run_import
 from admin_api import admin_bp
+import uuid
+import traceback
+import logging
+import logging.handlers
+import html
+from werkzeug.exceptions import HTTPException
+from errors import AppError
 
 BASE = config.BASE
 DB = config.DB_PATH
 
 app = Flask(__name__)
 app.register_blueprint(admin_bp)   # 管理页（仅毛骁洋）：/admin + /api/admin/*
+
+# ====================== 统一错误处理（Phase 0 · 2026-09-07） ======================
+# 设计见 docs/superpowers/specs/2026-09-06-unified-error-handling.md
+# 三处理器职责（注册顺序 AppError → HTTPException → Exception）：
+#   AppError      → 固定 http_status（默认 200），业务错不告警
+#   HTTPException → 保留原生 4xx 状态码 + error="HTTP_{code}"，4xx 不告警
+#   未知 Exception → 固定 500 + error="INTERNAL_SERVER_ERROR"，必带堆栈落盘
+# Phase 0 只加不删：以下逻辑不影响任何现有路由。
+
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+try:
+    os.makedirs(_LOG_DIR, exist_ok=True)
+except OSError:
+    _LOG_DIR = None
+
+
+class _ReqIdFilter(logging.Filter):
+    """把当前请求的 request_id 注入每条日志，便于按 req_id 精准 grep。"""
+
+    def filter(self, record):
+        try:
+            record.req_id = g.get("request_id", "-")
+        except Exception:
+            record.req_id = "-"
+        return True
+
+
+if _LOG_DIR and not getattr(app, "_unified_logging_setup", False):
+    _fmt = logging.Formatter(
+        "%(asctime)s [req_id:%(req_id)s] %(levelname)s %(name)s: %(message)s")
+    _req_filter = _ReqIdFilter()
+    _app_h = logging.handlers.RotatingFileHandler(
+        os.path.join(_LOG_DIR, "app.log"),
+        maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    _app_h.setLevel(logging.INFO)
+    _err_h = logging.handlers.RotatingFileHandler(
+        os.path.join(_LOG_DIR, "error.log"),
+        maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    _err_h.setLevel(logging.ERROR)
+    for _h in (_app_h, _err_h):
+        _h.setFormatter(_fmt)
+        _h.addFilter(_req_filter)
+        app.logger.addHandler(_h)
+    app.logger.setLevel(logging.INFO)
+    app._unified_logging_setup = True
+
+
+def _is_api_request():
+    """内容协商：/api/* 路径或显式 Accept: application/json 视为 API 请求。"""
+    if request.path.startswith("/api/"):
+        return True
+    acc = getattr(request, "accept_mimetypes", None)
+    return bool(acc and acc.accept_json)
+
+
+def _html_error(code, msg):
+    """给浏览器 HTML 页面请求返回的简单错误页（避免 JSON 500 倒退）。"""
+    safe = html.escape(str(msg))
+    return (f"<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>{code}</title></head><body><h1>{code}</h1><p>{safe}</p></body></html>"), \
+           code, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.before_request
+def _assign_req_id():
+    g.request_id = uuid.uuid4().hex[:8]
+
+
+@app.after_request
+def _inject_req_id(resp):
+    rid = g.get("request_id")
+    if rid and resp.content_type.startswith("application/json"):
+        try:
+            data = json.loads(resp.get_data(as_text=True))
+            if isinstance(data, dict):
+                data["req_id"] = rid
+                resp.set_data(json.dumps(data, ensure_ascii=False))
+        except Exception:
+            pass
+    return resp
+
+
+@app.errorhandler(AppError)
+def _on_app_error(e):
+    # 业务异常：INFO，不记堆栈；非 API 请求返回 HTML 错误页
+    app.logger.info("%s %s %s %s %s", request.path, request.method,
+                    request.remote_addr, e.error_code, e.msg)
+    if _is_api_request():
+        return jsonify(ok=False, error=e.error_code, msg=e.msg, req_id=g.request_id), e.http_status
+    return _html_error(e.http_status, e.msg)
+
+
+@app.errorhandler(HTTPException)
+def _on_http_error(e):
+    # 框架级 HTTP 错误：WARNING，不记堆栈，保留原生状态码（4xx 不告警）
+    app.logger.warning("%s %s %s %s %s", request.path, request.method,
+                       request.remote_addr, e.code, e.description)
+    if _is_api_request():
+        return jsonify(ok=False, error=f"HTTP_{e.code}", msg=e.description or "请求错误",
+                       req_id=g.request_id), e.code
+    return _html_error(e.code, e.description or "请求错误")
+
+
+@app.errorhandler(Exception)
+def _on_unexpected(e):
+    # 未知系统异常：ERROR + 完整堆栈落盘（红线），固定 500
+    app.logger.error("%s %s %s %s\n%s", request.path, request.method,
+                     request.remote_addr, type(e).__name__, traceback.format_exc())
+    body = {"ok": False, "error": "INTERNAL_SERVER_ERROR", "msg": "服务异常", "req_id": g.request_id}
+    if app.config.get("DEBUG"):
+        body["detail"] = str(e)
+    if _is_api_request():
+        return jsonify(body), 500
+    return _html_error(500, "服务器内部错误，请稍后重试")
+
 
 # 莫斯科 / 明斯克 回退站点
 _MOSCOW_FB = {"别雷拉斯特", "沃尔西诺", "电煤", "谢利亚季诺"}
