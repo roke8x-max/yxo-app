@@ -1,7 +1,7 @@
 # 统一错误处理与响应格式（Spec）
 
 > 日期：2026-09-06
-> 状态：已批准（Phase 0 代码已实现并通过冒烟测试，但**尚未提交 git**；Phase 1/2 随 5.1 分层重构推进）
+> 状态：已批准（Phase 0 已提交 `2de7247` 并推送 dev，2026-09-07；Phase 1/2 随 5.1 分层重构推进）
 > 上游文档：产品文档 5.2「统一错误处理与响应格式」
 > 代码基准：yxo-app（app.py + admin_api.py，共用一个 Flask app，54 路由）
 > 关联：docs/superpowers/specs/2026-08-26-mailbots-refactor-design.md（本项目 spec 格式范本）
@@ -117,7 +117,7 @@ def _on_unexpected(e: Exception):
 
 | 阶段 | 内容 | 不变量 / 红线 |
 |---|---|---|
-| **Phase 0（代码已实现，待提交）** | 新增 errors.py(AppError) + 三个全局 errorhandler + before_request(req_id) + after_request 注入 req_id + 日志落盘（含 RotatingFileHandler 轮转）+ 内容协商 `_is_api_request()`。 | **只加不删**：不改任何现有路由的 try/except，不改现有 `return {ok:False,...}` 格式。目标：19 个裸路由获得兜底（告别 HTML 500）。6 项冒烟测试全 PASS，**代码尚未提交 git**（提交日期待定，届时可回填）。 |
+| **Phase 0（已提交 `2de7247`）** | 新增 errors.py(AppError) + 三个全局 errorhandler + before_request(req_id) + after_request 注入 req_id + 日志落盘（含 RotatingFileHandler 轮转）+ 内容协商 `_is_api_request()`。 | **只加不删**：不改任何现有路由的 try/except，不改现有 `return {ok:False,...}` 格式。目标：19 个裸路由获得兜底（告别 HTML 500）。6 项冒烟测试全 PASS，已提交 `2de7247` 推送 dev。 |
 | **Phase 1（随 5.1 蓝图拆分）** | 每将一个路由从 app.py/admin_api.py 迁入 routes/xxx.py，原子化改造：删 try/except + 改 `raise AppError(error_code, msg, http_status=200)` + 定义本模块错误码枚举。 | 业务错→200；资源不存在用业务码非 HTTP_404；参数校验失败不交给 HTTPException。每迁一处少一处旧格式。 |
 | **Phase 2（收尾）** | 54 路由全迁后，全项目搜 `{ok:False` + try/except 残留，确认 0 残留，清冗余 import。 | 旧代码彻底清零，项目完全统一。 |
 
@@ -174,6 +174,6 @@ Phase 0 交付后，那 17+30 个存量内联 try/except 仍按旧格式返回�
 
 ## 10. 实施进度
 
-- [x] Phase 0 全局 errorhandler + AppError + request_id + 日志落盘（代码已实现，6 项冒烟测试全 PASS；**尚未提交 git**）
+- [x] Phase 0 全局 errorhandler + AppError + request_id + 日志落盘（代码已实现，6 项冒烟测试全 PASS；已提交 `2de7247` 推送 dev）
 - [ ] Phase 1 随蓝图拆分收敛存量（含 D11 错误码下沉 services/、D12 repo 层语义映射）
 - [ ] Phase 2 清零存量
