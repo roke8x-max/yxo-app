@@ -1,0 +1,17 @@
+# mailbots_next 依赖清单
+# 补齐于 2026-09-06（此前缺失，导致部署时无从安装）
+# 安装：pip install -r mailbots_next/requirements.txt
+
+# ---------- 生产运行必需 ----------
+beautifulsoup4>=4.12        # HTML 正文抽取（import bs4）
+openpyxl>=3.1               # .xlsx 附件解析
+xlrd>=2.0                   # .xls 附件解析（运踪表；注意 2.x 仅支持 xls，不支持 xlsx）
+
+# ---------- 测试专用（生产可省略）----------
+pytest>=7.0                 # 单测框架
+xlwt>=1.3                   # 测试中构造 .xls 夹具；缺失时相关用例自动 skip（属预设行为）
+
+# ---------- 间接依赖 ----------
+# 经旧 wecombot 链路引入（wecombot/cs_bot/wecom_api.py 需要），
+# 详见 README「对旧代码的依赖」。若后续按方案 A 内置企微客户端，本项可移除。
+requests>=2.31

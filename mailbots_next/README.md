@@ -52,8 +52,30 @@ mailbots_next/
 ## 环境依赖
 
 - Python 3.10+
-- 依赖包：见项目根目录 `requirements.txt`
-- 系统依赖：`xlrd`、`openpyxl`、`xlwt`、`beautifulsoup4`、`requests`
+- 依赖包：见 **`mailbots_next/requirements.txt`**（运行 `pip install -r mailbots_next/requirements.txt`）
+- 关键包：`xlrd`、`.xls/.xlsx` 解析用 `openpyxl`、`beautifulsoup4`（`bs4`）、`requests`（经旧 wecombot 链路）
+
+## 对旧代码的依赖（重要，勿删旧目录）
+
+`mailbots_next` 目前**仍复用两个旧包**，因此 `mailbots/` 与 `wecombot/` 目录**不能删除**，
+且必须在**仓库根目录**启动（见「运行」章节）：
+
+| 依赖点 | 来源 | 用途 | 风险 |
+|---|---|---|---|
+| `core/notify.py:60` | `wecombot.cs_bot.wecom_api.notify_by_name` | 发企微通知 | ⚠️ 见下 |
+| `core/extractors/tracing.py:62` | `mailbots.core.tracing_xls.parse_tracing_xls` | 解析运踪 xls 附件 | 低，待内置化 |
+
+⚠️ **企微依赖的生产风险（上线前必须处理）**：
+1. `wecombot/config.py` 在 **import 时**读取 `wecombot/secrets.json`（`CORP_ID` 等），
+   该文件被 gitignore，**仓库内不存在**，`git pull` 后也不会有。
+2. 缺凭证会抛异常 → 被 `notify.py` 的 `try/except` 吞掉 → 仅打一条
+   `WeCom client not available` → **企微静默不发、不报错**。
+3. 生产实际运行的企微服务在 **`D:\YXO_DATA\WeComBot`**（独立目录、非 git 跟踪），
+   与仓库内 `wecombot/` 是两份代码，可能存在版本漂移。
+4. `notify_by_name` 内部为裸导入 `from config import WECOM_USER_MAP`，在仓库根启动时会
+   解析到**根目录 `config.py`**（碰巧有该变量），属脆弱依赖。
+
+> 处理方案待定（内置客户端 / HTTP 调用在跑的服务 / 补凭证），详见「已知限制」。
 
 ## 配置
 
@@ -95,23 +117,32 @@ mailbots_next/
 
 ## 运行
 
+> ⚠️ **启动方式（务必看）**：必须在**仓库根目录**执行，且**必须用 `-m`**。
+> 直接 `python serve.py`（含进到 `mailbots_next/` 里跑）会报错：
+> `ModuleNotFoundError: No module named 'mailbots_next'`
+> 原因：`serve.py` 用绝对导入 `from mailbots_next import config`，只有以模块方式运行、
+> 且仓库根在 `sys.path` 里，才能同时找到 `mailbots_next` / `mailbots` / `wecombot` 三个包。
+
 ```bash
+cd yxo-app    # ← 仓库根目录，不是 mailbots_next/
+
 # TEST 模式（默认，只打印不发送/不标已读）
-python serve.py
+python -m mailbots_next.serve
 
 # LIVE 模式（真实发送/标已读/写库）
-python serve.py --live
+python -m mailbots_next.serve --live
+# 等价写法：MAILBOT_MODE=live（环境变量 / --live 参数二选一，勿同时用）
 
 # 单轮扫描退出（冒烟测试）
-python serve.py --once
+python -m mailbots_next.serve --once
 
 # 轮询降级（禁用 IDLE，每 N 秒轮询）
-python serve.py --poll-secs 60
+python -m mailbots_next.serve --poll-secs 60
 
 # 错误队列管理
-python serve.py --errors list
-python serve.py --errors retry --error-id 123
-python serve.py --errors resolve --error-id 123
+python -m mailbots_next.serve --errors list
+python -m mailbots_next.serve --errors retry --error-id 123
+python -m mailbots_next.serve --errors resolve --error-id 123
 ```
 
 ### 子命令：错误队列管理
@@ -223,7 +254,7 @@ pytest mailbots_next/tests/test_core.py -v
 
 ## 部署与切换
 
-1. 新代码部署到测试环境，运行 `python serve.py`（TEST 模式）
+1. 新代码部署到测试环境，在**仓库根目录**运行 `python -m mailbots_next.serve`（TEST 模式）
 2. 运维负责人用真实邮箱实测，验证 5 类邮件路由输出符合萃取清单
 3. 灰度切换：先停旧 `mailbots/` 调度，启 `mailbots_next` LIVE
 4. 全量通过后归档旧脚本
@@ -232,6 +263,21 @@ pytest mailbots_next/tests/test_core.py -v
 - 旧 `mailbots/` 保留运行直到测试环境实跑通过
 - 不在原 `mailbots/` 文件上改，新功能只在 `mailbots_next/`
 - `config/provider.py` 为配置唯一门禁，未来改 YAML/JSON 只动此处
+
+## 已知限制（上线后另排，不影响基本可用）
+
+1. **企微通知链路待生产验证**（阻断级风险）：依赖旧 `wecombot`，而生产跑的是
+   `D:\YXO_DATA\WeComBot`（另一份代码）。上线前必须确认日志中**没有**
+   `WeCom client not available`；若出现，说明企微在静默不发。
+2. **企微"确认 N"回调链路未确认接通**：inbound 监听 `127.0.0.1:8765`，但仓库内
+   `wecombot/` 源码未见向 8765 转发的接线。**须在生产 `D:\YXO_DATA\WeComBot` 实机确认。**
+3. **反向依赖旧代码未消除**：`mailbots.core.tracing_xls` 待内置化；`wecombot` 企微依赖待解耦。
+4. **超大邮件（>2MB）**：原文不进队列，走 manual + E1，无法 inbound 重放（设计如此，宁可喊人也不发错）。
+5. **阿里云企业邮箱并发连接上限**：仓库无记录。当前 `IDLE_PER_FOLDER=1` 会开 20 条连接；
+   若被拒，设 `IDLE_PER_FOLDER=0` 回退到 12 条。上线前需实测。
+6. **标已读为批量延迟**：每 `MARK_SEEN_FLUSH_SEC`（默认 300s）或满 `MARK_SEEN_BATCH_CAP`（默认 100）
+   刷一次，非即时；失败会记 `mark_seen_failed` 计数。
+7. **旧 `mailbots/` 尚未归档**：待新系统在测试环境实跑通过后，按「部署与切换」第 4 步处理。
 
 ## 合规与数据驻留
 
