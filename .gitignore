@@ -65,6 +65,8 @@ backups/
 
 # === 调试/临时文件 ===
 tmp/
+# Flask 统一错误处理的日志（app.log / error.log，按天轮转）
+logs/
 *.new
 check_imports.py
 test_*.py
