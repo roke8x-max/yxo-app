@@ -278,15 +278,63 @@ gh pr merge --merge
 ```
 
 > 用 **Merge**（默认那个），不要选 Squash 或 Rebase——保留完整历史，出事时好查是哪一次改动引起的。
+>
+> ⚠️ **如果因为某种原因还是选了 Squash**（本仓库 PR#7 / PR#9 / PR#10 实际都是 Squash 合进 main 的），那 **§5.4 情况 B 立刻变成必做步骤**：squash 会在 main 上生成新 SHA，dev/main 当场分叉。**别拖到下次开 PR 才想起来** —— 2026-09-14 的 PR#11 冲突就是这么来的。
 
 合并后 GitHub 会问要不要删 dev 分支，**选不删**。dev 是长期分支，一直用。
 
 ### 5.4 合并后各环境同步
 
+**先判断这次 PR 是用哪种方式合的** —— 两种情况完全不同：
+
+#### 情况 A：用 **Merge** 合并（§5.3 推荐的方式）
+
+dev 已经是 main 的祖先，直接快进即可：
+
 ```powershell
 git checkout dev
-git pull --ff-only origin dev     # dev 此时和 main 一致了
+git pull --ff-only origin dev
 ```
+
+#### 情况 B：用 **Squash / Rebase** 合并 —— ⚠️ 必做，别拖
+
+**这种情况下 dev 和 main 一定分叉**：squash 会在 main 上生成一个**全新 SHA**，dev 上原本那些提交在 main 上并不存在。**必须主动把 main 合回 dev**，否则分叉会一直累积，**下一个 PR 必然冲突**。
+
+> 真实事故（2026-09-14）：PR#10 用 Squash 合并后跳过了这一步，导致 PR#11 冲突 —— 真实 merge-base 退回到很老的位置，冲突 5 个文件（README + 4 个测试文件，后者是 add/add）。
+
+```powershell
+git checkout dev
+git fetch origin
+git merge $(git ls-remote origin refs/heads/main | cut -f1)   # 用真实 SHA，别用可能过期的 origin/main
+git push origin dev
+```
+
+**报冲突时怎么解决（别盲选 ours/theirs）**：
+
+1. 先问一句：**main 侧对这个文件有没有 dev 没有的内容？** 用 dev 上引入该文件的原始提交来比：
+   ```powershell
+   git diff <main的SHA> <dev上那个原始提交> -- <冲突文件>
+   ```
+   - **无输出** → main 侧只是 dev 的旧副本，**取 dev 版不会丢东西**：
+     ```powershell
+     git checkout --ours -- <冲突文件>
+     git add <冲突文件>
+     ```
+   - **有输出** → main 侧有独有内容，**必须手工合并**，不能整份取一边。
+2. 合并完**务必验证净变化**，确认只带来了预期的东西：
+   ```powershell
+   git diff --stat <合并前的dev SHA> HEAD
+   ```
+
+**判断当前是否已分叉**：
+
+```powershell
+git fetch origin
+git ls-remote origin refs/heads/main refs/heads/dev   # ⚠️ 权威值只能问服务器
+git merge-base origin/dev origin/main                 # 等于 main 的 SHA → 没分叉
+```
+
+> ⚠️ **本机火绒会拦 `.git/packed-refs` 改写**：`git fetch` / `git push` 会"报告成功"，但本地 `origin/*` 引用**不更新** → `git rev-parse origin/main`、`git branch -vv`、`git merge-base` 都会拿到**过期值并导致误判**（2026-09-14 就因此把"严重分叉"误判成"无冲突"）。**判断远端状态一律用 `git ls-remote`（直接问服务器），或直接写完整 SHA。** 治本是给杀软信任区加仓库 `.git` 路径。
 
 ---
 
