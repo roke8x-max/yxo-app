@@ -64,6 +64,7 @@ from .act import (
     execute_action,
     rewrite_xls_filtered,
 )
+from .bounce import poll_bounces
 from .notify import get_notifier, WeComNotifier, increment_counter, flush_counters
 
 __all__ = [
@@ -128,6 +129,7 @@ __all__ = [
     "build_dsk_subject",
     "execute_action",
     "rewrite_xls_filtered",
+    "poll_bounces",
     "get_notifier",
     "WeComNotifier",
     "increment_counter",

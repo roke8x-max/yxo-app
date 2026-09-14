@@ -56,8 +56,10 @@ def _load_bot_config_runtime() -> Dict[str, bool]:
             extra = json.loads(row["extra"] or "{}")
             result[bot] = extra.get("enabled", True)
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        from mailbots_next.core.log import get_logger
+        _log = get_logger(__name__)
+        _log.error(f"Failed to load bot config runtime: {type(e).__name__}: {e}")
     return result
 
 

@@ -22,6 +22,9 @@ from mailbots_next.config import (
     INBOUND_PORT,
     INBOUND_SHARED_SECRET,
     OPS_OWNER_EMAIL,
+    FORWARD_SINCE,
+    BOUNCE_MONITOR_ENABLED,
+    BOUNCE_POLL_SEC,
     EmailType,
     get_accounts,
     is_type_enabled,
@@ -51,6 +54,7 @@ from mailbots_next.core import (
     enqueue_mark_seen,
     EmailLogger,
     get_connection,
+    poll_bounces,
 )
 
 _log = EmailLogger("mailbots_next.serve")
@@ -58,6 +62,7 @@ _log = EmailLogger("mailbots_next.serve")
 _shutdown_event = threading.Event()
 _idlers: List[Idler] = []
 _inbound_server: Optional[HTTPServer] = None
+_last_bounce_poll_ts: float = float("-inf")  # G3: guarantee first tick polls
 
 
 class MailProcessor:
@@ -94,13 +99,25 @@ class MailProcessor:
 
         send_ctx = self._build_send_ctx(email_type, rows, raw_bytes)
 
-        send_ctx = self._build_send_ctx(email_type, rows, raw_bytes)
+        # NDR 增强：把邮件级元数据带入 send_ctx，供 _record_forward 写 forward_log
+        # （单目标邮件 send_ctx 为 None，起空 dict 承载 _meta；空 dict 仍为
+        # falsy，不影响 execute_action 的 multi 分支判断）
+        if send_ctx is None:
+            send_ctx = {}
+        send_ctx["_meta"] = {
+            "account": account, "folder": folder, "uid": uid,
+            "sender": sender, "subject": subject, "date_hdr": date_hdr,
+        }
 
         has_manual = False
         outcome = {"forwarded": 0, "alarm": 0, "pending": 0, "queued": 0,
                    "manual": 0, "duplicate": 0, "skipped": 0}
         for row in rows:
-            row_key = f"{row.row_idx}:{row.container_no or row.customer_code or 'no_key'}"
+            from mailbots_next.core.rowkey import serve_row_key
+            row_key = serve_row_key(row)
+            if send_ctx is not None:
+                # 单一来源：_record_forward 优先取此键，缺失才自行推导
+                send_ctx["_row_key"] = row_key
             try:
                 row_outcome = self._process_row(row, row_key, email_type, message_id, raw_bytes,
                                                 account, folder, uid, sender, subject, date_hdr,
@@ -429,6 +446,7 @@ def start_idle_processors(processor: MailProcessor):
                 state_path="",
                 max_idle=MAX_IDLE_SEC,
                 poll_fallback_secs=0,
+                forward_since=FORWARD_SINCE,
             )
             _idlers.append(idler)
             idler.start()
@@ -563,11 +581,19 @@ def sweep_once(processor=None) -> dict:
     if processor is None:
         processor = MailProcessor(snapshot())
 
+    from mailbots_next.core.ingest import fetch_raw_by_uid
+
     stats = {"retried": 0, "escalated": 0}
     for e in get_pending_errors(100):
         raw_hex = e.get("raw_hex") or ""
         account = e.get("account") or ""
-        if not raw_hex or not account:
+        raw_bytes = bytes.fromhex(raw_hex) if raw_hex else b""
+        if not raw_bytes and account and (e.get("uid") or 0):
+            # 大邮件重放：无 payload 但 account/uid 俱全 → 从 IMAP 按 UID 重取原文
+            raw_bytes = fetch_raw_by_uid(account, e.get("folder") or "", e.get("uid")) or b""
+            if not raw_bytes:
+                increment_counter("retry_refetch_failed")
+        if not raw_bytes or not account:
             _log.warning(
                 f"Sweep retry skipped, no replay payload | id={e['id']} "
                 f"msg_id={e['message_id'][:50]}"
@@ -591,7 +617,7 @@ def sweep_once(processor=None) -> dict:
                 account, e.get("folder") or "", e["message_id"],
                 e.get("uid") or 0, e.get("subject") or "",
                 e.get("sender") or "", e.get("date") or "",
-                bytes.fromhex(raw_hex),
+                raw_bytes,
             ) or {}
         except Exception as exc:
             _log.error(f"Sweep replay crashed: id={e['id']} error={type(exc).__name__}: {exc}")
@@ -626,13 +652,32 @@ def sweep_once(processor=None) -> dict:
     return stats
 
 
+def _bounce_poll_due(now: float, last_ts: float) -> bool:
+    """距上次轮询是否已达 BOUNCE_POLL_SEC。纯函数，便于直测。"""
+    return (now - last_ts) >= BOUNCE_POLL_SEC
+
+
 def run_sweeper():
     from mailbots_next.config import SWEEP_INTERVAL_SEC
+
+    global _last_bounce_poll_ts
 
     while not _shutdown_event.is_set():
         time.sleep(SWEEP_INTERVAL_SEC)
         if _shutdown_event.is_set():
             break
+
+        # Bounce polling runs before sweep to re-queue NDRs in the same cycle.
+        # F4: honor BOUNCE_POLL_SEC (default = SWEEP_INTERVAL_SEC, so no
+        # behavior change; set larger to reduce load).
+        if BOUNCE_MONITOR_ENABLED:
+            now = time.monotonic()
+            if _bounce_poll_due(now, _last_bounce_poll_ts):
+                _last_bounce_poll_ts = now
+                try:
+                    poll_bounces()
+                except Exception as e:
+                    _log.error(f"bounce poll tick failed: {e}")
 
         sweep_once()
 
@@ -693,6 +738,16 @@ def main():
     if mode not in ("test", "live"):
         print("ERROR: MAILBOT_MODE must be 'test' or 'live'")
         sys.exit(1)
+
+    # Live mode guard: FORWARD_SINCE must be set to prevent historical mail forwarding
+    if mode == "live":
+        from mailbots_next.config import FORWARD_SINCE
+        if not FORWARD_SINCE:
+            raise SystemExit(
+                "Refusing to start in live mode without FORWARD_SINCE: "
+                "set FORWARD_SINCE=YYYY-MM-DD (e.g. the go-live date) so historical "
+                "unread mail is not forwarded to customers."
+            )
 
     _log.info(f"Starting MailBot Next in {mode.upper()} mode")
 

@@ -30,13 +30,14 @@ from mailbots_next.core.dedup import (
 )
 from mailbots_next.core.store import (
     init_bot_config_db,
+    init_forward_log,
     get_bot_config_connection,
     seed_owner_mapping,
 )
 from mailbots_next.core.extract import ExtractedRow
 
 
-_SEVEN_COMPANIES = {
+_COMPANY_RECIPIENTS = {
     "太平洋": (["tp@test.com"], ["tp_cc@test.com"]),
     "港九港铁": (["gj@test.com"], []),
     "东盟": (["dm@test.com"], []),
@@ -44,13 +45,14 @@ _SEVEN_COMPANIES = {
     "中欧木业": (["zom@test.com"], []),
     "沙坪坝": (["spb@test.com"], []),
     "保时达": (["bsd@test.com"], []),
+    "联运": (["lx_to@test.com"], ["3841559246@qq.com"]),
 }
 
 
 def _seed_recipients():
     conn = get_bot_config_connection()
     try:
-        for company, (to, cc) in _SEVEN_COMPANIES.items():
+        for company, (to, cc) in _COMPANY_RECIPIENTS.items():
             conn.execute(
                 """INSERT OR REPLACE INTO bot_config (bot, scope, key, to_addrs, cc_addrs, extra)
                    VALUES (?, 'company', ?, ?, ?, '{}')""",
@@ -71,6 +73,7 @@ def _p1_dbs():
                 pass
     init_db()
     init_bot_config_db()
+    init_forward_log()
     seed_owner_mapping()
     _seed_recipients()
     try:

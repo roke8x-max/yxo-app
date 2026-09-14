@@ -11,8 +11,13 @@ from mailbots_next.config import (
     CONTAINER_RE,
     YXO_DOMAIN,
     DRAFT_CATEGORIES,
+    OPS_OWNER_EMAIL,
 )
 from mailbots_next.core.extract import BaseExtractor, ExtractedRow, parse_email
+from mailbots_next.core.log import get_logger
+from mailbots_next.core.notify import get_notifier
+
+_log = get_logger(__name__)
 
 
 class DraftExtractor(BaseExtractor):
@@ -96,6 +101,13 @@ class DraftExtractor(BaseExtractor):
                 if r[0]:
                     nums.add(r[0])
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            error_id = _log.error(f"Failed to load draft nums: {type(e).__name__}: {e}")
+            try:
+                get_notifier().send_program_error(
+                    OPS_OWNER_EMAIL, error_id,
+                    f"Draft nums DB read failed: {type(e).__name__}: {e}"
+                )
+            except Exception as ne:
+                _log.error(f"Failed to report draft nums error: {type(ne).__name__}: {ne}")
         return nums

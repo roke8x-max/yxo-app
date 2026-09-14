@@ -56,6 +56,35 @@ IDLE_PER_FOLDER = os.environ.get("IDLE_PER_FOLDER", "1") not in ("0", "false", "
 # How long one IDLE wait lasts before re-checking (seconds).
 MAX_IDLE_SEC = int(os.environ.get("MAX_IDLE_SEC", "1740"))
 
+# 上线护栏：只处理该时刻之后到达的邮件，防止首次 live 启动把历史未读邮件
+# 批量转发给外部客户。格式 YYYY-MM-DD，留空表示不过滤。
+FORWARD_SINCE = os.environ.get("FORWARD_SINCE", "")
+
+# NDR / 退信监控（2026-09-10 增强，堵「空 refused 静默丢」盲区）
+# 默认关闭；上线前由运维确认 bounce 邮箱 + VERP 授权后开启。
+BOUNCE_MONITOR_ENABLED = os.environ.get("BOUNCE_MONITOR_ENABLED", "0") in ("1", "true", "True")
+# 退信监控专用邮箱（接收 NDR）。建议与同事发件账号同域、单独邮箱。
+# 同时作为 VERP 基址：VERP 本地名 = "bounce+" + forward_id，域名取自本地址 @ 之后。
+BOUNCE_ADDRESS = os.environ.get("BOUNCE_ADDRESS", "mailbots-bounce@cqtransit.com")
+# 是否启用 VERP（+ 标签）。阿里企业邮实测不支持 + 标签时设 "0"，
+# 此时 envelope MAIL FROM 直接用 BOUNCE_ADDRESS，关联仅靠 X-YXO-Forward-Id 头。
+BOUNCE_USE_VERP = os.environ.get("BOUNCE_USE_VERP", "1") in ("1", "true", "True")
+BOUNCE_IMAP_SERVER = os.environ.get("BOUNCE_IMAP_SERVER", IMAP_SERVER)
+BOUNCE_IMAP_PORT = int(os.environ.get("BOUNCE_IMAP_PORT", str(IMAP_PORT)))
+BOUNCE_IMAP_USER = os.environ.get("BOUNCE_IMAP_USER", "")
+BOUNCE_IMAP_PASSWORD = os.environ.get("BOUNCE_IMAP_PASSWORD", "")
+# 读 NDR 的邮箱文件夹（多数 NDR 落在 INBOX）
+BOUNCE_FOLDER = os.environ.get("BOUNCE_FOLDER", "INBOX")
+# 轮询周期，复用 sweep 节奏；置于 sweep 之前，让 NDR 尽快入队
+BOUNCE_POLL_SEC = int(os.environ.get("BOUNCE_POLL_SEC", str(SWEEP_INTERVAL_SEC)))
+# envelope MAIL FROM 模式（rev4：不依赖专用退信邮箱）：
+# sender（默认）= 本封发信账号，NDR 落回同事自己收件箱；
+# fixed = BOUNCE_ADDRESS；verp = bounce+<fid>@<BOUNCE_ADDRESS 域名>。
+BOUNCE_ENVELOPE_MODE = os.environ.get("BOUNCE_ENVELOPE_MODE", "sender")
+# 轮询账号（逗号分隔）。留空时：sender 模式 → DEFAULT_ACCOUNTS，
+# 否则 → [BOUNCE_IMAP_USER]。
+BOUNCE_POLL_ACCOUNTS = os.environ.get("BOUNCE_POLL_ACCOUNTS", "")
+
 DEDUP_RETENTION_DAYS = 90
 
 DEFAULT_ACCOUNTS = [

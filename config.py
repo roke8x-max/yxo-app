@@ -69,7 +69,7 @@ FIELD_DEFS = [
     {"name": "报放单",         "kind": "op",   "type": "select", "options": ["未出", "已出", "已上传"],
      "maintainable": True, "default": "未出"},
     {"name": "开票子公司名称", "kind": "base", "type": "select", "label": "负责公司",
-     "options": ["港九港铁", "保时达", "中欧木业", "同程配", "沙坪坝", "太平洋", "东盟"], "maintainable": True},
+     "options": ["港九港铁", "保时达", "中欧木业", "同程配", "沙坪坝", "太平洋", "东盟", "联运"], "maintainable": True},
     {"name": "货源类型",       "kind": "op",   "type": "select", "options": ["绕园", "本地", "外地"],
      "maintainable": True},
     {"name": "本地货源公司",   "kind": "op",   "type": "text"},
@@ -137,19 +137,19 @@ WECOM_CORP_ID = os.environ.get("WECOM_CORP_ID", "")
 WECOM_AGENT_ID = os.environ.get("WECOM_AGENT_ID", "")
 WECOM_SECRET = os.environ.get("WECOM_SECRET", "")
 
-# 企微用户映射：真实姓名 -> 企微 UserID
+# WeCom UserID -> real name（注意方向：键=UserID，值=真名；勿照旧注释反转）
 WECOM_USER_MAP = {
-    "MaoXiaoYang": "MaoXiaoYang",
-    "wulala": "吴拉拉",
-    "BanXian": "半仙",
+    "MaoXiaoYang": "毛骁洋",
+    "wulala": "杨雅雯",
+    "BanXian": "冯茜",
     "HanWenHao": "韩文豪",
 }
 
 # real name -> managed company keywords (substring match on 开票子公司名称)
 USER_COMPANIES = {
     "毛骁洋": ["太平洋", "港九港铁"],
-    "吴拉拉": ["同程配", "东盟"],
-    "冯茜": ["保时达"],
+    "杨雅雯": ["同程配", "东盟"],
+    "冯茜": ["保时达", "联运"],
     "韩文豪": ["沙坪坝", "中欧木业"],
 }
 

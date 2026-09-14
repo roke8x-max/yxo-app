@@ -26,6 +26,7 @@ from mailbots_next.core.dedup import (
 )
 from mailbots_next.core.store import (
     init_bot_config_db,
+    init_forward_log,
     get_bot_config_connection,
     load_records,
     get_responsible_person,
@@ -56,6 +57,7 @@ def seed_company_recipients():
             "中欧木业": {"to": ["zom@test.com"], "cc": []},
             "沙坪坝": {"to": ["spb@test.com"], "cc": []},
             "保时达": {"to": ["bsd@test.com"], "cc": []},
+            "联运": {"to": ["lx_to@test.com"], "cc": ["3841559246@qq.com"]},
         }
         for company, data in recipients.items():
             conn.execute(
@@ -135,6 +137,7 @@ def test_dbs(monkeypatch, tmp_path):
     _seed_minimal_yxo(tmp_path / "yxo.db")
     init_db()
     init_bot_config_db()
+    init_forward_log()
     seed_owner_mapping()
     seed_company_recipients()
     seed_train_companies()
@@ -246,7 +249,7 @@ class TestStore:
         conn = get_bot_config_connection()
         try:
             rows = conn.execute("SELECT key, extra FROM bot_config WHERE scope='owner' AND bot='all'").fetchall()
-            assert len(rows) == 7
+            assert len(rows) == 8
             for row in rows:
                 import json
                 extra = json.loads(row["extra"])
@@ -263,6 +266,17 @@ class TestStore:
         assert person == "yangyawen@cqtransit.com"
         person = get_responsible_person("不存在的公司")
         assert person is None
+
+    def test_lianyun_routing(self):
+        """联运（2026-09-09 新增，负责人冯茜）必须能路由到负责同事与收件人。"""
+        seed_owner_mapping()
+        person = get_responsible_person("联运")
+        assert person == "fengqian@cqtransit.com"
+
+        seed_company_recipients()
+        to, cc = get_recipients("联运")
+        assert "lx_to@test.com" in to
+        assert cc == ["3841559246@qq.com"]
 
     def test_get_recipients(self):
         conn = get_bot_config_connection()

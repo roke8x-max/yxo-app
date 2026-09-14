@@ -68,6 +68,7 @@ _FAKE_SECRETS = {
         "yangyawen@cqtransit.com": "fake-pwd-yang",
         "fengqian@cqtransit.com": "fake-pwd-feng",
         "hanwenhao@cqtransit.com": "fake-pwd-han",
+        "ops@example.com": "fake-pwd-ops",
     }
 }
 _FAKE_SECRETS_PATH = _TEST_DATA_DIR / "secrets.json"
@@ -80,6 +81,18 @@ os.environ.setdefault("MAILBOT_SECRETS_PATH", str(_FAKE_SECRETS_PATH))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def reset_notifier():
+    """Reset the notifier singleton before each test to ensure isolation."""
+    from mailbots_next.core.notify import reset_notifier as _reset_notifier, get_notifier as _get_notifier
+    from unittest.mock import Mock
+    _reset_notifier()
+    n = _get_notifier()
+    n._notify_by_name = Mock(return_value=(True, "wxwork"))
+    yield
+    _reset_notifier()
 
 
 @pytest.fixture(scope="session", autouse=True)

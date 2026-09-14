@@ -13,12 +13,27 @@ _yxo_lock = threading.Lock()
 _bot_config_lock = threading.Lock()
 
 
+def _is_unc_path(path) -> bool:
+    s = str(path)
+    return s.startswith("\\\\") or s.startswith("//")
+
+
 def get_yxo_connection(readonly: bool = True) -> sqlite3.Connection:
     uri = f"file:{YXO_DB_PATH}?mode={'ro' if readonly else 'rw'}"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     if not readonly:
-        conn.execute("PRAGMA journal_mode=WAL")
+        if _is_unc_path(YXO_DB_PATH):
+            _log.warning(
+                f"YXO_DB_PATH is UNC ({YXO_DB_PATH}) — WAL 不兼容网络盘，"
+                f"建议改用本地路径 D:\\YXO_DATA\\yxo_app\\data\\yxo.db；"
+                f"本次回退为 DELETE 模式，写库可能失败。"
+            )
+        else:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except Exception as e:
+                _log.warning(f"WAL pragma failed, fallback to DELETE: {e}")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
@@ -234,6 +249,7 @@ def seed_owner_mapping():
         "中欧木业": "hanwenhao@cqtransit.com",
         "沙坪坝": "hanwenhao@cqtransit.com",
         "保时达": "fengqian@cqtransit.com",
+        "联运": "fengqian@cqtransit.com",
     }
     with _bot_config_lock:
         conn = get_bot_config_connection()
@@ -252,3 +268,188 @@ def seed_owner_mapping():
 
 init_bot_config_db()
 seed_owner_mapping()
+
+
+def init_forward_log():
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS forward_log (
+                    forward_id TEXT PRIMARY KEY,
+                    message_id TEXT, row_key TEXT,
+                    account TEXT, folder TEXT, uid INTEGER,
+                    subject TEXT, sender TEXT, date_hdr TEXT,
+                    raw_hex TEXT, to_list TEXT, cc_list TEXT,
+                    sent_by TEXT DEFAULT '',
+                    sent_at TEXT, bounced INTEGER DEFAULT 0)"""
+            )
+            conn.commit()
+            try:
+                conn.execute("ALTER TABLE forward_log ADD COLUMN sent_by TEXT DEFAULT ''")
+                conn.commit()
+            except Exception:
+                pass  # 列已存在（新库建表时自带）
+        finally:
+            conn.close()
+
+
+def write_forward_log(forward_id, message_id, row_key, account, folder, uid,
+                      subject, sender, date_hdr, raw_bytes, to_list, cc_list,
+                      sent_by=""):
+    import json
+    if not config.is_live():
+        return
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO forward_log "
+                "(forward_id, message_id, row_key, account, folder, uid, "
+                "subject, sender, date_hdr, raw_hex, to_list, cc_list, sent_by, "
+                "sent_at, bounced) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),0)",
+                (forward_id, message_id, row_key, account, folder, uid, subject, sender,
+                 date_hdr, raw_bytes.hex() if raw_bytes else "",
+                 json.dumps(to_list, ensure_ascii=False),
+                 json.dumps(cc_list, ensure_ascii=False), sent_by))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_forward_log(forward_id):
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            row = conn.execute("SELECT * FROM forward_log WHERE forward_id=?", (forward_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def mark_forward_bounced(forward_id):
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            conn.execute("UPDATE forward_log SET bounced=1 WHERE forward_id=?", (forward_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def init_bounce_handled():
+    """本地 handled 索引（D1）：(account, uid) 主键，替代 Seen 做幂等。"""
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS bounce_handled (
+                    account TEXT NOT NULL, uid INTEGER NOT NULL,
+                    message_id TEXT, forward_id TEXT, outcome TEXT,
+                    handled_at TEXT NOT NULL,
+                    PRIMARY KEY (account, uid))"""
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _with_handled_table(fn, *args):
+    """bounce_handled 缺表时自动建表后重试一次（旧库/裸库容错）。"""
+    import sqlite3
+    try:
+        return fn(*args)
+    except sqlite3.OperationalError:
+        init_bounce_handled()
+        return fn(*args)
+
+
+def _is_bounce_handled(account, uid):
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM bounce_handled WHERE account=? AND uid=?",
+                (account, uid)).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+
+def is_bounce_handled(account, uid):
+    return _with_handled_table(_is_bounce_handled, account, uid)
+
+
+def _mark_bounce_handled(account, uid, message_id="", forward_id="", outcome=""):
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO bounce_handled "
+                "(account, uid, message_id, forward_id, outcome, handled_at) "
+                "VALUES (?,?,?,?,?,datetime('now'))",
+                (account, uid, message_id, forward_id, outcome))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def mark_bounce_handled(account, uid, message_id="", forward_id="", outcome=""):
+    _with_handled_table(_mark_bounce_handled, account, uid,
+                        message_id, forward_id, outcome)
+
+
+def purge_old_bounce_handled(days=90):
+    """清理 NDR 到达窗口之外的 handled 记录（默认 90 天，随 poll 每轮执行）。"""
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            cur = conn.execute(
+                "DELETE FROM bounce_handled WHERE handled_at < datetime('now', ?)",
+                ("-%d days" % int(days),))
+            conn.commit()
+            return cur.rowcount or 0
+        finally:
+            conn.close()
+
+
+def _forward_log_candidates(recipient, sent_by=None):
+    """返回所有 to/cc 含 recipient、未 bounced 的 forward_log 行（rowid 倒序=最新在前）。
+    供 NDR 次键关联：调用方据条数判定唯一性。"""
+    import json
+    out = []
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM forward_log WHERE bounced=0 ORDER BY rowid DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+    for r in rows:
+        d = dict(r)
+        if sent_by and (d.get("sent_by") or "") != sent_by:
+            continue
+        hit = False
+        for col in ("to_list", "cc_list"):
+            try:
+                addrs = json.loads(d.get(col) or "[]")
+            except Exception:
+                addrs = []
+            if recipient in addrs:
+                hit = True
+                break
+        if hit:
+            out.append(d)
+    return out
+
+
+def find_forward_log_by_recipient(recipient, sent_by=None):
+    """次键关联：在 to/cc 里找含 recipient 且未 bounced 的最新一行。"""
+    cands = _forward_log_candidates(recipient, sent_by)
+    return cands[0] if cands else None
+
+
+init_forward_log()
+init_bounce_handled()

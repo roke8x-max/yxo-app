@@ -1,7 +1,8 @@
-# 渝新欧订舱系统 —— 协作工作流
+# 重庆物流集团 yxo 系统 —— 协作工作流
 
-> 本文是**唯一权威**的协作规则。AGENTS.md 只讲代码规范，流程一律以本文为准。
-> 最后更新：2026-08-06
+> **本文只讲 git / 协作流程**（分支、PR、部署、故障自查）。
+> 项目全貌（三大支柱、模块职责、硬规则、当前状态）见 **`AGENTS.md`** —— 新开对话请先读它。
+> 最后更新：2026-09-14（补正公司名、部署分工与上云待办）
 
 ---
 
@@ -111,7 +112,7 @@ git pull --ff-only origin dev     # 标准拉取；等价于 fetch + ff-merge
 ### 4.2 边改边存档
 
 ```powershell
-git add .
+git add <你改的那几个文件>          # ⚠️ 不要 git add . —— 见 4.5 安全提交流程
 git commit -m "fix: 修正舱单导出时中文列名错位"
 ```
 
@@ -165,6 +166,78 @@ git push origin dev
 
 **拿不准就别猜**，把冲突文件发给骁洋或芙蕾雅，判断错了会把别人的代码删掉。
 
+### 4.5 安全提交流程（强制 · 提交前逐条走一遍）
+
+> 为什么有这一节：本项目真实踩过的坑 —— 有人手改生产代码留下"幽灵改动"被顺手带进提交；一次 `git add .` 把十几个不相干的文件混成一个"大杂烩"提交；密钥/生产库文件差点入库。**提交只需要三步：看清 → 定向 add → 验过再提交。** 别图快。
+
+**第 0 步 · 先看清"要提交什么"（不看清单不 add）**
+
+```powershell
+git status --short          # 逐行看：哪些是改的（ M），哪些是新文件（??）
+git diff --stat             # 看改动量；某个文件行数异常大就单独看一眼
+git fetch origin            # 对齐远端
+git branch --show-current   # 必须是 dev，绝不能是 main
+```
+
+- ❌ 列表里出现 **`secrets.json` / `*.db` / `logs/` / `config_local.py` / 个人绝对路径** → **停下**：说明 `.gitignore` 漏了，先补忽略规则再提交。
+- ❌ 出现**你根本没印象改过**的文件 → 逐个 `git diff <文件>` 看清楚；确认无关就 `git restore <文件>` 退回。**不要盲提交**（幽灵改动就是这么进库的）。
+- ⚠️ `git fetch` 后 `git branch -vv` 才准。本机火绒会拦 `.git/packed-refs` 改写，导致 fetch 前显示虚假的 "ahead N"。
+
+**第 1 步 · 定向 add —— 明令禁止 `git add .` 和 `git add -A`**
+
+```powershell
+git add <明确列出的文件或目录>       # 一个提交只装一个主题
+git status --short                   # 复查：暂存区里刚好是这几个（左列出现 A/M）
+```
+
+**第 2 步 · 看"即将进去的内容"，而不是"改了哪些文件"**
+
+```powershell
+git diff --cached                    # 暂存区 vs HEAD —— 这才是这次真正要提交的东西
+```
+
+**第 3 步 · 测试必须先绿**
+
+```powershell
+python -m pytest -q -p no:cacheprovider > out.txt 2>&1
+# 读汇总行：必须 0 failed
+```
+
+> ⚠️ **必须用默认 basetemp**（OS 临时目录）。指定 `--basetemp=<项目内目录>` 会触发 WorkBuddy 的 safe-delete 拦截 → 测试在断言前假失败，套件还会从 ~30s 拖到 200s+。
+
+**第 4 步 · 提交，并把结果拿给人看**
+
+```powershell
+git commit -m "<type>: <一句话说清改了什么>"
+git log --oneline -5
+git show --stat HEAD                 # 确认这个提交恰好只包含预期文件
+```
+
+**第 5 步 · push 前必须获得明确批准**
+
+- **commit 是"本机存档"，可以自主做；push 是"发布"，必须有骁洋明确点头**（"推 / 发 / 上传"）。没听到这句话就不推。
+- 只推 `dev`。`main` 有服务端保护，禁止直推。
+- 不要 `git push --force`，不要 `--no-verify` 跳钩子。
+
+**红线（碰了就是事故）**
+
+| 禁止 | 原因 |
+|---|---|
+| `git add .` / `git add -A` / `git commit -a` | 会把无关改动、临时文件、密钥一次性卷进去 |
+| `git push origin main` | 服务端保护会拦；别试图绕过 |
+| `git push --force` | 会覆盖别人的提交 |
+| 没备份就用 `git reset --hard` | 未提交的改动直接蒸发 |
+| 提交 `secrets.json` / `*.db` / `logs/` / `config_local.py` | 密钥与生产数据 |
+| 在生产目录 `D:\YXO_DATA\yxo_app` 改代码、commit | 那里只跑业务，只 `git pull` |
+
+**多主题改动要拆开**
+
+一次 `git status` 摆出几十个文件、横跨好几个功能时，**按主题拆成多个提交**（文件集尽量互不重叠），别攒成一个"大杂烩"：
+
+- 好处：出问题能只回滚一个主题；review 时能一段一段看。
+- 但若两个主题改到**同一个文件**、拆不干净，**宁可合成一个提交**，也不要用 `git add -p` 拆 hunk —— 那会造出"中间态跑不起来"的提交，比不拆更糟。
+- 拆之前先想好每个提交的**文件清单**，再动手；边 add 边想要容易漏。
+
 ---
 
 ## 5. 从 dev 合入 main（Pull Request）
@@ -205,19 +278,70 @@ gh pr merge --merge
 ```
 
 > 用 **Merge**（默认那个），不要选 Squash 或 Rebase——保留完整历史，出事时好查是哪一次改动引起的。
+>
+> ⚠️ **如果因为某种原因还是选了 Squash**（本仓库 PR#7 / PR#9 / PR#10 实际都是 Squash 合进 main 的），那 **§5.4 情况 B 立刻变成必做步骤**：squash 会在 main 上生成新 SHA，dev/main 当场分叉。**别拖到下次开 PR 才想起来** —— 2026-09-14 的 PR#11 冲突就是这么来的。
 
 合并后 GitHub 会问要不要删 dev 分支，**选不删**。dev 是长期分支，一直用。
 
 ### 5.4 合并后各环境同步
 
+**先判断这次 PR 是用哪种方式合的** —— 两种情况完全不同：
+
+#### 情况 A：用 **Merge** 合并（§5.3 推荐的方式）
+
+dev 已经是 main 的祖先，直接快进即可：
+
 ```powershell
 git checkout dev
-git pull --ff-only origin dev     # dev 此时和 main 一致了
+git pull --ff-only origin dev
 ```
+
+#### 情况 B：用 **Squash / Rebase** 合并 —— ⚠️ 必做，别拖
+
+**这种情况下 dev 和 main 一定分叉**：squash 会在 main 上生成一个**全新 SHA**，dev 上原本那些提交在 main 上并不存在。**必须主动把 main 合回 dev**，否则分叉会一直累积，**下一个 PR 必然冲突**。
+
+> 真实事故（2026-09-14）：PR#10 用 Squash 合并后跳过了这一步，导致 PR#11 冲突 —— 真实 merge-base 退回到很老的位置，冲突 5 个文件（README + 4 个测试文件，后者是 add/add）。
+
+```powershell
+git checkout dev
+git fetch origin
+git merge $(git ls-remote origin refs/heads/main | cut -f1)   # 用真实 SHA，别用可能过期的 origin/main
+git push origin dev
+```
+
+**报冲突时怎么解决（别盲选 ours/theirs）**：
+
+1. 先问一句：**main 侧对这个文件有没有 dev 没有的内容？** 用 dev 上引入该文件的原始提交来比：
+   ```powershell
+   git diff <main的SHA> <dev上那个原始提交> -- <冲突文件>
+   ```
+   - **无输出** → main 侧只是 dev 的旧副本，**取 dev 版不会丢东西**：
+     ```powershell
+     git checkout --ours -- <冲突文件>
+     git add <冲突文件>
+     ```
+   - **有输出** → main 侧有独有内容，**必须手工合并**，不能整份取一边。
+2. 合并完**务必验证净变化**，确认只带来了预期的东西：
+   ```powershell
+   git diff --stat <合并前的dev SHA> HEAD
+   ```
+
+**判断当前是否已分叉**：
+
+```powershell
+git fetch origin
+git ls-remote origin refs/heads/main refs/heads/dev   # ⚠️ 权威值只能问服务器
+git merge-base origin/dev origin/main                 # 等于 main 的 SHA → 没分叉
+```
+
+> ⚠️ **本机火绒会拦 `.git/packed-refs` 改写**：`git fetch` / `git push` 会"报告成功"，但本地 `origin/*` 引用**不更新** → `git rev-parse origin/main`、`git branch -vv`、`git merge-base` 都会拿到**过期值并导致误判**（2026-09-14 就因此把"严重分叉"误判成"无冲突"）。**判断远端状态一律用 `git ls-remote`（直接问服务器），或直接写完整 SHA。** 治本是给杀软信任区加仓库 `.git` 路径。
 
 ---
 
 ## 6. 部署到生产（只在 D 盘做）
+
+> **本节只讲 Flask 订舱平台的部署。** 邮件机器人走的是另一条链路（nssm 服务 + 任务计划），
+> 见 `scripts/deploy/DEPLOYMENT_MANUAL.md` 与 `AGENTS.md` §9.5。
 
 **不要手动 `git pull`，用脚本。** 脚本会自动备份，手动拉不会。
 
@@ -405,6 +529,8 @@ GitHub       roke8x-max/yxo-app（公开）
 
 ## 附：还没做的事
 
-- [ ] 服务器 Flask 服务用 nssm 注册成 Windows 服务（现在是手动跑 start.bat，重启机器要人工介入）
+- [ ] **上云改造**：**等数科部完成申请阿里云的流程之后**再统一启动。现存 Linux 预研产物（`deploy/systemd`、`deploy/logrotate`、`scripts/deploy.sh`、`scripts/rollback.sh`）**暂时保留不动**，详见 `AGENTS.md` §9.6
+- [ ] 服务器 Flask 服务用 nssm 注册成 Windows 服务（现在是手动跑 start.bat，重启机器要人工介入）—— 邮件机器人已走 nssm，Flask 还没
 - [ ] 数据库结构变更（加字段、改表）目前没有迁移脚本，靠手工同步，有风险
+- [ ] 远端遗留分支 `feature/plan-b-processors-idle` 待清理
 - [ ] 本机 `C:\Users\Roke8x\Projects\yxo-app-broken-20260806` 是 8/6 修 git 时的备份目录，观察几天没问题就可以删
