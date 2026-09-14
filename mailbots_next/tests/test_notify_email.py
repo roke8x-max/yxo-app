@@ -142,6 +142,8 @@ class TestModeBehavior:
         monkeypatch.setenv("MAILBOT_MODE", "test")
         assert _cfg.MODE in ("test", "live")
         if not _cfg.is_live():
+            from mailbots_next.core.notify import get_notifier, reset_notifier
+            reset_notifier()
             with patch("mailbots_next.core.notify.get_notifier") as mock:
                 notifier = Mock()
                 notifier.send_alarm.return_value = True

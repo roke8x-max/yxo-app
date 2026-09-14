@@ -55,15 +55,16 @@ mailbots_next/
 - 依赖包：见 **`mailbots_next/requirements.txt`**（运行 `pip install -r mailbots_next/requirements.txt`）
 - 关键包：`xlrd`、`.xls/.xlsx` 解析用 `openpyxl`、`beautifulsoup4`（`bs4`）、`requests`（经旧 wecombot 链路）
 
-## 对旧代码的依赖（重要，勿删旧目录）
+## 对旧代码的依赖（重要，勿删 `wecombot/`）
 
-`mailbots_next` 目前**仍复用两个旧包**，因此 `mailbots/` 与 `wecombot/` 目录**不能删除**，
-且必须在**仓库根目录**启动（见「运行」章节）：
+`mailbots_next` 目前**只复用 `wecombot` 一个旧包**（对旧 `mailbots/` 的反向依赖已于 `7ea8c58` 切断），
+因此 **`wecombot/` 目录不能删除**；`mailbots/` 之所以暂留，是因为**旧系统仍在生产运行**，不是因为被新系统依赖。
+此外必须在**仓库根目录**启动（见「运行」章节）：
 
 | 依赖点 | 来源 | 用途 | 风险 |
 |---|---|---|---|
 | `core/notify.py:60` | `wecombot.cs_bot.wecom_api.notify_by_name` | 发企微通知 | ⚠️ 见下 |
-| `core/extractors/tracing.py:62` | `mailbots.core.tracing_xls.parse_tracing_xls` | 解析运踪 xls 附件 | 低，待内置化 |
+| `core/extractors/tracing.py:62` | `mailbots_next.core.extractors.tracing_xls.parse_tracing_xls` | 解析运踪 xls 附件 | 已内置到 `core/extractors/tracing_xls.py`，反向依赖已消除 |
 
 ⚠️ **企微依赖的生产风险（上线前必须处理）**：
 1. `wecombot/config.py` 在 **import 时**读取 `wecombot/secrets.json`（`CORP_ID` 等），
@@ -111,7 +112,7 @@ mailbots_next/
 - 太平洋/港九港铁 → `maoxiaoyang@cqtransit.com`
 - 东盟/同程配 → `yangyawen@cqtransit.com`
 - 中欧木业/沙坪坝 → `hanwenhao@cqtransit.com`
-- 保时达 → `fengqian@cqtransit.com`
+- 保时达/联运 → `fengqian@cqtransit.com`
 
 **收件人/抄送人**：`bot_config` 表 `scope='company'`，`bot='all'`，`key=<公司名>`，`to_addrs`/`cc_addrs` 为 JSON 数组。统一外部收件人源，5 类邮件共用。
 
@@ -271,13 +272,24 @@ pytest mailbots_next/tests/test_core.py -v
    `WeCom client not available`；若出现，说明企微在静默不发。
 2. **企微"确认 N"回调链路未确认接通**：inbound 监听 `127.0.0.1:8765`，但仓库内
    `wecombot/` 源码未见向 8765 转发的接线。**须在生产 `D:\YXO_DATA\WeComBot` 实机确认。**
-3. **反向依赖旧代码未消除**：`mailbots.core.tracing_xls` 待内置化；`wecombot` 企微依赖待解耦。
+3. **反向依赖旧代码已消除（ tracing 内置）**：`wecombot` 企微依赖待解耦。
 4. **超大邮件（>2MB）**：原文不进队列，走 manual + E1，无法 inbound 重放（设计如此，宁可喊人也不发错）。
 5. **阿里云企业邮箱并发连接上限**：仓库无记录。当前 `IDLE_PER_FOLDER=1` 会开 20 条连接；
    若被拒，设 `IDLE_PER_FOLDER=0` 回退到 12 条。上线前需实测。
 6. **标已读为批量延迟**：每 `MARK_SEEN_FLUSH_SEC`（默认 300s）或满 `MARK_SEEN_BATCH_CAP`（默认 100）
    刷一次，非即时；失败会记 `mark_seen_failed` 计数。
 7. **旧 `mailbots/` 尚未归档**：待新系统在测试环境实跑通过后，按「部署与切换」第 4 步处理。
+
+## 技术债（登记，未实现）
+
+| 编号 | 内容 | 为什么现在不做 | 将来什么条件下再做 |
+|---|---|---|---|
+| F5-1 | `BOUNCE_LOOKBACK_DAYS`——给 NDR 全量 `UNSEEN` 加 `SINCE` 边界 | **收窄 = 漏判换性能**；当前 4 个 INBOX 总量可接受，`BOUNCE_POLL_SEC` 已能把负载压到 1/3，无需再收窄 | 日未读量显著增长（如持续 >500/天）或出现轮询延迟时；启用时默认 `0`（关闭），建议值 ≥30 天（与 `forward_log` 清理对齐） |
+| F5-2 | 单轮候选上限（如 500）+ 超限 WARN（只告警不截断） | 同上：正确性优先，当前负载下未出现异常量级；已通过 header 预筛把每封成本压到 HEADER 1–2KB | 观测到某邮箱未读堆积异常（如单轮候选 >500）时用于告警 |
+| G4 | 预筛对「零标记 + 中性 From + 无关键词」形态的真 NDR 会漏判 | 该形态极罕见；彻底覆盖需放弃 header 预筛回到全量下载全文 | 若真实出现此类漏判（以 `unknown` 告警或缺件投诉为线索），或引入更廉价过程化判定手段时 |
+| — | `forward_log`/`error_queue`/`bounce_handled` 定期清理 | 已有 `purge_old_dedup`/`purge_old_bounce_handled(90天)`，其余表清理未启用 | 日均 500 封一年约 18 万行时评估清理/归档策略 |
+
+> 本节仅登记，不写代码、不加配置、不加用例。
 
 ## 合规与数据驻留
 

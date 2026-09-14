@@ -2,6 +2,8 @@ import email
 import email.policy
 import smtplib
 import io
+import hashlib
+import uuid
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -13,10 +15,10 @@ from typing import List, Optional, Tuple, Dict, Any
 
 from bs4 import BeautifulSoup
 
-from ..config import SMTP_SERVER, SMTP_PORT
+from ..config import SMTP_SERVER, SMTP_PORT, settings
 from .. import config
 from .log import get_logger
-from .store import write_dsk_timestamp, write_tracing_log, write_tracing_snapshot
+from .store import write_dsk_timestamp, write_tracing_log, write_tracing_snapshot, write_forward_log
 
 _log = get_logger(__name__)
 
@@ -34,6 +36,35 @@ def decode_header_safe(raw: str) -> str:
     return out
 
 
+def make_forward_id(message_id: str, row_key: str) -> str:
+    """生成 VERP 安全的 forward_id：纯 hex + 短横线，可安全进入邮件地址本地名。
+    message_id/row_key 的业务关联另存 forward_log，故令牌本身无需携带明文。"""
+    digest = hashlib.sha256(f"{message_id}|{row_key}".encode("utf-8")).hexdigest()[:16]
+    return f"{digest}-{uuid.uuid4().hex[:8]}"
+
+
+def _bounce_addr(forward_id: str) -> str:
+    """返回 envelope MAIL FROM。
+    VERP 开启：bounce+<forward_id>@<BOUNCE_ADDRESS 域名>（forward_id 为纯 hex，RFC 合规）。
+    VERP 关闭：直接返回 BOUNCE_ADDRESS（关联仅靠 X-YXO-Forward-Id 头）。"""
+    if settings.BOUNCE_USE_VERP:
+        domain = settings.BOUNCE_ADDRESS.partition("@")[2]
+        return f"bounce+{forward_id}@{domain}"
+    return settings.BOUNCE_ADDRESS
+
+
+def _envelope_from(forward_id: str, sender_email: str) -> str:
+    """按 BOUNCE_ENVELOPE_MODE 返回 envelope MAIL FROM。
+    sender（默认）：本封发信账号，NDR 落回同事自己收件箱；
+    fixed：BOUNCE_ADDRESS；verp：bounce+<fid>@<BOUNCE_ADDRESS 域名>。"""
+    mode = (settings.BOUNCE_ENVELOPE_MODE or "sender").lower()
+    if mode == "verp":
+        return _bounce_addr(forward_id)
+    if mode == "fixed":
+        return settings.BOUNCE_ADDRESS
+    return sender_email
+
+
 def build_forward_message(
     original_msg: email.message.Message,
     to_list: List[str],
@@ -42,6 +73,7 @@ def build_forward_message(
     subject_prefix: str = "",
     html_override: Optional[str] = None,
     attachments_override: Optional[List[Dict]] = None,
+    forward_id: Optional[str] = None,
 ) -> email.message.Message:
     msg = MIMEMultipart("mixed")
     msg["From"] = sender_email
@@ -51,6 +83,9 @@ def build_forward_message(
 
     original_subject = decode_header_safe(original_msg.get("Subject", ""))
     msg["Subject"] = f"{subject_prefix}{original_subject}"
+
+    if forward_id:
+        msg["X-YXO-Forward-Id"] = forward_id
 
     if html_override is not None:
         msg.attach(MIMEText(html_override, "html", "utf-8"))
@@ -112,6 +147,7 @@ def send_smtp(
     sender_password: str,
     to_list: List[str],
     cc_list: List[str] = None,
+    mail_from: Optional[str] = None,
 ) -> dict:
     cc_list = cc_list or []
     all_recipients = list(set(to_list + cc_list))
@@ -123,13 +159,33 @@ def send_smtp(
     try:
         with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
             server.login(sender_email, sender_password)
-            refused = server.sendmail(sender_email, all_recipients, msg.as_string())
+            env_from = mail_from or sender_email
+            refused = server.sendmail(env_from, all_recipients, msg.as_string())
             if refused:
                 raise smtplib.SMTPRecipientsRefused(refused)
         return {"success": True, "refused": {}}
     except Exception as e:
         _log.error(f"SMTP send failed: {e}")
         return {"success": False, "error": str(e)}
+
+
+def _record_forward(forward_id, message_id, row, send_ctx, to_list, cc_list,
+                    original_raw, sent_by=""):
+    """成功转发后写 forward_log（仅 is_live 落库）。元数据取自 send_ctx['_meta']；
+    sent_by 为本封 SMTP 发信账号（NDR 次键关联用）。row_key 优先取 serve 侧
+    注入的 send_ctx['_row_key']（单一来源），缺失才用 serve_row_key(row) 兜底。"""
+    from mailbots_next.core.rowkey import serve_row_key
+    if not config.is_live():
+        return
+    meta = (send_ctx or {}).get("_meta", {}) or {}
+    row_key = (send_ctx or {}).get("_row_key") or serve_row_key(row)
+    write_forward_log(
+        forward_id, message_id, row_key,
+        meta.get("account", ""), meta.get("folder", ""),
+        int(meta.get("uid", 0) or 0),
+        meta.get("subject", ""), meta.get("sender", ""), meta.get("date_hdr", ""),
+        original_raw, to_list, cc_list, sent_by,
+    )
 
 
 def split_waybill_by_company(
@@ -345,18 +401,15 @@ def _box_customer_code(records, box_no: str) -> str:
 
 
 def _forward_split(decision, row, routing, original_msg, sender_email: str,
-                   sender_password: str, message_id: str, send_ctx: dict) -> Tuple[bool, str]:
-    """Per-company/per-box fan-out for multi-target mails.
-
-    Only the designated first row of each group sends; sibling rows return
-    (True, "group-covered") so the row-level decision trace stays intact
-    without duplicate sends.
-    """
+                   sender_password: str, message_id: str, send_ctx: dict, original_raw: bytes) -> Tuple[bool, str]:
+    """Per-company/per-box fan-out for multi-target mails (same contract as before)."""
     email_type = str(send_ctx.get("email_type", ""))
     key = send_ctx.get("keys", {}).get(row.row_idx)
     if key is None or row.row_idx != send_ctx.get("designated", {}).get(key):
         _log.info(f"Group-covered, skip duplicate send | msg_id={message_id[:50]} | row={row.row_idx}")
         return True, "group-covered"
+
+    sub_fid = make_forward_id(message_id, str(key))   # 子 forward_id（贯穿 头/envelope/log）
 
     try:
         if email_type in ("waybill", "draft"):
@@ -366,11 +419,20 @@ def _forward_split(decision, row, routing, original_msg, sender_email: str,
             part = next((p for p in parts if p.get("company") == company), None)
             if part is None:
                 return False, f"No split part for company {company}"
+            part["msg"]["X-YXO-Forward-Id"] = sub_fid                # 写头（split 不走 build_forward_message）
             result = send_smtp(part["msg"], sender_email, sender_password,
-                               part["to"], part["cc"])
-            if result["success"]:
-                return True, "forwarded"
-            return False, f"SMTP failed: {result.get('error')}"
+                               part["to"], part["cc"],
+                               mail_from=_envelope_from(sub_fid, sender_email))  # envelope 用 sub_fid
+            if not result["success"]:
+                return False, f"SMTP failed: {result.get('error')}"
+            try:
+                _record_forward(sub_fid, message_id, row, send_ctx,
+                                part["to"], part["cc"], original_raw, sender_email)
+            except Exception as e:
+                _log.error(f"Post-send bookkeeping failed (mail already sent) | msg={message_id}: {e}")
+                from mailbots_next.core.notify import increment_counter
+                increment_counter("post_send_bookkeeping_failed")
+            return True, "forwarded"
         elif email_type in ("dsk", "atb"):
             company, box = key
             cropped, matched = split_dsk_by_box(
@@ -388,15 +450,24 @@ def _forward_split(decision, row, routing, original_msg, sender_email: str,
                 subject = decode_header_safe(original_msg.get("Subject", ""))
             msg = build_forward_message(original_msg, to_list, cc_list, sender_email,
                                         html_override=cropped,
-                                        attachments_override=matched + unrelated)
+                                        attachments_override=matched + unrelated,
+                                        forward_id=sub_fid)          # 写 X-YXO-Forward-Id 头
             msg.replace_header("Subject", subject)
-            result = send_smtp(msg, sender_email, sender_password, to_list, cc_list)
-            if result["success"]:
+            result = send_smtp(msg, sender_email, sender_password, to_list, cc_list,
+                               mail_from=_envelope_from(sub_fid, sender_email))  # envelope 用 sub_fid
+            if not result["success"]:
+                return False, f"SMTP failed: {result.get('error')}"
+            try:
                 if row.container_no:
                     write_dsk_timestamp(row.container_no, email_type.upper(),
                                         datetime.now().strftime("%m/%d %H:%M"))
-                return True, "forwarded"
-            return False, f"SMTP failed: {result.get('error')}"
+                _record_forward(sub_fid, message_id, row, send_ctx,
+                                to_list, cc_list, original_raw, sender_email)
+            except Exception as e:
+                _log.error(f"Post-send bookkeeping failed (mail already sent) | msg={message_id}: {e}")
+                from mailbots_next.core.notify import increment_counter
+                increment_counter("post_send_bookkeeping_failed")
+            return True, "forwarded"
         else:
             return False, f"Unsupported split type: {email_type}"
     except Exception as e:
@@ -445,17 +516,28 @@ def execute_action(
         if send_ctx and send_ctx.get("multi"):
             return _forward_split(decision, row, routing, original_msg,
                                   sender_email, sender_password,
-                                  message_id, send_ctx)
+                                  message_id, send_ctx, original_raw)
 
-        msg = build_forward_message(original_msg, to_list, cc_list, sender_email)
-        result = send_smtp(msg, sender_email, sender_password, to_list, cc_list)
-
-        if result["success"]:
-            if row.email_type in ("dsk", "atb") and row.container_no:
-                write_dsk_timestamp(row.container_no, row.email_type.upper(), datetime.now().strftime("%m/%d %H:%M"))
-            return True, "forwarded"
-        else:
+        # 单目标路径：同一 forward_id 贯穿 头 / envelope(VERP) / forward_log 三处。
+        forward_id = make_forward_id(message_id, str(row.row_idx))
+        msg = build_forward_message(original_msg, to_list, cc_list, sender_email,
+                                    forward_id=forward_id)
+        result = send_smtp(msg, sender_email, sender_password, to_list, cc_list,
+                           mail_from=_envelope_from(forward_id, sender_email))
+        if not result["success"]:
             return False, f"SMTP failed: {result.get('error')}"
+        # 邮件已发出：此后任何失败都不得翻转结论，否则重放会导致重复发信
+        try:
+            _record_forward(forward_id, message_id, row, send_ctx,
+                            to_list, cc_list, original_raw, sender_email)
+            if row.email_type in ("dsk", "atb") and row.container_no:
+                write_dsk_timestamp(row.container_no, row.email_type.upper(),
+                                    datetime.now().strftime("%m/%d %H:%M"))
+        except Exception as e:
+            _log.error(f"Post-send bookkeeping failed (mail already sent) | msg={message_id}: {e}")
+            from mailbots_next.core.notify import increment_counter
+            increment_counter("post_send_bookkeeping_failed")
+        return True, "forwarded"
     except Exception as e:
         _log.error(f"Forward failed for {message_id}: {e}")
         return False, str(e)

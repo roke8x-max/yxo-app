@@ -59,7 +59,7 @@ class TracingExtractor(BaseExtractor):
     def _parse_tracing_xls(self, raw_bytes: bytes) -> List[Dict[str, str]]:
         rows = []
         try:
-            from mailbots.core.tracing_xls import parse_tracing_xls
+            from .tracing_xls import parse_tracing_xls
             for r in parse_tracing_xls(raw_bytes):
                 box = r.get("container_no", "")
                 if box and CONTAINER_RE.match(box.upper()):

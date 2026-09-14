@@ -14,6 +14,7 @@ from ..config import (
     IDLE_GROUPS,
     MARK_SEEN_FLUSH_SEC,
     MARK_SEEN_BATCH_CAP,
+    FORWARD_SINCE,
     get_accounts,
 )
 from .. import config
@@ -22,6 +23,16 @@ from .notify import increment_counter
 from .notify import increment_counter
 
 _log = get_logger(__name__)
+
+
+_IMAP_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def imap_since(date_iso: str) -> str:
+    """'2026-09-08' -> '08-Sep-2026' (IMAP SEARCH SINCE requires DD-MMM-YYYY)."""
+    y, m, d = date_iso.split("-")
+    return f"{int(d):02d}-{_IMAP_MONTHS[int(m) - 1]}-{y}"
 
 
 def _server_folder(folder: str) -> str:
@@ -213,6 +224,7 @@ class Idler:
         state_path: str,
         max_idle: int = 1740,
         poll_fallback_secs: int = 0,
+        forward_since: str = "",
     ):
         self.account = account
         self.password = password
@@ -221,6 +233,7 @@ class Idler:
         self.state_path = state_path
         self.max_idle = max_idle
         self.poll_fallback_secs = poll_fallback_secs
+        self.forward_since = forward_since
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._conn: Optional[imaplib.IMAP4_SSL] = None
@@ -238,9 +251,24 @@ class Idler:
         self._current_folder = folder_utf7
 
     def _process_new_messages(self, conn: imaplib.IMAP4_SSL, folder_name: str, folder_utf7: str):
-        res, data = conn.search(None, "UNSEEN")
+        if self.forward_since:
+            criteria = f'(UNSEEN SINCE {imap_since(self.forward_since)})'
+        else:
+            criteria = "UNSEEN"
+        res, data = conn.search(None, criteria)
         if res != "OK":
             return
+
+        # Parse FORWARD_SINCE date for client-side double-check
+        since_dt = None
+        if self.forward_since:
+            try:
+                from datetime import datetime, timezone
+                since_dt = datetime.strptime(self.forward_since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except Exception:
+                _log.warning(f"Invalid FORWARD_SINCE format: {self.forward_since}, skipping client-side filter")
+                since_dt = None
+
         for uid_bytes in data[0].split():
             if self._stop.is_set():
                 break
@@ -256,6 +284,19 @@ class Idler:
                 subject = msg.get("Subject", "")
                 sender = msg.get("From", "")
                 date_hdr = msg.get("Date", "")
+
+                # Client-side date filter (double insurance)
+                if since_dt:
+                    from email.utils import parsedate_to_datetime
+                    try:
+                        msg_date = parsedate_to_datetime(date_hdr)
+                        if msg_date and msg_date < since_dt:
+                            increment_counter("historical_skip")
+                            _log.info(f"Historical skip | uid={uid} date={date_hdr} since={self.forward_since}")
+                            continue
+                    except Exception:
+                        _log.warning(f"Could not parse Date header, allowing through | uid={uid} date={date_hdr}")
+
                 self.on_raw(self.account, folder_name, folder_utf7, message_id, uid, subject, sender, date_hdr, raw_bytes)
             except Exception as e:
                 _log.error(f"[{self.account}] Failed to process uid={uid_bytes}: {e}")
@@ -287,13 +328,13 @@ class Idler:
         conn.idle()
         try:
             conn.idle_check(timeout=self.max_idle)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.debug(f"IDLE check interrupted (normal on timeout/stop): {type(e).__name__}: {e}")
         finally:
             try:
                 conn.idle_done()
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug(f"IDLE done failed (normal if connection closed): {type(e).__name__}: {e}")
         self._process_new_messages(conn, folder_name, folder_utf7)
 
     def start(self):
@@ -305,6 +346,32 @@ class Idler:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=10)
+
+
+def fetch_raw_by_uid(account: str, folder: str, uid: int) -> Optional[bytes]:
+    """按 UID 从 IMAP 重取原文（大邮件重放：error_queue/forward_log 不存全文时兜底）。
+    任何异常 → WARN + None。"""
+    try:
+        password = get_accounts().get(account, "")
+        if not password:
+            _log.warning(f"Refetch skipped, no credentials | account={account}")
+            return None
+        conn = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT, timeout=60)
+        try:
+            conn.login(account, password)
+            typ, _ = conn.select(_server_folder(folder), readonly=True)
+            if typ != "OK":
+                raise RuntimeError(f"Cannot select folder {folder}")
+            _, msg_data = conn.fetch(str(uid).encode(), "(RFC822)")
+            return msg_data[0][1]
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+    except Exception as e:
+        _log.warning(f"Refetch failed | account={account} folder={folder} uid={uid}: {e}")
+        return None
 
 
 class IngestManager:
@@ -334,6 +401,7 @@ class IngestManager:
                     on_raw=self._on_raw,
                     state_path="",
                     poll_fallback_secs=0,
+                    forward_since=FORWARD_SINCE,
                 )
                 self.idlers.append(idler)
                 idler.start()

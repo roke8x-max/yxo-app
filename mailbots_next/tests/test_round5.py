@@ -25,6 +25,7 @@ from mailbots_next.config import (
 from mailbots_next.core.dedup import init_db
 from mailbots_next.core.store import (
     init_bot_config_db,
+    init_forward_log,
     get_bot_config_connection,
     seed_owner_mapping,
 )
@@ -41,6 +42,7 @@ def _r5_dbs():
                 pass
     init_db()
     init_bot_config_db()
+    init_forward_log()
     seed_owner_mapping()
     conn = get_bot_config_connection()
     try:

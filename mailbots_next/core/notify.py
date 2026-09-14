@@ -17,8 +17,10 @@ def _load_counters() -> Dict[str, Any]:
         try:
             with open(DAILY_COUNTERS_PATH, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            from mailbots_next.core.log import get_logger
+            _log = get_logger(__name__)
+            _log.error(f"Failed to load daily counters: {type(e).__name__}: {e}")
     return {"date": datetime.now().strftime("%Y-%m-%d"), "counts": {}}
 
 
@@ -71,6 +73,7 @@ class WeComNotifier:
         "yangyawen@cqtransit.com": "杨雅雯",
         "fengqian@cqtransit.com": "冯茜",
         "hanwenhao@cqtransit.com": "韩文豪",
+        "ops@example.com": "运维负责人",
     }
 
     def notify(self, notify_type: str, recipients: List[str], content: str, error_id: Optional[str] = None) -> bool:
@@ -78,10 +81,11 @@ class WeComNotifier:
         display name via _WECOM_NAME_BY_EMAIL before calling notify_by_name.
         Unmapped emails are logged, counted as failed, and escalated to the
         ops owner by SMTP (never silently dropped, never sent raw)."""
-        from ..config import OPS_OWNER_EMAIL
+        from ..config import OPS_OWNER_EMAIL, is_live
 
         if not self._notify_by_name:
-            _log.warning("WeCom notify skipped: client not available")
+            if is_live():
+                _log.warning("WeCom notify skipped: client not available")
             return False
 
         success_count = 0
@@ -171,8 +175,18 @@ class WeComNotifier:
         if not counts:
             return True
         lines = [f"📊 每日汇总 ({datetime.now().strftime('%Y-%m-%d')})"]
+        # H2补丁 R1/R2：有记账失败时首行后显著告警（中文自然语言，三要素）
+        n = counts.get("post_send_bookkeeping_failed", 0) or 0
+        if n:
+            lines.append(
+                f"⚠️ 注意：今天有 {n} 次「邮件已发出但记账失败」——"
+                f"邮件已正常发给客户，不会重发；"
+                f"但对应的 DSK/ATB 时间戳或运踪记录可能没写上，请按需人工核对。"
+            )
         for k, v in sorted(counts.items()):
-            lines.append(f"  {k}: {v}")
+            # R3：可读中文标签（仅该键），其余保持原样
+            label = "发信后记账失败" if k == "post_send_bookkeeping_failed" else k
+            lines.append(f"  {label}: {v}")
         content = "\n".join(lines)
         return self.notify("digest", [admin_person], content)
 
@@ -187,3 +201,10 @@ def get_notifier() -> WeComNotifier:
         if _notifier_instance is None:
             _notifier_instance = WeComNotifier()
         return _notifier_instance
+
+
+def reset_notifier() -> None:
+    """Reset the notifier singleton for testing purposes."""
+    global _notifier_instance
+    with _notifier_lock:
+        _notifier_instance = None

@@ -70,6 +70,8 @@ logs/
 *.new
 check_imports.py
 test_*.py
+# mailbots_next 的正式测试套件必须入库（上面 test_*.py 会误伤它），用例外放行
+!mailbots_next/tests/test_*.py
 
 # === mailbots_next 运行产物 ===
 mailbots_next/secrets.json
