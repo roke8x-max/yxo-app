@@ -4,8 +4,12 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
-from mailbots_next.config import CONTAINER_RE, COMPANY_ALIAS
+from mailbots_next.config import CONTAINER_RE, COMPANY_ALIAS, OPS_OWNER_EMAIL
 from mailbots_next.core.extract import BaseExtractor, ExtractedRow, parse_email
+from mailbots_next.core.log import get_logger
+from mailbots_next.core.notify import get_notifier
+
+_log = get_logger(__name__)
 
 
 class DSKExtractor(BaseExtractor):
@@ -66,8 +70,15 @@ class DSKExtractor(BaseExtractor):
                         m = container_re.search(cell1)
                         if m:
                             rows.append((m.group(0).upper(), cell2))
-        except Exception:
-            pass
+        except Exception as e:
+            error_id = _log.error(f"DSK HTML table parse failed: {type(e).__name__}: {e}")
+            try:
+                get_notifier().send_program_error(
+                    OPS_OWNER_EMAIL, error_id,
+                    f"DSK HTML table parse failed: {type(e).__name__}: {e}"
+                )
+            except Exception as ne:
+                _log.error(f"Failed to report DSK parse error: {type(ne).__name__}: {ne}")
         return rows
 
     def _extract_box_from_attachments(self, attachments: List[Dict]) -> set:
