@@ -13,6 +13,7 @@
 日期说明：设计文档原写「斜杠 YYYY/MM/DD」，但体检C已把库标准统一为 YYYY-MM-DD（横杠）并修复前端排序，
 故本引擎发班时间也归一为 YYYY-MM-DD，与设计「语义无变化」判定一致，仅存储格式随现行库标准。
 """
+import logging
 import os
 import re
 import json
@@ -728,14 +729,29 @@ def apply_diff(conn, diff, operator, source_files):
             conn.execute(
                 f'UPDATE records SET {",".join(sets)}, updated_at=?, updated_by=? WHERE id=?',
                 params + [now, operator, rid])
-            conn.execute(
-                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
-                "old_value,new_value,action,source_file,operator,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (batch_id, "update", rid, old["客户编码"] if old else "", "",
-                 "客户编码/目的站", "", a.get("new_code", "") + ("|" + a.get("目的站", ""))[:0],
-                 "改", ",".join(source_files), operator, now))
-            n_alert += 1
+            # 修正A 改动1：审计按实际变更列拆单列日志（严禁合体 field；n_alert 按日志条数）。
+            # UPDATE 保持上面一次写两列、不拆；≠old 判断只用于日志写入。
+            old_code = old["客户编码"] if old else ""
+            old_station = old["目的站"] if old else ""
+            nc = a.get("new_code")
+            st = a.get("目的站")
+            if nc and nc != old_code:
+                conn.execute(
+                    "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
+                    "old_value,new_value,action,source_file,operator,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (batch_id, "update", rid, old_code, "", "客户编码",
+                     old_code, nc, "改", ",".join(source_files), operator, now))
+                n_alert += 1
+            if st and st != old_station:
+                conn.execute(
+                    "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
+                    "old_value,new_value,action,source_file,operator,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (batch_id, "update", rid, old["客户编码"] if old else "", "", "目的站",
+                     old_station, st, "改", ",".join(source_files), operator, now))
+                n_alert += 1
+            # 两列都没真变 → 不写任何日志行
 
     # 5. 批次记录
     conn.execute(
@@ -763,8 +779,18 @@ def revert_batch(conn, batch_id):
         else:
             if lg["field"] in ("客户编码", "目的站") or lg["field"] == "(新增专列箱)":
                 continue
-            conn.execute(f'UPDATE records SET "{lg["field"]}"=? WHERE id=?',
-                         (lg["old_value"], lg["record_id"]))
+            # 修正A 改动1b：历史合体 field（如"客户编码/目的站"）无此列，仅放行
+            # no such column（记 warning 后跳过、不标记 reverted）；其余 OperationalError 原样抛出。
+            try:
+                conn.execute(f'UPDATE records SET "{lg["field"]}"=? WHERE id=?',
+                             (lg["old_value"], lg["record_id"]))
+            except sqlite3.OperationalError as e:
+                if "no such column" not in str(e):
+                    raise
+                logging.getLogger(__name__).warning(
+                    "revert 跳过未知列 field=%r record=%s: %s",
+                    lg["field"], lg["record_id"], e)
+                continue
         conn.execute("UPDATE update_log SET reverted=1, reverted_at=? WHERE id=?",
                      (now, lg["id"]))
     conn.execute("UPDATE import_batch SET reverted=1 WHERE batch_id=?", (batch_id,))
@@ -773,7 +799,7 @@ def revert_batch(conn, batch_id):
 def revert_item(conn, log_id):
     """单条撤销。"""
     lg = conn.execute(
-        "SELECT id,record_id,field,old_value,action,batch_type,batch_id FROM update_log WHERE id=?",
+        "SELECT id,record_id,field,old_value,action,batch_type,batch_id,reverted FROM update_log WHERE id=?",
         (log_id,)).fetchone()
     if not lg or lg["reverted"]:
         return False
@@ -785,8 +811,17 @@ def revert_item(conn, log_id):
         if lg["field"] in ("客户编码", "目的站"):
             pass
         else:
-            conn.execute(f'UPDATE records SET "{lg["field"]}"=? WHERE id=?',
-                         (lg["old_value"], lg["record_id"]))
+            # 修正A 改动1b：同 revert_batch 的窄异常防御；未知列不回写、不标记 reverted。
+            try:
+                conn.execute(f'UPDATE records SET "{lg["field"]}"=? WHERE id=?',
+                             (lg["old_value"], lg["record_id"]))
+            except sqlite3.OperationalError as e:
+                if "no such column" not in str(e):
+                    raise
+                logging.getLogger(__name__).warning(
+                    "revert 跳过未知列 field=%r record=%s: %s",
+                    lg["field"], lg["record_id"], e)
+                return True
     conn.execute("UPDATE update_log SET reverted=1, reverted_at=? WHERE id=?", (now, lg["id"]))
     # 若批次内全部已回退，标记批次
     left = conn.execute("SELECT COUNT(*) FROM update_log WHERE batch_id=? AND COALESCE(reverted,0)=0",
