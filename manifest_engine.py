@@ -13,6 +13,7 @@
 日期说明：设计文档原写「斜杠 YYYY/MM/DD」，但体检C已把库标准统一为 YYYY-MM-DD（横杠）并修复前端排序，
 故本引擎发班时间也归一为 YYYY-MM-DD，与设计「语义无变化」判定一致，仅存储格式随现行库标准。
 """
+import logging
 import os
 import re
 import json
@@ -26,6 +27,14 @@ from config import (
 import openpyxl
 
 BACKUP_DIR = r"D:\YXO_DATA\备份\数据库"
+
+# 专列判定阈值（spec §1.2/§6）：某班列客编总数（库内有效 + 本次导入，code_core 去重）> 40 即专列。
+DEDICATED_THRESHOLD = 40
+
+# alerts_applied 分通道白名单（spec §8.3，服务端强制）：
+#   field_fix（字段冲突覆盖）仅允许直接拼入 UPDATE 的列；suffix_change 写入列固定为客户编码/目的站。
+FIELD_FIX_ALLOW = ("箱号", "封号")
+TRAIN_TYPE_ALLOW = ("专列", "散舱")
 
 
 # ==================== 归一化 ====================
@@ -451,9 +460,12 @@ def normalize_row(raw, ftype):
 # ==================== 库内记录加载 ====================
 
 def load_records(conn):
+    # 改动三（spec §3）：退舱与软删记录不参与任何比对。COALESCE(状态,'') 兼容状态为 NULL 的行。
     rows = conn.execute(
         'SELECT id,"客户编码","箱号","班列号","口岸","发班时间","封号","箱属","目的站",'
-        'COALESCE(is_deleted,0) AS del FROM records'
+        '"开票子公司名称","班列类型","状态",'
+        'COALESCE(is_deleted,0) AS del FROM records '
+        "WHERE COALESCE(\"状态\",'')<>'退舱' AND COALESCE(is_deleted,0)=0"
     ).fetchall()
     out = []
     for r in rows:
@@ -464,7 +476,11 @@ def load_records(conn):
             "box": norm_box(r["箱号"]), "train": (r["班列号"] or "").strip(),
             "port": (r["口岸"] or "").strip(), "dep": (r["发班时间"] or "").strip(),
             "seal": (r["封号"] or "").strip(), "owner": (r["箱属"] or "").strip(),
-            "dest": (r["目的站"] or "").strip(), "deleted": r["del"],
+            "dest": (r["目的站"] or "").strip(),
+            "company": (r["开票子公司名称"] or "").strip(),
+            "ttype": (r["班列类型"] or "").strip(),
+            "status": (r["状态"] or "").strip(),
+            "deleted": r["del"],
         })
     return out
 
@@ -486,8 +502,25 @@ def build_diff(conn, parsed_rows):
     updates, imports, alerts, warnings = [], [], [], []
     import_groups = {}   # train_no -> group dict
     seen_import_rows = set()
+    seen_weak_keys = set()
 
-    for row in parsed_rows:
+    # 改动一（spec §1.2/§1.4）：本次导入各班列客编（core 去重）。范围 = 能解析出班列号
+    # 且有客编 core 的 Excel 行（含最终进 imports/updates/待确认的行；缺班列号/客编缺失行天然排除）。
+    batch_codes = {}
+    for brow in parsed_rows:
+        if brow.get("core") and brow.get("班列号"):
+            batch_codes.setdefault(brow["班列号"], set()).add(brow["core"])
+    # 库内各班列客编（core 去重；load_records 已按改动三剔除退舱/软删）
+    db_codes = {}
+    for r in active:
+        if r["train"] and r["core"]:
+            db_codes.setdefault(r["train"], set()).add(r["core"])
+
+    def _train_is_dedicated(train_no):
+        total = len(db_codes.get(train_no, set()) | batch_codes.get(train_no, set()))
+        return total > DEDICATED_THRESHOLD
+
+    for row_idx, row in enumerate(parsed_rows):
         core = row["core"]
         if not core:
             alerts.append(_alert("客编缺失", row, None, "客编解析为空，跳过"))
@@ -495,15 +528,32 @@ def build_diff(conn, parsed_rows):
         cands = by_core.get(core, [])
 
         if not cands:
-            # 整趟新专列？ → 看该班列号是否在库有其他箱
-            if row["班列号"] and by_train.get(row["班列号"]):
-                alerts.append(_alert("陌生客编", row, None,
-                                     f"客编 {row['客户编码']} 库内无，但其班列 {row['班列号']} 已录过箱，疑似客编写错"))
+            # 改动一：陌生客编一律放行，按该班列客编总数判专列/散舱（不再看是否已有专列箱）。
+            tn = row["班列号"]
+            if not tn:
+                # 改动一 §1.5：无班列号新行不再静默丢弃，给可见 alert。
+                alerts.append({
+                    "type": "缺班列号", "key": str(row_idx),
+                    "客户编码": row["客户编码"], "箱号": row["箱号"],
+                    "说明": f"客编 {row['客户编码']} 缺班列号，未导入",
+                })
                 continue
-            # 新专列待导入
-            _add_import(import_groups, seen_import_rows, row)
+            is_dedicated = _train_is_dedicated(tn)
+            _add_import(import_groups, seen_import_rows, row,
+                        "专列" if is_dedicated else "散舱")
+            if not is_dedicated:
+                weak_key = f"{tn}:{core}"
+                if weak_key not in seen_weak_keys:
+                    seen_weak_keys.add(weak_key)
+                    alerts.append({
+                        "type": "弱提示", "key": weak_key,
+                        "客户编码": row["客户编码"], "箱号": row["箱号"],
+                        "说明": f"该班列客编未达阈值（≤{DEDICATED_THRESHOLD}），"
+                                f"按散舱导入，请核对（班列{tn}客编{core}）",
+                    })
             continue
 
+        box_alerted = False
         if len(cands) > 1:
             # 用箱号消歧
             box = row["箱号"]
@@ -519,12 +569,17 @@ def build_diff(conn, parsed_rows):
             db = match
         else:
             db = cands[0]
-            # 唯一候选：箱号消歧校验
+            # 唯一候选：箱号消歧校验（改动二：类型统一为字段冲突，显式携带 field/new_value，前端据此渲染确认框）
+            # 同一记录箱号+封号同时冲突时两条 alert 都要出（验收10），故只标记不跳过整行；
+            # 变化循环里跳过箱号重复报警即可。
             if row["箱号"]:
                 if db["box"] and db["box"] != row["箱号"]:
-                    alerts.append(_alert("箱号冲突", row, db,
-                                         f"客编 {row['客户编码']} 命中，但箱号 库内={db['box']} ≠ 文件={row['箱号']}"))
-                    continue
+                    a = _alert("字段冲突", row, db,
+                               f"客编 {row['客户编码']} 命中，但箱号 库内={db['box']} ≠ 文件={row['箱号']}")
+                    a["field"] = "箱号"
+                    a["new_value"] = row["箱号"]
+                    alerts.append(a)
+                    box_alerted = True
 
         # 命中 → 计算字段差异
         changes = []
@@ -541,9 +596,11 @@ def build_diff(conn, parsed_rows):
                 pass
             else:
                 changes.append({"field": f, "old": dv, "new": iv, "action": "改"})
-        # 箱号/封号/箱属（仅 空→有 补录；有→有不同 冲突）
+        # 箱号/封号（仅 空→有 补录；有→有不同 冲突报警，可勾选确认覆盖）
         if row["箱号"]:
-            for f, dkey in (("箱号", "box"), ("封号", "seal"), ("箱属", "owner")):
+            for f, dkey in (("箱号", "box"), ("封号", "seal")):
+                if f == "箱号" and box_alerted:
+                    continue  # 单候选路径已报过，避免重复
                 iv = row.get(f)
                 if iv is None or iv == "":
                     continue
@@ -553,9 +610,24 @@ def build_diff(conn, parsed_rows):
                 elif iv == dv:
                     pass
                 else:
-                    alerts.append(_alert("字段冲突", row, db,
-                                         f"{f} 库内={dv} ≠ 文件={iv}，未自动写"))
+                    a = _alert("字段冲突", row, db,
+                               f"{f} 库内={dv} ≠ 文件={iv}，未自动写")
+                    a["field"] = f
+                    # 关键：统一从 row 顶层取（_alert 的文件值字典不含箱号键，不可从文件值取）。
+                    a["new_value"] = row.get(f)
+                    alerts.append(a)
                     continue
+        # 箱属（改动二）：独立分支，进更新清单不再报警；两侧 norm_owner 防大小写误判。
+        iv_owner = row.get("箱属")
+        if iv_owner is not None and iv_owner != "":
+            dv_owner = norm_owner(db["owner"])
+            iv_owner_norm = norm_owner(iv_owner)
+            if dv_owner == "":
+                changes.append({"field": "箱属", "old": "", "new": iv_owner, "action": "补"})
+            elif iv_owner_norm == dv_owner:
+                pass
+            else:
+                changes.append({"field": "箱属", "old": db["owner"], "new": iv_owner, "action": "改"})
         # 后缀变更（专项）
         if db["suffix"] and row["suffix"] and db["suffix"] != row["suffix"]:
             alerts.append(_alert("后缀变更", row, db,
@@ -567,6 +639,8 @@ def build_diff(conn, parsed_rows):
                 "record_id": db["id"],
                 "客户编码": db["code"],
                 "箱号": db["box"],
+                "班列号": db["train"],
+                "负责公司": db["company"],
                 "changes": changes,
             })
 
@@ -598,14 +672,18 @@ def _alert(atype, row, db, msg, dest_suggest=""):
     return a
 
 
-def _add_import(groups, seen, row):
+def _add_import(groups, seen, row, ttype="专列"):
     tn = row["班列号"]
     if not tn:
+        # 无班列号由 build_diff 直接产出缺班列号 alert，这里不再静默丢弃而不留痕。
         return
+    if ttype not in TRAIN_TYPE_ALLOW:
+        raise ValueError(f"非法班列类型: {ttype}")
     g = groups.get(tn)
     if g is None:
         g = {
             "train_no": tn,
+            "班列类型": ttype,
             "口岸": row["口岸"] or "",
             "发班时间": row["发班时间"] or "",
             "后缀": row["suffix"],
@@ -683,9 +761,12 @@ def apply_diff(conn, diff, operator, source_files):
                  ",".join(source_files), operator, now))
             n_update += 1
 
-    # 3. 新专列导入通道
+    # 3. 新专列/散舱导入通道（改动一：按 diff 携带的判定写班列类型，不再写死专列）
     for g in diff.get("imports", []):
         tn = g["train_no"]
+        ttype = g.get("班列类型") or "专列"
+        if ttype not in TRAIN_TYPE_ALLOW:
+            raise ValueError(f"非法班列类型: {ttype}")
         dest = g.get("目的站") or g.get("目的站建议") or ""
         month = (g.get("发班时间") or "")[:7]
         if month and re.match(r'^\d{4}-\d{2}$', month):
@@ -700,7 +781,7 @@ def apply_diff(conn, diff, operator, source_files):
                     "is_deleted", "updated_by", "updated_at"]
             vals = [seq, float(seq), r.get("客户编码", ""), r.get("箱号", ""), r.get("封号", ""),
                     r.get("箱属", ""), tn, r.get("口岸", "") or g.get("口岸", ""),
-                    r.get("发班时间", "") or g.get("发班时间", ""), dest, "专列", "正常",
+                    r.get("发班时间", "") or g.get("发班时间", ""), dest, ttype, "正常",
                     month, 0, operator, now]
             ph = ",".join("?" * len(cols))
             csql = ",".join(f'"{c}"' for c in cols)
@@ -715,27 +796,72 @@ def apply_diff(conn, diff, operator, source_files):
                  "增", ",".join(source_files), operator, now))
             n_insert += 1
 
-    # 4. 后缀变更确认（alerts_applied）
+    # 4. 报警确认（alerts_applied，分通道，spec §8.2/§8.3）。
+    #   source="field_fix"：字段冲突覆盖，field 白名单服务端强制（箱号/封号），new_value 覆盖写库。
+    #   source="suffix_change"（缺省，兼容旧前端只传 new_code/目的站）：写客户编码 + 目的站两列。
     for a in diff.get("alerts_applied", []):
         rid = a["record_id"]
+        source = a.get("source") or ("field_fix" if a.get("field") else "suffix_change")
+        if source == "field_fix":
+            f = a.get("field")
+            if f not in FIELD_FIX_ALLOW:
+                raise ValueError(f"非法确认字段: {f}")
+            if a.get("new_value") is None:
+                raise ValueError(f"字段冲突确认缺少新值: {f}")
+            old = conn.execute(
+                f'SELECT "客户编码","箱号","{f}" FROM records WHERE id=?', (rid,)).fetchone()
+            if old is None:
+                raise ValueError(f"记录不存在: id={rid}")
+            if str(old[f]) == str(a["new_value"]):
+                continue
+            conn.execute(
+                f'UPDATE records SET "{f}"=?, updated_at=?, updated_by=? WHERE id=?',
+                (a["new_value"], now, operator, rid))
+            conn.execute(
+                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
+                "old_value,new_value,action,source_file,operator,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (batch_id, "update", rid, old["客户编码"] or "", old["箱号"] or "",
+                 f, old[f] or "", a["new_value"],
+                 "改", ",".join(source_files), operator, now))
+            n_alert += 1
+            continue
+        if source != "suffix_change":
+            raise ValueError(f"非法确认来源: {source}")
         sets, params = [], []
+        # suffix_change 写入列白名单固定为客户编码/目的站（字面量列名，不接受客户端指定列）。
         if a.get("new_code"):
             sets.append('"客户编码"=?'); params.append(a["new_code"])
         if a.get("目的站"):
             sets.append('"目的站"=?'); params.append(a["目的站"])
         if sets:
-            old = conn.execute(f'SELECT "客户编码","目的站" FROM records WHERE id=?', (rid,)).fetchone()
+            old = conn.execute('SELECT "客户编码","目的站" FROM records WHERE id=?', (rid,)).fetchone()
             conn.execute(
                 f'UPDATE records SET {",".join(sets)}, updated_at=?, updated_by=? WHERE id=?',
                 params + [now, operator, rid])
-            conn.execute(
-                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
-                "old_value,new_value,action,source_file,operator,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (batch_id, "update", rid, old["客户编码"] if old else "", "",
-                 "客户编码/目的站", "", a.get("new_code", "") + ("|" + a.get("目的站", ""))[:0],
-                 "改", ",".join(source_files), operator, now))
-            n_alert += 1
+            # 修正A 改动1：审计按实际变更列拆单列日志（严禁合体 field；n_alert 按日志条数）。
+            # UPDATE 保持上面一次写两列、不拆；≠old 判断只用于日志写入。
+            old_code = old["客户编码"] if old else ""
+            old_station = old["目的站"] if old else ""
+            nc = a.get("new_code")
+            st = a.get("目的站")
+            if nc and nc != old_code:
+                conn.execute(
+                    "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
+                    "old_value,new_value,action,source_file,operator,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (batch_id, "update", rid, old_code, "", "客户编码",
+                     old_code, nc, "改", ",".join(source_files), operator, now))
+                n_alert += 1
+            if st and st != old_station:
+                conn.execute(
+                    "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
+                    "old_value,new_value,action,source_file,operator,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (batch_id, "update", rid, old["客户编码"] if old else "", "", "目的站",
+                     old_station, st, "改", ",".join(source_files), operator, now))
+                n_alert += 1
+            # 两列都没真变 → 不写任何日志行
 
     # 5. 批次记录
     conn.execute(
@@ -763,8 +889,18 @@ def revert_batch(conn, batch_id):
         else:
             if lg["field"] in ("客户编码", "目的站") or lg["field"] == "(新增专列箱)":
                 continue
-            conn.execute(f'UPDATE records SET "{lg["field"]}"=? WHERE id=?',
-                         (lg["old_value"], lg["record_id"]))
+            # 修正A 改动1b：历史合体 field（如"客户编码/目的站"）无此列，仅放行
+            # no such column（记 warning 后跳过、不标记 reverted）；其余 OperationalError 原样抛出。
+            try:
+                conn.execute(f'UPDATE records SET "{lg["field"]}"=? WHERE id=?',
+                             (lg["old_value"], lg["record_id"]))
+            except sqlite3.OperationalError as e:
+                if "no such column" not in str(e):
+                    raise
+                logging.getLogger(__name__).warning(
+                    "revert 跳过未知列 field=%r record=%s: %s",
+                    lg["field"], lg["record_id"], e)
+                continue
         conn.execute("UPDATE update_log SET reverted=1, reverted_at=? WHERE id=?",
                      (now, lg["id"]))
     conn.execute("UPDATE import_batch SET reverted=1 WHERE batch_id=?", (batch_id,))
@@ -773,7 +909,7 @@ def revert_batch(conn, batch_id):
 def revert_item(conn, log_id):
     """单条撤销。"""
     lg = conn.execute(
-        "SELECT id,record_id,field,old_value,action,batch_type,batch_id FROM update_log WHERE id=?",
+        "SELECT id,record_id,field,old_value,action,batch_type,batch_id,reverted FROM update_log WHERE id=?",
         (log_id,)).fetchone()
     if not lg or lg["reverted"]:
         return False
@@ -785,8 +921,17 @@ def revert_item(conn, log_id):
         if lg["field"] in ("客户编码", "目的站"):
             pass
         else:
-            conn.execute(f'UPDATE records SET "{lg["field"]}"=? WHERE id=?',
-                         (lg["old_value"], lg["record_id"]))
+            # 修正A 改动1b：同 revert_batch 的窄异常防御；未知列不回写、不标记 reverted。
+            try:
+                conn.execute(f'UPDATE records SET "{lg["field"]}"=? WHERE id=?',
+                             (lg["old_value"], lg["record_id"]))
+            except sqlite3.OperationalError as e:
+                if "no such column" not in str(e):
+                    raise
+                logging.getLogger(__name__).warning(
+                    "revert 跳过未知列 field=%r record=%s: %s",
+                    lg["field"], lg["record_id"], e)
+                return True
     conn.execute("UPDATE update_log SET reverted=1, reverted_at=? WHERE id=?", (now, lg["id"]))
     # 若批次内全部已回退，标记批次
     left = conn.execute("SELECT COUNT(*) FROM update_log WHERE batch_id=? AND COALESCE(reverted,0)=0",
