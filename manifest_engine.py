@@ -720,6 +720,18 @@ def _next_batch_id(conn):
     return f"IMP-{day}-{n + 1:03d}"
 
 
+def _rec_meta(conn, rid):
+    """按 record_id 取 records 的 班列号 + 开票子公司名称（负责公司）。取库内原值，不 norm。"""
+    if not rid:
+        return ("", "")
+    r = conn.execute(
+        'SELECT "班列号","开票子公司名称" FROM records WHERE id=?', (rid,)
+    ).fetchone()
+    if r is None:
+        return ("", "")
+    return (r[0] or "", r[1] or "")
+
+
 def apply_diff(conn, diff, operator, source_files):
     """diff: {updates:[{record_id, changes:[{field,new}]}], imports:[{train_no, 目的站, rows:[...]}],
                alerts_applied:[{record_id, new_code?, 目的站?}]}
@@ -752,11 +764,13 @@ def apply_diff(conn, diff, operator, source_files):
             conn.execute(
                 f'UPDATE records SET "{f}"=?, updated_at=?, updated_by=? WHERE id=?',
                 (new_val, now, operator, rid))
+            train_no, company = _rec_meta(conn, rid)
             conn.execute(
-                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
-                "old_value,new_value,action,source_file,operator,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,"
+                "班列号,负责公司,field,old_value,new_value,action,source_file,operator,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (batch_id, "update", rid, u.get("客户编码", ""), u.get("箱号", ""),
+                 train_no, company,
                  f, old_val, new_val, ch.get("action", "改"),
                  ",".join(source_files), operator, now))
             n_update += 1
@@ -787,11 +801,13 @@ def apply_diff(conn, diff, operator, source_files):
             csql = ",".join(f'"{c}"' for c in cols)
             cur = conn.execute(f"INSERT INTO records ({csql}) VALUES ({ph})", vals)
             new_id = cur.lastrowid
+            train_no, company = _rec_meta(conn, new_id)
             conn.execute(
-                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
-                "old_value,new_value,action,source_file,operator,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,"
+                "班列号,负责公司,field,old_value,new_value,action,source_file,operator,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (batch_id, "import", new_id, r.get("客户编码", ""), r.get("箱号", ""),
+                 train_no, company,
                  "(新增专列箱)", "", f"{r.get('客户编码','')}/{r.get('箱号','')}",
                  "增", ",".join(source_files), operator, now))
             n_insert += 1
@@ -817,11 +833,13 @@ def apply_diff(conn, diff, operator, source_files):
             conn.execute(
                 f'UPDATE records SET "{f}"=?, updated_at=?, updated_by=? WHERE id=?',
                 (a["new_value"], now, operator, rid))
+            train_no, company = _rec_meta(conn, rid)
             conn.execute(
-                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
-                "old_value,new_value,action,source_file,operator,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,"
+                "班列号,负责公司,field,old_value,new_value,action,source_file,operator,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (batch_id, "update", rid, old["客户编码"] or "", old["箱号"] or "",
+                 train_no, company,
                  f, old[f] or "", a["new_value"],
                  "改", ",".join(source_files), operator, now))
             n_alert += 1
@@ -846,20 +864,26 @@ def apply_diff(conn, diff, operator, source_files):
             nc = a.get("new_code")
             st = a.get("目的站")
             if nc and nc != old_code:
+                train_no, company = _rec_meta(conn, rid)
                 conn.execute(
-                    "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
-                    "old_value,new_value,action,source_file,operator,created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (batch_id, "update", rid, old_code, "", "客户编码",
-                     old_code, nc, "改", ",".join(source_files), operator, now))
+                    "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,"
+                    "班列号,负责公司,field,old_value,new_value,action,source_file,operator,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (batch_id, "update", rid, old_code, "",
+                     train_no, company,
+                     "客户编码", old_code, nc,
+                     "改", ",".join(source_files), operator, now))
                 n_alert += 1
             if st and st != old_station:
+                train_no, company = _rec_meta(conn, rid)
                 conn.execute(
-                    "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
-                    "old_value,new_value,action,source_file,operator,created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (batch_id, "update", rid, old["客户编码"] if old else "", "", "目的站",
-                     old_station, st, "改", ",".join(source_files), operator, now))
+                    "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,"
+                    "班列号,负责公司,field,old_value,new_value,action,source_file,operator,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (batch_id, "update", rid, old["客户编码"] if old else "", "",
+                     train_no, company,
+                     "目的站", old_station, st,
+                     "改", ",".join(source_files), operator, now))
                 n_alert += 1
             # 两列都没真变 → 不写任何日志行
 
