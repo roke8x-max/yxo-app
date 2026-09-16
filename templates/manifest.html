@@ -417,8 +417,9 @@ function renderUpdates(updates) {
   if (!updates.length) { p.appendChild(el("div", { class:"empty", text:"无更新项" })); return; }
   const t = el("table");
   t.appendChild(el("thead", null, el("tr", null, [
+    el("th", { text:"客户编码" }), el("th", { text:"箱号" }),
     el("th", { text:"班列号" }), el("th", { text:"负责公司" }),
-    el("th", { text:"客户编码" }), el("th", { text:"箱号" }), el("th", { text:"变更明细" })
+    el("th", { text:"变更明细" })
   ])));
   const tb = el("tbody");
   updates.forEach(u => {
@@ -433,10 +434,10 @@ function renderUpdates(updates) {
       ]));
     });
     tb.appendChild(el("tr", null, [
-      el("td", { text:u["班列号"] || "" }),
-      el("td", { text:u["负责公司"] || "" }),
       el("td", { text:u["客户编码"] || "" }),
       el("td", { text:u["箱号"] || "" }),
+      el("td", { text:u["班列号"] || "" }),
+      el("td", { text:u["负责公司"] || "" }),
       el("td", null, ch),
     ]));
   });
@@ -749,7 +750,9 @@ function renderLogs(box, logs) {
   if (!logs.length) { box.appendChild(el("div", { class:"empty", text:"无明细" })); return; }
   const t = el("table");
   t.appendChild(el("thead", null, el("tr", null, [
-    el("th", { text:"客户编码" }), el("th", { text:"箱号" }), el("th", { text:"字段" }),
+    el("th", { text:"客户编码" }), el("th", { text:"箱号" }),
+    el("th", { text:"班列号" }), el("th", { text:"负责公司" }),
+    el("th", { text:"字段" }),
     el("th", { text:"旧值" }), el("th", { text:"新值" }), el("th", { text:"动作" }),
     el("th", { text:"操作" })
   ])));
@@ -757,6 +760,7 @@ function renderLogs(box, logs) {
   logs.forEach(l => {
     const row = el("tr", null, [
       el("td", { text:l["客户编码"] || "" }), el("td", { text:l["箱号"] || "" }),
+      el("td", { text:l["班列号"] || "" }), el("td", { text:l["负责公司"] || "" }),
       el("td", { text:l.field || "" }),
       el("td", { text:l.old_value || "（空）" }), el("td", { text:l.new_value || "（空）" }),
       el("td", null, el("span", { class:"tag tag-" + tagClass(l.action), text:l.action || "" })),
@@ -778,7 +782,7 @@ function renderLogs(box, logs) {
 }
 
 function copyTSV(l) {
-  const line = [l.record_id, l["客户编码"], l["箱号"], l.field, l.old_value || "", l.new_value || "", l.action].join("\t");
+  const line = [l.record_id, l["客户编码"], l["箱号"], l["班列号"] || "", l["负责公司"] || "", l.field, l.old_value || "", l.new_value || "", l.action].join("\t");
   navigator.clipboard.writeText(line).then(() => alert("已复制 TSV：\n" + line)).catch(() => alert("复制失败"));
 }
 function copyJSON(logs) {

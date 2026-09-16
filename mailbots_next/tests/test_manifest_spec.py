@@ -36,7 +36,8 @@ def conn():
         is_deleted INTEGER DEFAULT 0, updated_by TEXT, updated_at TEXT)""")
     c.execute("""CREATE TABLE update_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, batch_type TEXT,
-        record_id INTEGER, "客户编码" TEXT, "箱号" TEXT, field TEXT, old_value TEXT,
+        record_id INTEGER, "客户编码" TEXT, "箱号" TEXT, "班列号" TEXT, "负责公司" TEXT,
+        field TEXT, old_value TEXT,
         new_value TEXT, action TEXT, source_file TEXT, operator TEXT,
         reverted INTEGER DEFAULT 0, reverted_at TEXT, created_at TEXT)""")
     c.execute("""CREATE TABLE import_batch (
@@ -397,3 +398,94 @@ def test_revert_batch_new_single_column_logs(conn, tmp_path, monkeypatch):
     r = conn.execute('SELECT "客户编码","目的站" FROM records WHERE id=?',
                      (rid,)).fetchone()
     assert (r["客户编码"], r["目的站"]) == ("C001-VXN", "沃尔西诺")
+
+
+# ---------- 历史日志加班列号/负责公司（spec_舱单导入_历史日志加班列号负责公司.md，改动5 + 验收1） ----------
+
+def _apply_field_fix(conn, rid, field, new_value, monkeypatch, tmp_path):
+    monkeypatch.setattr(me, "BACKUP_DIR", str(tmp_path))
+    diff = {"updates": [], "imports": [],
+            "alerts_applied": [{"source": "field_fix", "record_id": rid,
+                                "field": field, "new_value": new_value}]}
+    bid = me.apply_diff(conn, diff, "毛骁洋", ["t.xlsx"])
+    conn.commit()
+    return bid
+
+
+def test_log_rows_carry_train_and_company(conn, tmp_path, monkeypatch):
+    """改动5：字段冲突确认 + 后缀变更确认 → update_log 行的班列号/负责公司等于该记录实际值。"""
+    rid = seed(conn, **{"客户编码": "H001-DMZ", "箱号": "HB1", "班列号": "WB88",
+                        "封号": "S-OLD", "目的站": "电煤", "开票子公司名称": "太平洋"})
+    bid1 = _apply_field_fix(conn, rid, "封号", "S-NEW", monkeypatch, tmp_path)
+    bid2 = apply_suffix(conn, rid, "H001-VXN", "沃尔西诺", monkeypatch, tmp_path)
+    rows = conn.execute(
+        'SELECT field,"班列号","负责公司" FROM update_log WHERE batch_id=? ORDER BY id',
+        (bid1,)).fetchall()
+    assert [(r["field"], r["班列号"], r["负责公司"]) for r in rows] == [
+        ("封号", "WB88", "太平洋"),
+    ]
+    rows = conn.execute(
+        'SELECT field,"班列号","负责公司" FROM update_log WHERE batch_id=? ORDER BY id',
+        (bid2,)).fetchall()
+    assert [(r["field"], r["班列号"], r["负责公司"]) for r in rows] == [
+        ("客户编码", "WB88", "太平洋"),
+        ("目的站", "WB88", "太平洋"),
+    ]
+    # 验收5：整批回退后这两列保留（回退只动 reverted 标记）。
+    me.revert_batch(conn, bid2)
+    conn.commit()
+    rows = conn.execute(
+        'SELECT field,"班列号","负责公司",reverted FROM update_log WHERE batch_id=? ORDER BY id',
+        (bid2,)).fetchall()
+    assert [(r["班列号"], r["负责公司"]) for r in rows] == [
+        ("WB88", "太平洋"), ("WB88", "太平洋"),
+    ]
+
+
+def test_updates_channel_log_carries_train_and_company(conn, tmp_path, monkeypatch):
+    """改动2⑤：确认更新通道 → update_log 行的班列号/负责公司等于该记录实际值（非空）。"""
+    rid = seed(conn, **{"客户编码": "H002-DMZ", "箱号": "HB2", "班列号": "WB99",
+                        "封号": "S-OLD", "开票子公司名称": "东盟"})
+    monkeypatch.setattr(me, "BACKUP_DIR", str(tmp_path))
+    diff = {"updates": [{"record_id": rid, "客户编码": "H002-DMZ", "箱号": "HB2",
+                         "changes": [{"field": "封号", "old": "S-OLD", "new": "S-NEW",
+                                      "action": "改"}]}],
+            "imports": [], "alerts_applied": []}
+    bid = me.apply_diff(conn, diff, "毛骁洋", ["t.xlsx"])
+    conn.commit()
+    rows = conn.execute(
+        'SELECT field,"班列号","负责公司" FROM update_log WHERE batch_id=? ORDER BY id',
+        (bid,)).fetchall()
+    assert [(r["field"], r["班列号"], r["负责公司"]) for r in rows] == [
+        ("封号", "WB99", "东盟"),
+    ]
+
+
+def _legacy_log_conn():
+    """验收1/6 用：迁移前的老结构 update_log（无班列号/负责公司列）。"""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    c = sqlite3.connect(path)
+    c.execute("""CREATE TABLE update_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, batch_type TEXT,
+        record_id INTEGER, "客户编码" TEXT, "箱号" TEXT, field TEXT, old_value TEXT,
+        new_value TEXT, action TEXT, source_file TEXT, operator TEXT,
+        reverted INTEGER DEFAULT 0, reverted_at TEXT, created_at TEXT)""")
+    c.commit()
+    return c, path
+
+
+def test_update_log_migration_idempotent():
+    """验收1：迁移段在老表上连续执行两次不报错，第二次因列已存在而跳过。"""
+    import app as app_mod
+    c, path = _legacy_log_conn()
+    try:
+        app_mod._ensure_update_log_extra_cols(c)
+        c.commit()
+        app_mod._ensure_update_log_extra_cols(c)
+        c.commit()
+        cols = {r[1] for r in c.execute("PRAGMA table_info(update_log)").fetchall()}
+        assert "班列号" in cols and "负责公司" in cols
+    finally:
+        c.close()
+        os.unlink(path)

@@ -222,6 +222,23 @@ def backfill_ledger_month(conn):
         "ON CONFLICT(key) DO UPDATE SET value='1'")
 
 
+def _ensure_update_log_extra_cols(conn):
+    """update_log 补班列号/负责公司列（兼容已存在库；随应用启动执行，幂等）。
+
+    多 worker 并发启动可能同时判列不存在而并发 ALTER → 仅忽略 duplicate column，
+    其余 OperationalError（锁/只读/IO）原样抛出，暴露真实启动故障。
+    """
+    cur_cols = {r[1] for r in conn.execute("PRAGMA table_info(update_log)").fetchall()}
+    for col in ("班列号", "负责公司"):
+        if col not in cur_cols:
+            try:
+                conn.execute(f'ALTER TABLE update_log ADD COLUMN "{col}" TEXT')
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e):
+                    raise
+                pass
+
+
 def init_db():
     os.makedirs(config.DATA_DIR, exist_ok=True)
     conn = get_db()
@@ -327,6 +344,7 @@ def init_db():
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ul_batch ON update_log(batch_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ul_rec ON update_log(record_id)")
+    _ensure_update_log_extra_cols(conn)
     # import_batch：一次导入操作的批次元信息 + 整库快照路径（核弹级还原用）。
     conn.execute("""CREATE TABLE IF NOT EXISTS import_batch (
         batch_id TEXT PRIMARY KEY,
@@ -1503,7 +1521,8 @@ def api_manifest_batch_detail(batch_id):
         return _manifest_forbid()
     conn = get_db()
     logs = conn.execute(
-        "SELECT id,batch_id,batch_type,record_id,\"客户编码\",\"箱号\",field,"
+        "SELECT id,batch_id,batch_type,record_id,\"客户编码\",\"箱号\","
+        "班列号,负责公司,field,"
         "old_value,new_value,action,source_file,operator,COALESCE(reverted,0) reverted,"
         "created_at FROM update_log WHERE batch_id=? ORDER BY id",
         (batch_id,)
