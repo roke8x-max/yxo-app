@@ -442,6 +442,25 @@ def test_log_rows_carry_train_and_company(conn, tmp_path, monkeypatch):
     ]
 
 
+def test_updates_channel_log_carries_train_and_company(conn, tmp_path, monkeypatch):
+    """改动2⑤：确认更新通道 → update_log 行的班列号/负责公司等于该记录实际值（非空）。"""
+    rid = seed(conn, **{"客户编码": "H002-DMZ", "箱号": "HB2", "班列号": "WB99",
+                        "封号": "S-OLD", "开票子公司名称": "东盟"})
+    monkeypatch.setattr(me, "BACKUP_DIR", str(tmp_path))
+    diff = {"updates": [{"record_id": rid, "客户编码": "H002-DMZ", "箱号": "HB2",
+                         "changes": [{"field": "封号", "old": "S-OLD", "new": "S-NEW",
+                                      "action": "改"}]}],
+            "imports": [], "alerts_applied": []}
+    bid = me.apply_diff(conn, diff, "毛骁洋", ["t.xlsx"])
+    conn.commit()
+    rows = conn.execute(
+        'SELECT field,"班列号","负责公司" FROM update_log WHERE batch_id=? ORDER BY id',
+        (bid,)).fetchall()
+    assert [(r["field"], r["班列号"], r["负责公司"]) for r in rows] == [
+        ("封号", "WB99", "东盟"),
+    ]
+
+
 def _legacy_log_conn():
     """验收1/6 用：迁移前的老结构 update_log（无班列号/负责公司列）。"""
     fd, path = tempfile.mkstemp(suffix=".db")

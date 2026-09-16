@@ -764,11 +764,13 @@ def apply_diff(conn, diff, operator, source_files):
             conn.execute(
                 f'UPDATE records SET "{f}"=?, updated_at=?, updated_by=? WHERE id=?',
                 (new_val, now, operator, rid))
+            train_no, company = _rec_meta(conn, rid)
             conn.execute(
-                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,field,"
-                "old_value,new_value,action,source_file,operator,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO update_log(batch_id,batch_type,record_id,客户编码,箱号,"
+                "班列号,负责公司,field,old_value,new_value,action,source_file,operator,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (batch_id, "update", rid, u.get("客户编码", ""), u.get("箱号", ""),
+                 train_no, company,
                  f, old_val, new_val, ch.get("action", "改"),
                  ",".join(source_files), operator, now))
             n_update += 1
