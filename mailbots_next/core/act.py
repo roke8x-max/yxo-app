@@ -229,9 +229,13 @@ def _format_plain_table(headers: List[str], rows: List[List[str]]) -> str:
 
 
 def _build_waybill_text_plain(rows: List[Dict]) -> str:
+    """正文纯文本部件 = 表格本身。
+
+    不加任何自撰前言（洋 2026-09-17 明确要求：下游公司只要收到按规则拆分的
+    邮件即可，机器人不擅自添加说明性文字）。"""
     data = [[(r.get("客户编码") or "-"), (r.get("箱号") or "-"), (r.get("运单号") or "-")]
             for r in rows]
-    return "本邮件仅包含贵公司相关的运单号信息：\n\n" + _format_plain_table(WAYBILL_HEADERS, data)
+    return _format_plain_table(WAYBILL_HEADERS, data)
 
 
 def _build_waybill_html(rows: List[Dict]) -> str:
@@ -245,7 +249,6 @@ def _build_waybill_html(rows: List[Dict]) -> str:
     return (
         '<div style="font-family: Tahoma, Arial, \'微软雅黑\', SimSun; '
         'font-size: 13px;">'
-        '<p style="margin: 0 0 10px 0;">本邮件仅包含贵公司相关的运单号信息：</p>'
         '<table style="border-collapse: collapse; font-size: 13px;">'
         f"<thead><tr>{ths}</tr></thead>"
         f"<tbody>{''.join(trs)}</tbody>"

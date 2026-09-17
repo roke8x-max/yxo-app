@@ -215,7 +215,7 @@ def test_10_plain_uses_table_wide_column_widths():
         ["LONGCODE12345678", "FWRU0243394", "38273225"],
         ["MIDCODE9988", "TCLU999", "重庆物流99"]]), rows)
     _, _, bodies = _plain_html(out)
-    table_lines = bodies["text/plain"].split("本邮件仅包含贵公司相关的运单号信息：\n\n")[1].split("\n")
+    table_lines = bodies["text/plain"].split("\n")
     assert len(table_lines) == 4  # 表头 + 3 数据行
     data_lines = table_lines[1:]
     idx = [ln.index(r["箱号"]) for ln, r in zip(data_lines, rows)]
@@ -354,8 +354,30 @@ def test_25_plain_part_unaffected():
     plain = bodies["text/plain"]
     assert "|" not in plain
     assert "--- | ---" not in plain
-    table_lines = plain.split("本邮件仅包含贵公司相关的运单号信息：\n\n")[1].split("\n")
+    table_lines = plain.split("\n")
     assert len(table_lines) == 4
     idx = [ln.index(r["箱号"]) for ln, r in zip(table_lines[1:], rows)]
     assert idx[0] == idx[1] == idx[2]
     assert len({_disp(ln) for ln in table_lines}) == 1
+
+
+def test_26_no_selfauthored_preamble_in_body():
+    """正文不得含任何自撰说明文字（洋 2026-09-17 定）。
+
+    下游公司只要收到"按规则拆分出来的内容本身"；机器人不擅自加前言。
+    这条锁住"别再把它加回来"。"""
+    out = _split_one("x.xls", _xls_bytes(DATA2), _rows_c1())
+    _, _, bodies = _plain_html(out)
+    plain = bodies["text/plain"]
+    h = bodies["text/html"]
+
+    # 纯文本：第一行就是表头，没有前言、没有前导空行
+    assert plain.split("\n")[0].strip().startswith("客户编码")
+    assert not plain.startswith("\n")
+    assert "本邮件" not in plain
+    assert "详见附件" not in plain
+
+    # HTML：只有 table，没有 <p> 之类的说明段
+    assert "<p" not in h and "</p>" not in h
+    assert "本邮件" not in h
+    assert "详见附件" not in h
