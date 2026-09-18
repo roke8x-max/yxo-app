@@ -220,14 +220,17 @@ class TestTypeIdentification:
         raw = _tiny_raw("stranger@example.com", "hello")
         with patch("mailbots_next.serve.extract_email") as mock_extract, \
              patch("mailbots_next.core.act.send_smtp") as mock_smtp:
-            proc.process_email("t@t.com", "草单", "g6-unclassified-1", 1,
+            ok = proc.process_email("t@t.com", "草单", "g6-unclassified-1", 1,
                                "hello", "stranger@example.com", "", raw)
+        assert ok is True
         proc.notifier.send_config_missing.assert_called_once()
         assert proc.notifier.send_config_missing.call_args[0][0] == OPS_OWNER_EMAIL
         mock_extract.assert_not_called()
         mock_smtp.assert_not_called()
-        assert [e for e in get_pending_errors(100)
-                if e["message_id"] == "g6-unclassified-1"] == []
+        # 新契约：单封级失败内部入队（带 raw）并返回 True，水位可推进
+        pend = [e for e in get_pending_errors(100)
+                if e["message_id"] == "g6-unclassified-1"]
+        assert len(pend) == 1 and pend[0]["stage"] == "identify"
 
     def test_identification_ignores_folder(self):
         proc = self._proc()
@@ -478,7 +481,9 @@ def _mock_imap_conn(store_result=("OK", [])):
     conn.login.return_value = None
     conn.select.return_value = ("OK", [])
     conn.store.return_value = store_result
+    conn.uid.return_value = store_result
     conn.logout.return_value = None
+    conn.untagged_responses = {"UIDVALIDITY": [b"1"]}
     return conn
 
 
@@ -534,7 +539,7 @@ class TestMarkSeen:
         mock_cls.assert_called_once()
         conn = mock_cls.return_value
         conn.select.assert_called_once_with("&j9BTVYNJU1U-")
-        conn.store.assert_called_once_with("7,8,9", "+FLAGS", "\\Seen")
+        conn.uid.assert_called_once_with("STORE", "7,8,9", "+FLAGS", "(\\Seen)")
 
     def test_flush_batches_per_account_folder(self, monkeypatch):
         from mailbots_next.core.ingest import MarkSeenBatcher
@@ -558,11 +563,11 @@ class TestMarkSeen:
         with patch("mailbots_next.core.ingest.imaplib.IMAP4_SSL") as mock_cls, \
              patch("mailbots_next.core.log.EmailLogger.warning") as mock_warn:
             conn = _mock_imap_conn()
-            conn.store.side_effect = Exception("down")
+            conn.uid.side_effect = Exception("down")
             mock_cls.return_value = conn
             stats = batcher.flush()
         assert stats["failed"] == 1
-        assert conn.store.call_count == 2
+        assert conn.uid.call_count == 2
         mock_warn.assert_called_once()
         assert get_counters().get("mark_seen_failed") == 1
         assert get_pending_errors(100) == []
@@ -578,7 +583,7 @@ class TestMarkSeen:
             batcher.enqueue("maoxiaoyang@cqtransit.com", "运单草单", 2)
             assert mock_cls.call_count == 1
             conn = mock_cls.return_value
-            conn.store.assert_called_once_with("1,2", "+FLAGS", "\\Seen")
+            conn.uid.assert_called_once_with("STORE", "1,2", "+FLAGS", "(\\Seen)")
 
     def test_stop_flushes_leftovers(self, monkeypatch):
         from mailbots_next.core.ingest import MarkSeenBatcher
@@ -590,8 +595,8 @@ class TestMarkSeen:
                 mock_cls.return_value = _mock_imap_conn()
                 batcher.enqueue("maoxiaoyang@cqtransit.com", "运单草单", 5)
                 batcher.stop()
-            mock_cls.return_value.store.assert_called_once_with(
-                "5", "+FLAGS", "\\Seen")
+            mock_cls.return_value.uid.assert_called_once_with(
+                "STORE", "5", "+FLAGS", "(\\Seen)")
         finally:
             batcher.stop()
 
@@ -820,7 +825,7 @@ class TestSweepReplay:
 
 
 class TestIdleTopology:
-    """P0-3：每 (文件夹 × 账号) 一条连接；idle_done 必调."""
+    """轮询拓扑：恒 12 条（3 组 x 4 账号），每轮遍历组内所有文件夹，从不调用 idle*。"""
 
     def _proc4(self):
         proc = Mock()
@@ -832,48 +837,78 @@ class TestIdleTopology:
         }
         return proc
 
-    def test_per_folder_idler_count(self):
+    def test_group_topology_always_12(self):
         import mailbots_next.serve as serve_mod
+        from mailbots_next.config import IDLE_GROUPS
         proc = self._proc4()
-        with patch.object(serve_mod, "IDLE_PER_FOLDER", True), \
-             patch.object(serve_mod, "Idler") as mock_idler:
-            serve_mod.start_idle_processors(proc)
+        with patch.object(serve_mod, "Poller") as mock_poller:
+            serve_mod.start_pollers(proc, poll_secs=30)
             try:
-                assert mock_idler.call_count == 5 * 4
-                for call in mock_idler.call_args_list:
-                    assert len(call.kwargs["folders"]) == 1
+                assert mock_poller.call_count == 3 * 4
+                for call in mock_poller.call_args_list:
+                    folders = call.kwargs["folders"]
+                    # 每个 Poller 的 folders 长度按 IDLE_GROUPS 为 2 或 1
+                    assert len(folders) in (1, 2)
+                    assert call.kwargs["poll_secs"] == 30
+                # 组内文件夹总数仍为 5
+                total = sum(len(g["folders"]) for g in IDLE_GROUPS.values())
+                assert total == 5
             finally:
-                serve_mod.stop_idle_processors()
+                serve_mod.stop_pollers()
 
-    def test_legacy_group_topology(self):
-        import mailbots_next.serve as serve_mod
-        proc = self._proc4()
-        with patch.object(serve_mod, "IDLE_PER_FOLDER", False), \
-             patch.object(serve_mod, "Idler") as mock_idler:
-            serve_mod.start_idle_processors(proc)
-            try:
-                assert mock_idler.call_count == 3 * 4
-            finally:
-                serve_mod.stop_idle_processors()
+    def test_poll_never_calls_idle_and_visits_all_folders(self):
+        from mailbots_next.core.ingest import Poller
+        import tempfile, os
+        tmp = tempfile.mkdtemp()
+        state = os.path.join(tmp, "imap_state.json")
+        seen_folders = []
 
-    def test_idle_done_called(self):
-        from mailbots_next.core.ingest import Idler
+        def _fake_process(conn, folder_name, folder_utf7):
+            seen_folders.append(folder_name)
+
+        conn = Mock(spec=["select", "close", "logout", "uid", "untagged_responses"])
+        conn.select.return_value = ("OK", [b"1"])
+        conn.untagged_responses = {"UIDVALIDITY": [b"1"]}
+        poller = Poller(account="a@x", password="p",
+                        folders=[("运单草单", "F1"), ("运单号", "F2")],
+                        on_raw=Mock(return_value=True), state_path=state,
+                        poll_secs=30)
+        poller._process_new_messages = _fake_process
+        # 组内 2 文件夹时两个都被轮询（旧代码必挂：内层 while 永不退出）
+        for folder_name, folder_utf7 in poller.folders:
+            poller._select_folder(conn, folder_utf7)
+            poller._process_new_messages(conn, folder_name, folder_utf7)
+        assert seen_folders == ["运单草单", "运单号"]
+        # 从不调用 idle*：spec 限定的 Mock 根本没有这些方法，调用即 AttributeError
+        assert not hasattr(conn, "idle")
+        assert not hasattr(conn, "idle_check")
+        assert not hasattr(conn, "idle_done")
+
+    def test_poll_loop_sleeps_once_per_round(self):
+        from mailbots_next.core.ingest import Poller
+        import tempfile, os
+        tmp = tempfile.mkdtemp()
+        state = os.path.join(tmp, "imap_state.json")
         conn = Mock()
-        conn.select.return_value = ("OK", [])
-        conn.search.return_value = ("OK", [b""])
-        idler = Idler(account="a@x", password="p", folders=[("F", "F")],
-                      on_raw=Mock(), state_path="")
-        idler._idle_once(conn, "F", "F")
-        conn.idle.assert_called_once()
-        conn.idle_done.assert_called_once()
-
-    def test_idle_done_called_on_check_error(self):
-        from mailbots_next.core.ingest import Idler
-        conn = Mock()
-        conn.select.return_value = ("OK", [])
-        conn.search.return_value = ("OK", [b""])
-        conn.idle_check.side_effect = Exception("idle broken")
-        idler = Idler(account="a@x", password="p", folders=[("F", "F")],
-                      on_raw=Mock(), state_path="")
-        idler._idle_once(conn, "F", "F")
-        conn.idle_done.assert_called_once()
+        conn.select.return_value = ("OK", [b"1"])
+        conn.untagged_responses = {"UIDVALIDITY": [b"1"]}
+        conn.close.return_value = ("OK", [])
+        conn.logout.return_value = ("OK", [])
+        poller = Poller(account="a@x", password="p",
+                        folders=[("F1", "F1"), ("F2", "F2")],
+                        on_raw=Mock(return_value=True), state_path=state,
+                        poll_secs=7)
+        calls = []
+        def _fake_process(c, fn, fu):
+            calls.append(fn)
+        poller._process_new_messages = _fake_process
+        with patch.object(poller, "_connect", return_value=conn):
+            with patch("mailbots_next.core.ingest.time.sleep") as mock_sleep:
+                # 跑一轮 _poll_loop 后立刻叫停：sleep 恰一次且值为 poll_secs
+                def _sleep_once(s):
+                    poller._stop.set()
+                mock_sleep.side_effect = _sleep_once
+                poller._poll_loop()
+        assert calls[0:2] == ["F1", "F2"]
+        assert mock_sleep.call_count == 1
+        assert mock_sleep.call_args[0][0] == 7

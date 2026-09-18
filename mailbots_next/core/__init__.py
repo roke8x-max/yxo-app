@@ -36,7 +36,7 @@ from .store import (
 )
 from mailbots_next.config.secrets import get_sender, get_sender_by_email
 from .ingest import (
-    Idler,
+    Poller,
     IngestManager,
     MailEvent,
     mark_seen,
@@ -101,7 +101,7 @@ __all__ = [
     "write_tracing_log",
     "write_tracing_snapshot",
     "seed_owner_mapping",
-    "Idler",
+    "Poller",
     "IngestManager",
     "MailEvent",
     "mark_seen",

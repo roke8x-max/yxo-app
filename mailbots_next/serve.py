@@ -17,8 +17,7 @@ from mailbots_next import config
 from mailbots_next.config import (
     DEFAULT_ACCOUNTS,
     IDLE_GROUPS,
-    IDLE_PER_FOLDER,
-    MAX_IDLE_SEC,
+    INGEST_POLL_SEC,
     INBOUND_PORT,
     INBOUND_SHARED_SECRET,
     OPS_OWNER_EMAIL,
@@ -33,7 +32,7 @@ from mailbots_next.config import (
     ConfigSnapshot,
 )
 from mailbots_next.core import (
-    Idler,
+    Poller,
     extract_email,
     route_row,
     decide,
@@ -60,7 +59,7 @@ from mailbots_next.core import (
 _log = EmailLogger("mailbots_next.serve")
 
 _shutdown_event = threading.Event()
-_idlers: List[Idler] = []
+_pollers: List[Poller] = []
 _inbound_server: Optional[HTTPServer] = None
 _last_bounce_poll_ts: float = float("-inf")  # G3: guarantee first tick polls
 
@@ -71,31 +70,79 @@ class MailProcessor:
         self.records = load_records()
         self.accounts = get_accounts()
         self.notifier = get_notifier()
+        self._last_outcome: dict = {}
 
-    def process_email(self, account: str, folder: str, message_id: str, uid: int, subject: str, sender: str, date_hdr: str, raw_bytes: bytes):
+    def process_email(self, account: str, folder: str, message_id: str, uid: int, subject: str, sender: str, date_hdr: str, raw_bytes: bytes) -> bool:
+        """统一契约：返回布尔，True = 该封已纳入持久化流程（全成功 或 至少已入 error_queue）。
+
+        - 任何单封级失败（含 _identify_type / extract_email 前置阶段）内部负责入队（带 raw_bytes）并正常返回 True。
+        - 只有致命错误（DB 不可达等、连入队本身都无法完成）才向上抛异常。
+        - 返回 False = 未纳入（理论上不应出现），外层不得推进水位。
+        - 外层（Poller）判断只依赖这一个值。
+        """
         _log.log_email_received(message_id, folder, sender, subject)
 
         if not message_id:
             import hashlib
             message_id = f"SYN::{hashlib.sha256(f'{account}|{folder}|{uid}'.encode()).hexdigest()[:32]}"
 
-        email_type = self._identify_type(sender, subject, raw_bytes)
+        try:
+            email_type = self._identify_type(sender, subject, raw_bytes)
+        except Exception as e:
+            error_id = _log.error(f"Identify failed: {type(e).__name__}: {e}", error_id=None)
+            if not has_pending_message(message_id):
+                add_error(message_id, "", "identify", "IDENTIFY_EXCEPTION",
+                          f"{type(e).__name__}: {e}", error_id,
+                          account=account, folder=folder, uid=uid,
+                          subject=subject, sender=sender, date_hdr=date_hdr,
+                          raw_bytes=raw_bytes)
+            increment_counter("identify_failed")
+            self._last_outcome = {"queued": 1}
+            return True
         if not email_type:
             _log.log_unclassified_email(message_id, folder, sender, subject)
             error_id = _log.error(f"Unclassified email: folder={folder}, from={sender}, subject={subject[:100]}")
+            if not has_pending_message(message_id):
+                add_error(message_id, "", "identify", "UNCLASSIFIED",
+                          f"Unclassified email: {subject[:100]}", error_id,
+                          account=account, folder=folder, uid=uid,
+                          subject=subject, sender=sender, date_hdr=date_hdr,
+                          raw_bytes=raw_bytes)
             self.notifier.send_config_missing(OPS_OWNER_EMAIL, error_id, f"Unclassified email: {subject[:100]}")
-            return
+            self._last_outcome = {"queued": 1}
+            return True
 
         if not is_type_enabled(email_type):
             _log.log_type_skipped(message_id, email_type, "Type disabled via config")
-            return
+            self._last_outcome = {"skipped": 1}
+            return True
 
         _log.log_type_identified(message_id, email_type, f"sender={sender}, subject={subject[:50]}")
 
-        rows = extract_email(email_type, raw_bytes)
+        try:
+            rows = extract_email(email_type, raw_bytes)
+        except Exception as e:
+            error_id = _log.error(f"Extract failed: {type(e).__name__}: {e}", error_id=None)
+            if not has_pending_message(message_id):
+                add_error(message_id, "", "extract", "EXTRACT_EXCEPTION",
+                          f"{type(e).__name__}: {e}", error_id,
+                          account=account, folder=folder, uid=uid,
+                          subject=subject, sender=sender, date_hdr=date_hdr,
+                          raw_bytes=raw_bytes)
+            increment_counter("extract_failed")
+            self._last_outcome = {"queued": 1}
+            return True
         if not rows:
             _log.warning(f"No rows extracted for {message_id} type={email_type}")
-            return
+            error_id = _log.error(f"Empty extract: type={email_type} subject={subject[:100]}", error_id=None)
+            if not has_pending_message(message_id):
+                add_error(message_id, "", "extract", "EMPTY_ROWS",
+                          f"No rows extracted type={email_type}", error_id,
+                          account=account, folder=folder, uid=uid,
+                          subject=subject, sender=sender, date_hdr=date_hdr,
+                          raw_bytes=raw_bytes)
+            self._last_outcome = {"queued": 1}
+            return True
 
         send_ctx = self._build_send_ctx(email_type, rows, raw_bytes)
 
@@ -150,7 +197,10 @@ class MailProcessor:
         if config.is_live() and uid and not has_manual \
                 and not has_pending_message(message_id):
             mark_seen(account, folder, uid)
-        return outcome
+        # sweep_once 需要行级明细（queued  vs forwarded）来决定 resolve/attempt，
+        # 但 Poller 水位线只依赖布尔返回值。两全：返回 True，同时把明细挂在实例上。
+        self._last_outcome = outcome
+        return True
 
     def _build_send_ctx(self, email_type, rows, raw_bytes):
         """Pre-resolve per-row companies for multi-target split sending.
@@ -415,20 +465,17 @@ def signal_handler(signum, frame):
     _shutdown_event.set()
 
 
-def start_idle_processors(processor: MailProcessor):
-    """Start IDLE listeners. Default topology is one Idler per (folder x
-    account) so no folder ever blocks behind another folder's 29-minute
-    idle_check; set IDLE_PER_FOLDER=0 to fall back to one Idler per group."""
-    global _idlers
-    folder_jobs = []
-    if IDLE_PER_FOLDER:
-        for group_config in IDLE_GROUPS.values():
-            for folder, folder_utf7 in zip(group_config["folders"], group_config["folder_utf7"]):
-                folder_jobs.append([(folder, folder_utf7)])
-    else:
-        for group_config in IDLE_GROUPS.values():
-            folder_jobs.append(list(zip(group_config["folders"], group_config["folder_utf7"])))
-    for folders in folder_jobs:
+def start_pollers(processor: MailProcessor, poll_secs: int = 0):
+    """Start poll listeners. Topology is fixed: one Poller per group x account
+    (3 groups x 4 accounts = 12 connections). Each Poller traverses all folders
+    in its group every round (UID watermark discovery)."""
+    from mailbots_next.config import FORWARD_SINCE as _FS, INGEST_POLL_SEC as _DEF
+    global _pollers
+    if not poll_secs or poll_secs <= 0:
+        poll_secs = _DEF
+    poll_secs = max(1, int(poll_secs))
+    for group_config in IDLE_GROUPS.values():
+        folders = list(zip(group_config["folders"], group_config["folder_utf7"]))
         for account in DEFAULT_ACCOUNTS:
             password = processor.accounts.get(account)
             if not password:
@@ -436,30 +483,31 @@ def start_idle_processors(processor: MailProcessor):
                 continue
 
             def callback(acct, folder, folder_utf7, message_id, uid, subject, sender, date_hdr, raw_bytes):
-                processor.process_email(acct, folder, message_id, uid, subject, sender, date_hdr, raw_bytes)
+                return processor.process_email(acct, folder, message_id, uid, subject, sender, date_hdr, raw_bytes)
 
-            idler = Idler(
+            poller = Poller(
                 account=account,
                 password=password,
                 folders=folders,
                 on_raw=callback,
                 state_path="",
-                max_idle=MAX_IDLE_SEC,
-                poll_fallback_secs=0,
-                forward_since=FORWARD_SINCE,
+                poll_secs=poll_secs,
+                forward_since=_FS,
             )
-            _idlers.append(idler)
-            idler.start()
+            _pollers.append(poller)
+            poller.start()
 
-    _log.info(f"Started {len(_idlers)} IDLE connections")
+    n_folders = sum(len(g.get("folders", [])) for g in IDLE_GROUPS.values())
+    _log.info(f"Started {len(_pollers)} ingest pollers (poll {poll_secs}s)")
+    _log.info(f"Ingest mode: poll {poll_secs}s | connections={len(_pollers)} | folders={n_folders} | discovery=uid-watermark")
 
 
-def stop_idle_processors():
-    global _idlers
-    for idler in _idlers:
-        idler.stop()
-    _idlers.clear()
-    _log.info("All IDLE connections stopped")
+def stop_pollers():
+    global _pollers
+    for poller in _pollers:
+        poller.stop()
+    _pollers.clear()
+    _log.info("All ingest pollers stopped")
 
 
 class InboundHandler(BaseHTTPRequestHandler):
@@ -563,7 +611,7 @@ def sweep_once(processor=None) -> dict:
     Each pending entry with a replay payload is really reprocessed through
     the full pipeline. Dedup conflict is resolved by releasing the original
     claim first ((a)): the replay re-claims synchronously in this same
-    thread, so a concurrent IDLE pass can only make our claim fail — i.e. a
+    thread, so a concurrent poll pass can only make our claim fail — i.e. a
     wasted cycle, never a double forward. Dedup stays the single source of
     truth; no bypass flag exists anywhere.
     Success closes the entry (+mark-seen enqueue when no sibling rows are
@@ -613,12 +661,22 @@ def sweep_once(processor=None) -> dict:
         row_key = e.get("row_key") or ""
         release_claim(f"{e['message_id']}|{row_key}" if row_key else e["message_id"])
         try:
-            outcome = processor.process_email(
+            result = processor.process_email(
                 account, e.get("folder") or "", e["message_id"],
                 e.get("uid") or 0, e.get("subject") or "",
                 e.get("sender") or "", e.get("date") or "",
                 raw_bytes,
-            ) or {}
+            )
+            # process_email 新契约返回布尔；行级明细挂在 _last_outcome 上供 sweep 决策。
+            # 兼容：布尔 True + 有明细 → 用明细；裸 True（mock）→ 视为成功；dict（旧）→ 直接用。
+            if isinstance(result, dict):
+                outcome = result
+            elif result is True:
+                outcome = getattr(processor, "_last_outcome", None) or {"forwarded": 1}
+            elif result is False:
+                outcome = {"queued": 1}
+            else:
+                outcome = getattr(processor, "_last_outcome", None) or ({"forwarded": 1} if result else {"queued": 1})
         except Exception as exc:
             _log.error(f"Sweep replay crashed: id={e['id']} error={type(exc).__name__}: {exc}")
             outcome = {"queued": 1}
@@ -726,7 +784,7 @@ def main():
     # check below can observe it (import-time MODE constants stay frozen).
     parser = argparse.ArgumentParser(description="MailBot Next - Unified Email Pipeline")
     parser.add_argument("--live", action="store_true", help="Run in LIVE mode (default: test)")
-    parser.add_argument("--poll-secs", type=int, default=0, help="Polling fallback interval (seconds)")
+    parser.add_argument("--poll-secs", type=int, default=0, help="Poll interval seconds (unique ingest mechanism, default INGEST_POLL_SEC=30)")
     parser.add_argument("--once", action="store_true", help="Single scan and exit")
     parser.add_argument("--errors", choices=["list", "retry", "resolve"], help="Error queue management")
     parser.add_argument("--error-id", type=int, help="Error ID for retry/resolve")
@@ -774,9 +832,13 @@ def main():
     processor = MailProcessor(config)
 
     from mailbots_next.core.ingest import get_batcher
+    from mailbots_next.config import INGEST_POLL_SEC as _DEF_POLL
     get_batcher().start()
 
-    start_idle_processors(processor)
+    # --poll-secs 是唯一真值：已解析但从未使用过的参数现在真正接上
+    poll_secs = args.poll_secs if (args.poll_secs and args.poll_secs > 0) else _DEF_POLL
+    poll_secs = max(1, int(poll_secs))
+    start_pollers(processor, poll_secs=poll_secs)
     start_inbound_server()
 
     sweeper_thread = threading.Thread(target=run_sweeper, daemon=True)
@@ -792,7 +854,7 @@ def main():
         pass
 
     _log.info("Shutting down...")
-    stop_idle_processors()
+    stop_pollers()
     stop_inbound_server()
     from mailbots_next.core.ingest import get_batcher
     get_batcher().stop()

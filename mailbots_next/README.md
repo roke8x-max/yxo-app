@@ -7,7 +7,7 @@
 `mailbots_next` 是邮件机器人的新一代架构，采用 **单一流水线 + 配置驱动** 设计，替代原有 5 个互相独立、逻辑重复的脚本（草单、运单号、运踪、DSK、ATB）。
 
 核心特性：
-- **统一入口** (`serve.py`)：3 组 IDLE 进程监听 5 个 IMAP 文件夹
+- **统一入口** (`serve.py`)：3 组轮询进程监听 5 个 IMAP 文件夹（唯一机制：短周期轮询 + UID 水位线，IDLE 已彻底删除）
 - **配置驱动**：类型识别、提取键、路由、八档判定、开关全部为配置/数据，不写死代码分支
 - **按行处理**：一封邮件解析出多行，每行独立跑八档，互不影响
 - **统一去重**：单一共享 SQLite 去重库，claim-before-act 防并发重复转发
@@ -18,10 +18,10 @@
 
 ```
 mailbots_next/
-├── serve.py                 # 单一入口：读配置、启 3 个 IDLE 组、注册 shutdown、HTTP inbound 端点
+├── serve.py                 # 单一入口：读配置、启 3 组轮询（12 连接）、注册 shutdown、HTTP inbound 端点
 ├── config/
 │   ├── __init__.py
-│   ├── settings.py          # 全局常量、路径、MODE、IDLE 分组、正则
+│   ├── settings.py          # 全局常量、路径、MODE、文件夹分组、正则
 │   ├── types.py             # EmailType 枚举、提取键、TYPE_ROUTES 双轨路由规则表
 │   ├── routing.py           # (保留兼容) 旧路由配置
 │   ├── provider.py          # ★ 配置单一门禁：结构层常量 + runtime 覆盖 + snapshot()
@@ -31,7 +31,7 @@ mailbots_next/
 │   ├── log.py               # 专用日志模块（logs/ 按天滚动，error_id 追溯，脱敏）
 │   ├── dedup.py             # 统一去重 + error_queue（claim-before-act，WAL+busy_timeout）
 │   ├── store.py             # yxo.db 只读 + bot_config.db 读写（负责人/收件人/运行开关）
-│   ├── ingest.py            # IMAP IDLE 长连接（5 文件夹 × 4 账号 = 20 连接）+ 批量标已读
+│   ├── ingest.py            # IMAP 短周期轮询（3 组 × 4 账号 = 12 连接，UID 水位线发现）+ 批量标已读（UID STORE）
 │   ├── extract.py           # 通用解析 → 分发到 extractors/* 插件
 │   ├── extractors/
 │   │   ├── __init__.py
@@ -53,7 +53,18 @@ mailbots_next/
 
 - Python 3.10+
 - 依赖包：见 **`mailbots_next/requirements.txt`**（运行 `pip install -r mailbots_next/requirements.txt`）
-- 关键包：`xlrd`、`.xls/.xlsx` 解析用 `openpyxl`、`beautifulsoup4`（`bs4`）、`requests`（经旧 wecombot 链路）
+- 关键包：`xlrd`、`.xls/.xlsx` 解析用 `openpyxl`、`beautifulsoup4`（`bs4`）、`requests`（经旧 wecombot 链路）、**`xlwt`**（`act.py` 重写 `.xls` 时在用；曾在本文件里被错标"测试专用"）
+- 测试专用依赖：**`requirements-dev.txt`**（`pytest`、`trustme`）→ `pip install -r requirements-dev.txt`
+
+> 🔴 **唯一解释器（2026-09-18 定，洋批准）**：这台机器上同时装着多个 Python（`py -3.13` → `D:\python.exe`、WorkBuddy 助手自带的、uv 的 3.12）。**跑测试与装依赖一律用 `py -3.13`**：
+>
+> ```powershell
+> py -3.13 -c "import sys; print(sys.executable)"     # 自检：确认解释器
+> py -3.13 -m pip install -r requirements-dev.txt     # 装齐（含 trustme）
+> py -3.13 -m pytest mailbots_next/tests/ -q -p no:cacheprovider
+> ```
+>
+> **换解释器会出现"我这边绿、你那边红"**：2026-09-17 就发生过 —— `trustme` 只装进了另一个解释器，导致最有价值的真链路用例（`test_true_link_smoke_tls_proves_callback`，真 TLS + 真 `imaplib`）在别人机器上**必挂**。**别用编辑器/助手自带的 Python 跑本项目测试。**
 
 ## 对旧代码的依赖（重要，勿删 `wecombot/`）
 
@@ -134,10 +145,7 @@ python -m mailbots_next.serve
 python -m mailbots_next.serve --live
 # 等价写法：MAILBOT_MODE=live（环境变量 / --live 参数二选一，勿同时用）
 
-# 单轮扫描退出（冒烟测试）
-python -m mailbots_next.serve --once
-
-# 轮询降级（禁用 IDLE，每 N 秒轮询）
+# 轮询周期（唯一收信机制，默认 INGEST_POLL_SEC=30；--poll-secs 覆盖环境变量）
 python -m mailbots_next.serve --poll-secs 60
 
 # 错误队列管理
@@ -151,8 +159,10 @@ python -m mailbots_next.serve --errors resolve --error-id 123
 | 命令 | 说明 |
 |------|------|
 | `--errors list` | 列出所有 pending + manual 记录 |
-| `--errors retry --error-id N` | 将指定记录标记为 resolved（重试） |
+| `--errors retry --error-id N` | ⚠️ 当前与 `resolve` 行为相同（仅标记 resolved，并不真正重放；真重放由 sweeper 自动执行） |
 | `--errors resolve --error-id N` | 将指定记录标记为 resolved（人工确认已处理） |
+
+> `--once` 参数已解析但未实现（单轮扫描后退出）：请勿使用，冒烟请用 TEST 模式短跑 + 日志确认。
 
 ### inbound 端点（手动转发闭环）
 
@@ -174,13 +184,13 @@ python -m mailbots_next.serve --errors resolve --error-id 123
 | tracing | `sender_whitelist: ["tracing-system@yxologistics.com"]` | 40 |
 | draft | `attachment_pattern: "已加密|箱号"` + `sender_exclude` 排除系统发件人 | 50 |
 
-- **folder 仅作 IDLE 分组提示，不参与类型判定**，合并文件夹不破坏识别
+- **folder 仅作轮询分组提示，不参与类型判定**，合并文件夹不破坏识别
 - 优先级低者先命中即停
 
 ### 统一流水线
 
 ```
-IDLE 监听（3 组）
+轮询监听（3 组，12 连接，UID 水位线发现）
    └─► 收件(ingest) ─► 解析提取(extract, 按类型插件) ─► 主数据匹配(routing)
         └─► 八档判定(decide) ─► 动作(act: 转发/告警/待办, 含拆分)
               └─► 企微通知(notify) ─► 写库(store)
@@ -221,11 +231,11 @@ IDLE 监听（3 组）
 - 重试上限 `SWEEP_MAX_RETRY`（默认 3）→ 转 manual + 首报 E1 一次（`extra.notified_manual_at` 防重发）+ 每日 09:00 汇总未解决项持续告警
 - 人工接口：`python serve.py --errors list|retry|resolve`
 
-### IDLE 拓扑与批量标已读
+### 轮询拓扑与批量标已读
 
-- **每 (文件夹 × 账号) 一条 IDLE 连接**：5 文件夹 × 4 账号 = **20 条**（旧组拓扑 12 条）。`IDLE_PER_FOLDER=0` 可回退旧拓扑；`MAX_IDLE_SEC`（默认 1740s）可配；每次 `idle_check` 后必调 `idle_done()`；IDLE 连接只读（`readonly=True`）。
-- ⚠ **服务器并发上限需实测**：20 条长连接是否触顶取决于邮箱服务商限制，上线前必须在测试环境验证连接稳定性，触顶时用 `IDLE_PER_FOLDER=0` 回退。
-- **批量标已读（方案 B）**：转发成功后只入队 `(account, folder, uid)`；后台线程按该二元组聚合，每 `MARK_SEEN_FLUSH_SEC`（默认 300s）或每批 `MARK_SEEN_BATCH_CAP`（默认 100）用一次短连接单条 `STORE "uid1,uid2,..."` 刷盘。失败整批重试 1 次，仍失败记 WARN + 计数，不进 error_queue；进程退出时 flush 残留批次。
+- **每（组 × 账号）一条轮询连接**：3 组 × 4 账号 = **12 条**（恒定，无拓扑开关）。每轮遍历组内所有文件夹（运单草单+运单号 / DSK+ATB / Tracing），每轮 `sleep` 恰一次（`INGEST_POLL_SEC`，默认 30s，`--poll-secs` 覆盖）；连接只读（`readonly=True`，实际发出 `EXAMINE`）。
+- **发现机制**：UID 水位线（`(account, folder) -> (uidvalidity, last_uid)`，JSON 原子写 `data/imap_state.json`）。取信一律 `UID FETCH (BODY.PEEK[])`，不再依赖 `UNSEEN`；`UIDVALIDITY` 变化时全量重扫但仍受 `FORWARD_SINCE` 约束；水位仅在“处理成功或已入 `error_queue`”时推进。
+- **批量标已读（方案 B）**：转发成功后只入队 `(account, folder, uid)`；后台线程按该二元组聚合，每 `MARK_SEEN_FLUSH_SEC`（默认 300s）或每批 `MARK_SEEN_BATCH_CAP`（默认 100）用一次短连接单条 `UID STORE "uid1,uid2,..."` 刷盘。失败整批重试 1 次，仍失败记 WARN + 计数，不进 error_queue；进程退出时 flush 残留批次。
 
 ### 日志与错误上报
 
@@ -274,8 +284,7 @@ pytest mailbots_next/tests/test_core.py -v
    `wecombot/` 源码未见向 8765 转发的接线。**须在生产 `D:\YXO_DATA\WeComBot` 实机确认。**
 3. **反向依赖旧代码已消除（ tracing 内置）**：`wecombot` 企微依赖待解耦。
 4. **超大邮件（>2MB）**：原文不进队列，走 manual + E1，无法 inbound 重放（设计如此，宁可喊人也不发错）。
-5. **阿里云企业邮箱并发连接上限**：仓库无记录。当前 `IDLE_PER_FOLDER=1` 会开 20 条连接；
-   若被拒，设 `IDLE_PER_FOLDER=0` 回退到 12 条。上线前需实测。
+5. **阿里云企业邮箱并发连接上限**：仓库无记录。当前恒定 12 条轮询短连接（每 30s 一轮，非长连接）。上线前需实测。
 6. **标已读为批量延迟**：每 `MARK_SEEN_FLUSH_SEC`（默认 300s）或满 `MARK_SEEN_BATCH_CAP`（默认 100）
    刷一次，非即时；失败会记 `mark_seen_failed` 计数。
 7. **旧 `mailbots/` 尚未归档**：待新系统在测试环境实跑通过后，按「部署与切换」第 4 步处理。
@@ -289,6 +298,7 @@ pytest mailbots_next/tests/test_core.py -v
 | G4 | 预筛对「零标记 + 中性 From + 无关键词」形态的真 NDR 会漏判 | 该形态极罕见；彻底覆盖需放弃 header 预筛回到全量下载全文 | 若真实出现此类漏判（以 `unknown` 告警或缺件投诉为线索），或引入更廉价过程化判定手段时 |
 | X1 | `rewrite_xls_filtered()` 重写时丢弃 .xlsm 的宏（改名为 `.xlsx` 并打 WARN） | ① "名字与字节一致"优先级更高——保 `.xlsm` 扩展名却写无宏字节，客户会看到"格式与扩展名不符"警告，比丢宏更糟；② 该函数本就"过滤出本公司行、重写成干净表格"，必然放弃原工作簿全部结构（宏/图表/条件格式）；openpyxl 的 `keep_vba=True` 只在"`.xlsm` 读入再存回 `.xlsm`"时有效，我们存的是 `.xlsx`，用不上；③ 业务链路里上游发的是运单号数据表，根本不含宏；真出现 `.xlsm` 大概率是同事另存时误选格式 | 不是"再做"的问题——若真出现客户依赖宏：正确做法是整封原件不带过滤地转发（放弃"只保留本公司行"），而非"保留宏 + 改内容"。这是业务决策，遇到时停下来问洋；代码层不预留任何开关 |
 | — | `forward_log`/`error_queue`/`bounce_handled` 定期清理 | 已有 `purge_old_dedup`/`purge_old_bounce_handled(90天)`，其余表清理未启用 | 日均 500 封一年约 18 万行时评估清理/归档策略 |
+| T1 | 真链路冒烟的 TLS 证书由 `trustme` 现场签发（dev 依赖） | `trustme` 能用即可 | 若将来认为“依赖第三方生成证书”是脆弱点，可改为用 `openssl` 一次性生成有效期 100 年的自签证书、提交到 `mailbots_next/tests/fixtures/`，测试直接读文件 ⇒ 彻底零依赖、完全可复现。现在不做 |
 
 > 本节仅登记，不写代码、不加配置、不加用例。
 
