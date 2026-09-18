@@ -218,14 +218,18 @@ git diff --cached                    # 暂存区 vs HEAD —— 这才是这次�
 
 **第 3 步 · 测试必须先绿**
 
+🔴 **用本机唯一解释器**（2026-09-18 定，洋批准）：
+
 ```powershell
-py -3.13 -m pytest -q -p no:cacheprovider > out.txt 2>&1
+$PY = "C:\Users\Roke8x\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+& $PY -m pip install -r requirements-dev.txt        # 首次配置（含测试专用 pytest / trustme）
+& $PY -m pytest -q -p no:cacheprovider > out.txt 2>&1
 # 读汇总行：必须 0 failed
 ```
 
-> ⚠️ **必须用默认 basetemp**（OS 临时目录）。指定 `--basetemp=<项目内目录>` 会触发 WorkBuddy 的 safe-delete 拦截 → 测试在断言前假失败，套件还会从 ~30s 拖到 200s+。
->
-> 🔴 **必须用 `py -3.13`**（唯一解释器，2026-09-18 定）：这台机器上装着多个 Python，用哪个跑结果可能不同。装依赖同理：`py -3.13 -m pip install -r requirements-dev.txt`。**换解释器＝会出现"我这边绿、你那边红"**（9-17 真实踩过：`trustme` 装进了另一个解释器，真链路用例在别人机器上必挂）。自检：`py -3.13 -c "import sys; print(sys.executable)"`。
+> ⚠️ **不要用 `py -3.13`**（它指向 `D:\python.exe`，是**另一个**解释器），也不要用编辑器/其他助手自带的 Python。
+> 🔴 **换解释器＝会出现"我这边绿、你那边红"** —— 9-17/18 真实踩过两次（`trustme` 没进 requirements ∧ 只装进了另一个解释器），真链路用例在别人那边**必挂**。**要换就整体换（含 OpenCode / 小叽 / CI）。**
+> ⚠️ **必须用默认 basetemp**（OS 临时目录）。指定 `--basetemp=<项目内目录>` 会触发 safe-delete 拦截 → 测试在断言前假失败。若出现"跑到 100% 却没有汇总行、退出码 1"，多半是 pytest 清理旧 basetemp 触发了批量删除确认 —— **先清 `%TEMP%\pytest-of-Roke8x` 再跑**，那不是测试失败。
 
 **第 4 步 · 提交，并把结果拿给人看**
 

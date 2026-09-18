@@ -54,17 +54,21 @@ mailbots_next/
 - Python 3.10+
 - 依赖包：见 **`mailbots_next/requirements.txt`**（运行 `pip install -r mailbots_next/requirements.txt`）
 - 关键包：`xlrd`、`.xls/.xlsx` 解析用 `openpyxl`、`beautifulsoup4`（`bs4`）、`requests`（经旧 wecombot 链路）、**`xlwt`**（`act.py` 重写 `.xls` 时在用；曾在本文件里被错标"测试专用"）
-- 测试专用依赖：**`requirements-dev.txt`**（`pytest`、`trustme`）→ `pip install -r requirements-dev.txt`
+- 测试专用依赖：**`requirements-dev.txt`**（`pytest`、`trustme`）
 
-> 🔴 **唯一解释器（2026-09-18 定，洋批准）**：这台机器上同时装着多个 Python（`py -3.13` → `D:\python.exe`、WorkBuddy 助手自带的、uv 的 3.12）。**跑测试与装依赖一律用 `py -3.13`**：
+> 🔴 **本机唯一解释器（2026-09-18 定，洋批准）** —— 跑测试、装依赖**只用这一个**：
 >
 > ```powershell
-> py -3.13 -c "import sys; print(sys.executable)"     # 自检：确认解释器
-> py -3.13 -m pip install -r requirements-dev.txt     # 装齐（含 trustme）
-> py -3.13 -m pytest mailbots_next/tests/ -q -p no:cacheprovider
+> # 唯一解释器（本机）。先设成变量，后面两条直接用
+> $PY = "C:\Users\Roke8x\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+>
+> & $PY -m pip install -r requirements-dev.txt     # 首次配置：装齐（含 pytest / trustme）
+> & $PY -m pytest -q -p no:cacheprovider           # 跑测试
 > ```
 >
-> **换解释器会出现"我这边绿、你那边红"**：2026-09-17 就发生过 —— `trustme` 只装进了另一个解释器，导致最有价值的真链路用例（`test_true_link_smoke_tls_proves_callback`，真 TLS + 真 `imaplib`）在别人机器上**必挂**。**别用编辑器/助手自带的 Python 跑本项目测试。**
+> ⚠️ PowerShell 里把含空格的路径当命令用，必须用调用运算符 `&`。
+> ⚠️ **不要用 `py -3.13`** —— 它指向 `D:\python.exe`，是**另一个**解释器；也不要用编辑器 / 其他助手自带的 Python。
+> ⚠️ **换解释器会出现"我这边绿、你那边红"**：2026-09-17/18 真实踩过两次 —— `trustme` 先是没有进 requirements、后来只装进了另一个解释器，导致最有价值的真链路用例（`test_true_link_smoke_tls_proves_callback`，真 TLS + 真 `imaplib`）在别人那边**必挂**。**要换就整体换（含 OpenCode / 小叽 / CI），别只换一边。**
 
 ## 对旧代码的依赖（重要，勿删 `wecombot/`）
 

@@ -215,20 +215,24 @@ wecombot\start_server.bat    # pythonw 拉起 wecombot/server.py，监听 :5001
 
 ### 9.4 测试
 
-```bash
-py -3.13 -m pytest mailbots_next/tests/ -q -p no:cacheprovider   # 新系统
-python -m pytest mailbots/tests/unit -q                          # 旧系统 core 层
+🔴 **本机唯一解释器（2026-09-18 定，洋批准）** —— 跑测试、装依赖**只用这一个**：
+
+```powershell
+# 唯一解释器（本机）。先设成变量，后面两条命令直接用它
+$PY = "C:\Users\Roke8x\.workbuddy\binaries\python\versions\3.13.12\python.exe"
+
+# ① 首次配置：装齐依赖（含测试专用 pytest / trustme）
+& $PY -m pip install -r requirements-dev.txt
+
+# ② 跑测试
+& $PY -m pytest -q -p no:cacheprovider
+& $PY -m pytest -q -p no:cacheprovider mailbots_next/tests/   # 只跑新系统
+& $PY -m pytest -q -p no:cacheprovider mailbots/tests/unit   # 只跑旧系统 core 层
 ```
 
-> 🔴 **唯一解释器（2026-09-18 定，洋批准）**：这台机器上**同时装着多个 Python**（`py -3.13` → `D:\python.exe`；WorkBuddy 助手自带的；uv 的 3.12）。**跑测试、装依赖一律用 `py -3.13`**：
->
-> ```powershell
-> py -3.13 -c "import sys; print(sys.executable)"      # 自检：确认是哪个解释器
-> py -3.13 -m pip install -r requirements-dev.txt      # 含测试专用依赖（pytest / trustme）
-> py -3.13 -m pytest mailbots_next/tests/ -q -p no:cacheprovider
-> ```
->
-> **换解释器会出现"我这边绿、你那边红"** —— 2026-09-17 真实发生过：`trustme` 只装进了另一个解释器，最有价值的真链路用例（真 TLS 冒烟）在别人机器上**必挂**。**别用编辑器/助手自带的 Python 跑项目测试。**
+> ⚠️ PowerShell 里把含空格的路径当命令用，必须用调用运算符 `&`。
+> ⚠️ **不要用 `py -3.13`** —— 它指向 `D:\python.exe`，是**另一个**解释器（本机 `py -0p` 可查）；也不要用编辑器 / 其他助手自带的 Python。
+> ⚠️ **换解释器会出现"我这边绿、你那边红"** —— 2026-09-17/18 真实踩过两次（`trustme` 没进 requirements ∧ 只装进了另一个解释器），最有价值的真链路用例（真 TLS 冒烟）在别人那边**必挂**。**要换就整体换（含 OpenCode / 小叽 / CI），别只换一边。**
 
 - 依赖：生产必需 `beautifulsoup4` / `openpyxl` / `xlrd` / **`xlwt`**（⚠️ `mailbots_next/requirements.txt` 一度把 `xlwt` 错标"测试专用"，**实际生产 `core/act.py` 在用**）；测试另需 `pytest` / `trustme`（见 `requirements-dev.txt`）。
 - ⚠️ 仓库根 `requirements.txt` 只有 `flask` + `openpyxl` —— 跑 `mailbots_next` 的 venv **需另行安装** `mailbots_next/requirements.txt`。
