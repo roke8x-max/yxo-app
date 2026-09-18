@@ -2,7 +2,7 @@
 
 > **本文只讲 git / 协作流程**（分支、PR、部署、故障自查）。
 > 项目全貌（三大支柱、模块职责、硬规则、当前状态）见 **`AGENTS.md`** —— 新开对话请先读它。
-> 最后更新：2026-09-14（补正公司名、部署分工与上云待办）
+> 最后更新：2026-09-18（**分支模型改版：只用 `main`，`dev` 废弃**；补唯一解释器、Squash 合并、故障自查新条目）
 
 ---
 
@@ -13,19 +13,20 @@
    C:\...\Projects\yxo-app          E:\yxo_app_dev
         （骁洋 + 芙蕾雅）                （小叽）
               |                            |
-              |  push 到 dev               |  push 到 dev
+              |  从 main 拉临时分支           |  从 main 拉临时分支
+              |  push 到临时分支              |  push 到临时分支
               +-------------+--------------+
                             v
-                   ┌─────────────────┐
-                   │  GitHub  dev    │  ← 集成沙箱，允许出错
-                   └────────┬────────┘
-                            │  Pull Request（骁洋审核后合并）
-                            v
-                   ┌─────────────────┐
-                   │  GitHub  main   │  ← 生产真相，永远保持可运行
-                   └────────┬────────┘
-                            │  deploy.ps1 拉取（带备份）
-                            v
+                   ┌──────────────────────┐
+                   │  GitHub  临时分支      │  ← 一次改动的隔离区
+                   └──────────┬───────────┘
+                              │  Pull Request（骁洋审核后合并）
+                              v
+                   ┌──────────────────────┐
+                   │  GitHub  main         │  ← 唯一真相，永远保持可运行
+                   └──────────┬───────────┘
+                              │  deploy.ps1 拉取（带备份）
+                              v
                   服务器 D 盘生产环境
                   D:\YXO_DATA\yxo_app
                         （跑业务）
@@ -33,9 +34,11 @@
 
 **三句话记住：**
 
-1. 所有人写代码都推 `dev`，谁也不许直接推 `main`
-2. `dev` 跑通了，开一个 Pull Request，骁洋点合并才进 `main`
+1. 从 `main` 拉一条**扁平命名的临时分支**干活；**谁都不许直接推 `main`**
+2. 干完开 Pull Request，骁洋点合并才进 `main`
 3. 生产环境只认 `main`，而且只能用 `deploy.ps1` 部署（自动备份，出事能回滚）
+
+> 📌 **2026-09-18 起：`dev` 已废弃**（洋批准）。所有临时分支**从 `main` 拉、PR 回 `main`**；`dev` 落后多少都无所谓，不要再往它推、也不要再从它拉。详见 §3。
 
 ---
 
@@ -49,9 +52,10 @@
 
 | 环节 | 防的是什么 |
 |---|---|
-| 只推 dev，不碰 main | 半成品代码进不了生产 |
+| 改动只走临时分支，不碰 main | 半成品代码进不了生产 |
 | PR 才能合 main | 每次进生产都有一次人工过目 |
 | 服务端分支保护拦截直推 main | main 由 GitHub 服务端强制，禁止直推，只能经 PR 合入 |
+| 每条 PR 都有独立验收 | 合进 main 的东西是"已验证代码"，不需要再靠一个集成分支兜底 |
 | deploy.ps1 先备份 | 部署前数据库和配置有快照 |
 | rollback.ps1 | 出事 30 秒退回上一版 |
 | 禁用 filebrowser 传代码 | 不留任何绕过 git 的口子 |
@@ -62,9 +66,11 @@
 
 | 环境 | 路径 | 谁用 | 分支 | 能不能改代码 |
 |---|---|---|---|---|
-| 本机开发 | `C:\Users\Roke8x\Projects\yxo-app` | 骁洋 + 芙蕾雅 | dev | 能 |
-| 服务器开发 | `E:\yxo_app_dev` | 小叽 | dev | 能 |
+| 本机开发 | `C:\Users\Roke8x\Projects\yxo-app` | 骁洋 + 芙蕾雅 | 临时分支（从 main 拉） | 能 |
+| 服务器开发 | `E:\yxo_app_dev` | 小叽 | 临时分支（从 main 拉） | 能 |
 | 服务器生产 | `D:\YXO_DATA\yxo_app` | 无人 | main | **绝对不能** |
+
+> ⚠️ 第二行那个**目录名叫 `yxo_app_dev`**，但它跟 git 分支 `dev` 没关系 —— 那只是服务器上的开发目录路径。
 
 三个目录都是完整的 git 仓库，各自独立，**互不直接通信**——所有交流都经过 GitHub。
 
@@ -72,22 +78,26 @@ GitHub 仓库：`roke8x-max/yxo-app`（**公开仓库**，代码任何人可见�
 
 ---
 
-## 3. 分支模型
+## 3. 分支模型（2026-09-18 改版：**只用 `main`**）
 
-只有两条分支，别再建第三条。
+**`main` —— 唯一的真相分支**
+永远保持"拉下来就能跑"的状态。它是**所有临时分支的起点，也是唯一的终点**；任何人不许直接推，只能经 Pull Request 合入（服务端分支保护强制）。
 
-**`dev` —— 集成沙箱**
-日常干活的地方。允许有 bug、允许推到一半、允许两个人的改动在这里撞车。它的作用就是让代码在进生产之前先碰个面。
+**临时分支 —— 一次改动一条**
+从 `main` 拉 → 干完 push → 开 PR 回 `main` → 合并后删掉。
 
-**`main` —— 生产真相**
-永远保持"拉下来就能跑"的状态。**只能通过 Pull Request 从 dev 合入**，任何人不许直接推。
+```powershell
+git checkout main && git pull --ff-only origin main      # ① 起点：先同步 main
+# ② 建分支 —— 必须「扁平名」（连字符），且用 update-ref 而不是 checkout -b（原因见下方红线）
+git update-ref refs/heads/fix-ingest-poll-uid-watermark <main 的完整 SHA>
+git checkout fix-ingest-poll-uid-watermark               # ③ 切过去干活
+```
 
-> **为什么不用 `feature/xxx` 这类分支？**
-> 现在是三个角色串行干活，加更多分支只会增加记忆负担。真遇到"改到一半不能上线、但又得先发另一个东西"的情况，临时从 dev 开一条，五分钟的事。
->
-> **另外提醒一句**：分支名不要带斜杠。之前有个 `dev/fix-admin-api-load` 分支，直接导致 `dev` 分支创建失败（git 的引用是按文件路径存的，`dev` 和 `dev/xxx` 不能共存），8/5 那次 `.git` 损坏也是它引起的。
+> 📌 **`dev` 已废弃（2026-09-18，洋批准）—— 不再作为任何事情的起点或终点。**
+> **为什么**：① 每条 PR 都经过**独立验收**，`main` 本身就是"已验证代码"；`dev` 当初作"集成沙箱"的价值被 PR 验收替代了。② 现在是单人 / 单流开发，没有"多条 feature 先集成"的需求。
+> **怎么处置**：分支**暂时保留不删**（留作历史参照）；**落后 `main` 多少都无所谓** —— 不要往 `dev` 推，也不要再从 `dev` 拉。哪天觉得碍眼，让芙蕾雅删掉即可。
 
-> **feature 分支命名**：临时从 `dev` 开功能分支时，用连字符 `feature-xxx-xiaoji`，**绝不用斜杠**（`feature/x` 会触发上面的 `.git` 损坏）。从 `dev` 拉、PR 回 `dev`，合并后删掉私人分支。
+> ⚠️ **分支名绝不用斜杠**（老坑：`dev/fix-admin-api-load` 曾在 8/5 把 `.git` 搞坏；根因是 git 的引用按文件路径存，`dev` 与 `dev/xxx` 不能共存）。
 
 > 🔴 **2026-09-17 实测：斜杠分支的「新形态」—— 不报错，但会把整仓显示成新增**
 >
@@ -98,14 +108,14 @@ GitHub 仓库：`roke8x-max/yxo-app`（**公开仓库**，代码任何人可见�
 > **立刻这样救**（全程不改任何文件内容）：
 >
 > ```powershell
-> git symbolic-ref HEAD refs/heads/dev     # ① 先把 HEAD 修回真实存在的分支
+> git symbolic-ref HEAD refs/heads/main    # ① 先把 HEAD 修回真实存在的分支
 > git status --short                       # ② 确认只剩你真正改过的那几个文件
-> git update-ref refs/heads/<扁平分支名> <dev 的完整 SHA>   # ③ 用连字符，绝不用斜杠
+> git update-ref refs/heads/<扁平分支名> <main 的完整 SHA>   # ③ 用连字符，绝不用斜杠
 > git checkout <扁平分支名>
 > ls .git/refs/heads/                      # ④ 复核：这个 ref 文件真的在盘上
 > ```
 >
-> `git update-ref refs/heads/fix/xxx` 同样「返回 0 但没落盘」；连手工 `mkdir` 建出的那层目录也会被抹掉。**扁平名（如 `fix-forward-layer-waybill-body`）实测稳定可用 —— 这条已由洋确认写进 `AGENTS.md` §11。**
+> `git update-ref refs/heads/fix/xxx` 同样「返回 0 但没落盘」；连手工 `mkdir` 建出的那层目录也会被抹掉。**扁平名实测稳定可用**（已用过：`fix-forward-layer-waybill-body`、`docs-interpreter-path`、`chore-workflow-main-only`）—— 这条已由洋确认写进 `AGENTS.md` §11。
 
 ---
 
@@ -114,15 +124,15 @@ GitHub 仓库：`roke8x-max/yxo-app`（**公开仓库**，代码任何人可见�
 ### 4.1 开工前先同步
 
 ```powershell
-git checkout dev
-git pull --ff-only origin dev     # 标准拉取；等价于 fetch + ff-merge
+git checkout main
+git pull --ff-only origin main     # 标准拉取；等价于 fetch + ff-merge
 ```
 
-标准拉取就是 `git fetch origin` + `git merge --ff-only origin/dev`。
+标准拉取就是 `git fetch origin` + `git merge --ff-only origin/main`。
 **每次开工都要做。** 跳过这步 = 基于旧代码开发 = 待会儿一定冲突。
 
 > ⚠️ **本机 git 引用损坏说明（历史，现已根治）**
-> 之前本机 WorkBuddy 自带的 PortableGit 在改写 `.git/packed-refs` 时**静默失败**，`origin/dev`、`origin/main` 会变成 `[gone]`。
+> 之前本机 WorkBuddy 自带的 PortableGit 在改写 `.git/packed-refs` 时**静默失败**，`origin/main` 会变成 `[gone]`。
 > 真因是**火绒(Huorong)实时防护**拦截了对 `packed-refs` 的删除/重命名（不是 Defender——Defender 当时已被火绒接管禁用，报 `0x800106ba`）。
 > **已根治**：在火绒「信任区 / 排除项」加入仓库 `.git` 路径后，git 原生 `fetch`/`pull` 恢复，不再需要 `git sync` 兜底（`git sync` 别名与 `scripts/repair-refs.sh` 现已无实际操作，保留无害）。
 > 若你机器未加排除项又出现 `[gone]`，把仓库 `.git` 加进火绒排除项即可，无需改用其他命令。
@@ -155,10 +165,10 @@ refactor: 重构，功能没变
 推之前**必须**在本地把改动跑一遍：启动服务、打开页面、点一下受影响的功能。
 
 ```powershell
-git push origin dev
+git push origin <你的临时分支名>
 ```
 
-推的是 `dev`。如果你手滑写成了 `main`，会看到这样的拦截提示：
+推的是**你自己从 `main` 拉的那条临时分支**（例如 `fix-ingest-poll-uid-watermark`）。如果你手滑写成了 `main`，会看到这样的拦截提示：
 
 ```
   ======================================================
@@ -166,20 +176,21 @@ git push origin dev
   ======================================================
 ```
 
-看到了就按提示改回 dev，不要用 `--no-verify` 绕过。
+看到了就把分支名改回你的临时分支，不要用 `--no-verify` 绕过。
 
 ### 4.4 冲突了怎么办
 
-`git pull` 时报 conflict，说明你和别人改了同一个地方。
+合并 `main` 时报 conflict，说明 `main` 上已经有了跟你改同一处的提交。
 
 ```powershell
-git pull --ff-only origin dev     # 报冲突（或 git fetch + merge）
+git fetch origin
+git merge origin/main            # 把 main 的新提交并进你的临时分支（也可以用 rebase）
 git status                       # 看哪些文件冲突了
 # 打开冲突文件，找 <<<<<<< ======= >>>>>>> 三行标记
 # 手动决定保留哪部分，把三行标记全部删掉
 git add <改好的文件>
 git commit                       # 不用写 message，git 会自动生成
-git push origin dev
+git push origin <你的临时分支名>
 ```
 
 **拿不准就别猜**，把冲突文件发给骁洋或芙蕾雅，判断错了会把别人的代码删掉。
@@ -194,12 +205,12 @@ git push origin dev
 git status --short          # 逐行看：哪些是改的（ M），哪些是新文件（??）
 git diff --stat             # 看改动量；某个文件行数异常大就单独看一眼
 git fetch origin            # 对齐远端
-git branch --show-current   # 必须是 dev，绝不能是 main
+git branch --show-current   # 必须是你自己拉的那条临时分支，绝不能是 main
 git symbolic-ref HEAD       # 看 HEAD 指向哪个分支
 ```
 
 - ❌ 列表里出现 **`secrets.json` / `*.db` / `logs/` / `config_local.py` / 个人绝对路径** → **停下**：说明 `.gitignore` 漏了，先补忽略规则再提交。
-- ❌ **`git status --short` 里"整个仓库的文件都标成 `A`" → 立刻停下，绝不 add/commit**：这是 **HEAD 悬空**（最常见成因：拿带斜杠的分支名建过分支，见 §3）。按 §3 的救援步骤 `git symbolic-ref HEAD refs/heads/dev` 修回来再继续；**在悬空状态下提交会造出 root commit，把历史关系砸掉**。
+- ❌ **`git status --short` 里"整个仓库的文件都标成 `A`" → 立刻停下，绝不 add/commit**：这是 **HEAD 悬空**（最常见成因：拿带斜杠的分支名建过分支，见 §3）。按 §3 的救援步骤 `git symbolic-ref HEAD refs/heads/main` 修回来再继续；**在悬空状态下提交会造出 root commit，把历史关系砸掉**。
 - ❌ 出现**你根本没印象改过**的文件 → 逐个 `git diff <文件>` 看清楚；确认无关就 `git restore <文件>` 退回。**不要盲提交**（幽灵改动就是这么进库的）。
 - ⚠️ `git fetch` 后 `git branch -vv` 才准。本机火绒会拦 `.git/packed-refs` 改写，导致 fetch 前显示虚假的 "ahead N"。
 
@@ -242,7 +253,7 @@ git show --stat HEAD                 # 确认这个提交恰好只包含预期�
 **第 5 步 · push 前必须获得明确批准**
 
 - **commit 是"本机存档"，可以自主做；push 是"发布"，必须有骁洋明确点头**（"推 / 发 / 上传"）。没听到这句话就不推。
-- 只推 `dev`。`main` 有服务端保护，禁止直推。
+- 只推**你自己的临时分支**。`main` 有服务端保护，禁止直推。
 - 不要 `git push --force`，不要 `--no-verify` 跳钩子。
 
 **红线（碰了就是事故）**
@@ -266,21 +277,25 @@ git show --stat HEAD                 # 确认这个提交恰好只包含预期�
 
 ---
 
-## 5. 从 dev 合入 main（Pull Request）
+## 5. 开 PR 合入 main（Pull Request）
 
-什么时候开 PR：**dev 上积累的改动已经自测通过，可以上生产了。**
+什么时候开 PR：**临时分支上的改动已经自测通过、可以上生产了。**
 
 ### 5.1 开 PR
 
 命令行（推荐，装了 `gh` 的话）：
 
 ```powershell
-gh pr create --base main --head dev --title "本周订舱模块改进" --body "改了什么、测过什么"
+gh pr create --base main --head <你的临时分支名> --title "本周订舱模块改进" --body "改了什么、测过什么"
 ```
+
+> 💡 **正文里含 shell 代码块时别用 heredoc**
+> 把带 `$PY = "…"` / `& $PY -m …` 这类 PowerShell 片段的正文直接 heredoc 喂给 `gh`，会被安全策略判成"从 Bash 调 PowerShell"而拒绝执行。
+> **做法**：先把正文写进一个临时文件（如 `tmp/pr_body.md`），再用 `--body-file tmp/pr_body.md`。
 
 没装 `gh` 就走网页：打开 https://github.com/roke8x-max/yxo-app ，
 push 完 GitHub 会顶部弹出 **Compare & pull request** 按钮，点它，
-确认 `base: main ← compare: dev`，填标题正文，提交。
+确认 `base: main ← compare: <你的临时分支>`，填标题正文，提交。
 
 ### 5.2 骁洋审核
 
@@ -291,76 +306,38 @@ PR 页面的 **Files changed** 标签会逐行显示这次改了什么。
 - 有没有把客户名、运价、提单号这类真实数据写进代码？
 - 数据库结构有没有变？变了的话老数据怎么办？
 
-有问题就在 PR 里留言，开发的人继续往 dev 推，PR 会自动更新，不用重开。
+有问题就在 PR 里留言，开发的人继续往**这条临时分支**推，PR 会自动更新，不用重开。
 
 ### 5.3 合并
 
-确认没问题后，在 PR 页面点 **Merge pull request**。
+确认没问题后，在 PR 页面点 **Squash and merge** —— 本仓库 `main` 开了 `required_linear_history`（强制线性历史），**Merge 提交用不了**，下拉框里只有 Squash / Rebase 两项。
 
 命令行等价操作：
 
 ```powershell
-gh pr merge --merge
+gh pr merge --squash
 ```
 
-> 用 **Merge**（默认那个），不要选 Squash 或 Rebase——保留完整历史，出事时好查是哪一次改动引起的。
->
-> ⚠️ **如果因为某种原因还是选了 Squash**（本仓库 PR#7 / PR#9 / PR#10 实际都是 Squash 合进 main 的），那 **§5.4 情况 B 立刻变成必做步骤**：squash 会在 main 上生成新 SHA，dev/main 当场分叉。**别拖到下次开 PR 才想起来** —— 2026-09-14 的 PR#11 冲突就是这么来的。
+> ⚠️ **Squash 会在 `main` 上生成一个全新 SHA**（临时分支上那些原始提交不是 main 的祖先）。
+> 在"只用 main"的流程下这**没有任何副作用** —— 不需要回合同步任何分支（`dev` 已废弃，见 §3）。
+> 但有个**认知陷阱**：之后再从这条临时分支开 PR 时，PR 页面的 commit 列表会拖出一大串历史提交 —— **看 Files changed（diff）才算数**，那才是本次真正的改动。
 
-合并后 GitHub 会问要不要删 dev 分支，**选不删**。dev 是长期分支，一直用。
+合并后 GitHub 会问要不要删分支，**选删除**（临时分支用完即弃；要再改就重新从 `main` 拉一条）。
 
-### 5.4 合并后各环境同步
+### 5.4 合并后要做什么
 
-**先判断这次 PR 是用哪种方式合的** —— 两种情况完全不同：
-
-#### 情况 A：用 **Merge** 合并（§5.3 推荐的方式）
-
-dev 已经是 main 的祖先，直接快进即可：
+**只剩 `main` 一条线之后，就没有"同步分支"这回事了**（`dev` 已废弃，见 §3）。收尾三步：
 
 ```powershell
-git checkout dev
-git pull --ff-only origin dev
+git checkout main
+git pull --ff-only origin main      # 让本机 main 跟上
+git branch -d <你的临时分支名>        # 删掉本地临时分支（远端那条 GitHub 已删）
 ```
 
-#### 情况 B：用 **Squash / Rebase** 合并 —— ⚠️ 必做，别拖
+> 📌 **历史遗留说明**（2026-09-18 之前适用）：那时 `dev` 作集成分支，而 `main` 强制线性历史、PR 只能 Squash ⇒ 每次合并都让 `dev` 与 `main` 分叉 ⇒ 本节规定"合并后必须把 main 合回 dev"。
+> **现在不需要了**：`dev` 已废弃，落后多少都无所谓（只当历史参照留着）。
 
-**这种情况下 dev 和 main 一定分叉**：squash 会在 main 上生成一个**全新 SHA**，dev 上原本那些提交在 main 上并不存在。**必须主动把 main 合回 dev**，否则分叉会一直累积，**下一个 PR 必然冲突**。
-
-> 真实事故（2026-09-14）：PR#10 用 Squash 合并后跳过了这一步，导致 PR#11 冲突 —— 真实 merge-base 退回到很老的位置，冲突 5 个文件（README + 4 个测试文件，后者是 add/add）。
-
-```powershell
-git checkout dev
-git fetch origin
-git merge $(git ls-remote origin refs/heads/main | cut -f1)   # 用真实 SHA，别用可能过期的 origin/main
-git push origin dev
-```
-
-**报冲突时怎么解决（别盲选 ours/theirs）**：
-
-1. 先问一句：**main 侧对这个文件有没有 dev 没有的内容？** 用 dev 上引入该文件的原始提交来比：
-   ```powershell
-   git diff <main的SHA> <dev上那个原始提交> -- <冲突文件>
-   ```
-   - **无输出** → main 侧只是 dev 的旧副本，**取 dev 版不会丢东西**：
-     ```powershell
-     git checkout --ours -- <冲突文件>
-     git add <冲突文件>
-     ```
-   - **有输出** → main 侧有独有内容，**必须手工合并**，不能整份取一边。
-2. 合并完**务必验证净变化**，确认只带来了预期的东西：
-   ```powershell
-   git diff --stat <合并前的dev SHA> HEAD
-   ```
-
-**判断当前是否已分叉**：
-
-```powershell
-git fetch origin
-git ls-remote origin refs/heads/main refs/heads/dev   # ⚠️ 权威值只能问服务器
-git merge-base origin/dev origin/main                 # 等于 main 的 SHA → 没分叉
-```
-
-> ⚠️ **本机火绒会拦 `.git/packed-refs` 改写**：`git fetch` / `git push` 会"报告成功"，但本地 `origin/*` 引用**不更新** → `git rev-parse origin/main`、`git branch -vv`、`git merge-base` 都会拿到**过期值并导致误判**（2026-09-14 就因此把"严重分叉"误判成"无冲突"）。**判断远端状态一律用 `git ls-remote`（直接问服务器），或直接写完整 SHA。** 治本是给杀软信任区加仓库 `.git` 路径。
+> ⚠️ **本机火绒会拦 `.git/packed-refs` 改写**：`git fetch` / `git push` 会"报告成功"，但本地 `origin/*` 引用**不更新** → `git rev-parse origin/main`、`git branch -vv` 都会拿到**过期值并导致误判**（2026-09-14 因此误判过"严重分叉"；2026-09-18 又出现 `git status -sb` 显示 `[gone]`，而远端分支其实好好的）。**判断远端状态一律用 `git ls-remote`（直接问服务器），或直接写完整 SHA。** 治本是给杀软信任区加仓库 `.git` 路径。
 
 ---
 
@@ -420,7 +397,7 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1
 回滚之后：
 1. 在 GitHub 上说明原因
 2. 把出问题的改动从 main 上撤掉（`git revert`），别让它躺在生产分支里
-3. 在 dev 上修好，重新走 PR
+3. 拉一条新的临时分支修好，重新走 PR
 
 ---
 
@@ -443,7 +420,7 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1
 ```powershell
 git clone https://github.com/roke8x-max/yxo-app.git
 cd yxo-app
-git checkout dev
+git checkout main        # 唯一的分支就是 main（dev 已废弃，见 §3）
 ```
 
 ### 9.2 装 hook（**重新 clone 后必须重做**）
@@ -507,14 +484,16 @@ git config --global credential.helper store
 
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
-| push 时看到"已拦截：不允许直接 push 到 main" | 推错分支了 | `git checkout dev` 再推 |
-| `! [rejected] ... non-fast-forward` | 别人先推了，你本地落后 | `git pull --ff-only origin dev` 解决冲突后再推 |
+| push 时看到"已拦截：不允许直接 push 到 main" | 推错分支了 | 把推送目标改回你自己的临时分支再推 |
+| `! [rejected] ... non-fast-forward` | 别人先推了，你本地落后 | `git fetch origin` + `git merge origin/main` 解决冲突后再推 |
 | `unable to auto-detect email address` | 没配 git 身份 | 见 9.3 |
 | `detected dubious ownership` | 目录属主和当前登录用户不一致 | `git config --global --add safe.directory '*'` |
 | push 卡住不动 / 超时 | 代理没配或 IP 变了 | 见 9.4，先 `Test-NetConnection` 验证 |
 | deploy.ps1 报"生产目录有未提交的改动" | 有人直接改了生产代码 | **别急着丢弃**，先看是什么改动，有用的话在开发环境重做走 PR |
 | deploy.ps1 报"拉取失败，历史分叉了" | 生产目录被 commit 过 | 联系骁洋，别自己 reset |
-| `cannot lock ref 'refs/heads/dev'` | 存在 `dev/xxx` 这种带斜杠的分支 | 删掉那个分支：`git push origin --delete dev/xxx` |
+| `cannot lock ref 'refs/heads/xxx'` | 存在 `xxx/yyy` 这种带斜杠的分支 | 删掉那个分支（本地 `git branch -D`，远端 `git push origin --delete xxx/yyy`） |
+| `git status` 里整仓文件都显示成 `A`（新增） | HEAD 悬空（多半是拿带斜杠的分支名建过分支） | **绝不要 add/commit**，按 §3 的救援步骤修 HEAD |
+| PR 页面 commit 列表拖出一大串历史提交 | 那些是 squash 之前的原始提交，不是 main 的祖先 | 正常现象，**看 Files changed 的 diff 才算数** |
 | 页面 500 / 功能坏了（刚部署完） | 新代码有问题 | 立刻 `rollback.ps1`，先恢复业务 |
 
 ---
@@ -524,10 +503,18 @@ git config --global credential.helper store
 **开发（本机 / E 盘）**
 
 ```powershell
-git checkout dev && git pull --ff-only origin dev     # 开工
-git add . && git commit -m "fix: xxx"       # 存档（勤做）
-git push origin dev                          # 发布给队友（自测通过后）
-gh pr create --base main --head dev --fill   # 申请上生产
+# ① 开工：从 main 拉一条「扁平命名」的临时分支（绝不用斜杠）
+git checkout main && git pull --ff-only origin main
+git update-ref refs/heads/fix-xxx-yyy <main 的完整 SHA> && git checkout fix-xxx-yyy
+
+# ② 边改边存档（勤做；⚠️ 定向 add，绝不用 git add .）
+git add <你改的那几个文件> && git commit -m "fix: xxx"
+
+# ③ 自测通过后 push 你自己的临时分支（push 前要有骁洋点头）
+git push origin fix-xxx-yyy
+
+# ④ 申请合入 main
+gh pr create --base main --head fix-xxx-yyy --fill
 ```
 
 **部署（D 盘）**
@@ -543,9 +530,10 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1         # 出事�
 
 ```
 GitHub       roke8x-max/yxo-app（公开）
-本机开发     C:\Users\Roke8x\Projects\yxo-app       dev
-服务器开发   E:\yxo_app_dev                          dev
+本机开发     C:\Users\Roke8x\Projects\yxo-app       临时分支（从 main 拉）
+服务器开发   E:\yxo_app_dev                          临时分支（从 main 拉）
 服务器生产   D:\YXO_DATA\yxo_app                     main
+已废弃分支   dev（保留作历史参照 —— 勿推、勿拉，见 §3）
 备份         D:\YXO_DATA\backups\时间戳\
 服务器 IP    10.0.199.184
 代理         http://10.183.1.185:7897（Clash Verge，IP 会变）
