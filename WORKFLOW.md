@@ -89,6 +89,24 @@ GitHub 仓库：`roke8x-max/yxo-app`（**公开仓库**，代码任何人可见�
 
 > **feature 分支命名**：临时从 `dev` 开功能分支时，用连字符 `feature-xxx-xiaoji`，**绝不用斜杠**（`feature/x` 会触发上面的 `.git` 损坏）。从 `dev` 拉、PR 回 `dev`，合并后删掉私人分支。
 
+> 🔴 **2026-09-17 实测：斜杠分支的「新形态」—— 不报错，但会把整仓显示成新增**
+>
+> 当天用 `git checkout -b fix/forward-layer-waybill-body` 建分支，**git 正常打印 `Switched to a new branch`**，但 `refs/heads/fix/` 那层目录连同文件**被静默抹掉**（`.git/refs/heads/` 里只剩 `dev`）⇒ **HEAD 指向一个不存在的分支**。
+>
+> **症状（记住这个画面）**：`git status` 把**整个仓库 ~250 个文件全显示成 `A`（新增）**，看起来像"所有文件都要提交"。此时若顺手 `git add` + `commit`，就会造出一个**把历史关系砸掉的 root commit**（父提交为空）。另外 `packed-refs` 里 `main` 也是过期值 —— 同一个老毛病。
+>
+> **立刻这样救**（全程不改任何文件内容）：
+>
+> ```powershell
+> git symbolic-ref HEAD refs/heads/dev     # ① 先把 HEAD 修回真实存在的分支
+> git status --short                       # ② 确认只剩你真正改过的那几个文件
+> git update-ref refs/heads/<扁平分支名> <dev 的完整 SHA>   # ③ 用连字符，绝不用斜杠
+> git checkout <扁平分支名>
+> ls .git/refs/heads/                      # ④ 复核：这个 ref 文件真的在盘上
+> ```
+>
+> `git update-ref refs/heads/fix/xxx` 同样「返回 0 但没落盘」；连手工 `mkdir` 建出的那层目录也会被抹掉。**扁平名（如 `fix-forward-layer-waybill-body`）实测稳定可用 —— 这条已由洋确认写进 `AGENTS.md` §11。**
+
 ---
 
 ## 4. 日常开发（本机 / E 盘都一样）
@@ -177,9 +195,11 @@ git status --short          # 逐行看：哪些是改的（ M），哪些是新
 git diff --stat             # 看改动量；某个文件行数异常大就单独看一眼
 git fetch origin            # 对齐远端
 git branch --show-current   # 必须是 dev，绝不能是 main
+git symbolic-ref HEAD       # 看 HEAD 指向哪个分支
 ```
 
 - ❌ 列表里出现 **`secrets.json` / `*.db` / `logs/` / `config_local.py` / 个人绝对路径** → **停下**：说明 `.gitignore` 漏了，先补忽略规则再提交。
+- ❌ **`git status --short` 里"整个仓库的文件都标成 `A`" → 立刻停下，绝不 add/commit**：这是 **HEAD 悬空**（最常见成因：拿带斜杠的分支名建过分支，见 §3）。按 §3 的救援步骤 `git symbolic-ref HEAD refs/heads/dev` 修回来再继续；**在悬空状态下提交会造出 root commit，把历史关系砸掉**。
 - ❌ 出现**你根本没印象改过**的文件 → 逐个 `git diff <文件>` 看清楚；确认无关就 `git restore <文件>` 退回。**不要盲提交**（幽灵改动就是这么进库的）。
 - ⚠️ `git fetch` 后 `git branch -vv` 才准。本机火绒会拦 `.git/packed-refs` 改写，导致 fetch 前显示虚假的 "ahead N"。
 
@@ -199,11 +219,13 @@ git diff --cached                    # 暂存区 vs HEAD —— 这才是这次�
 **第 3 步 · 测试必须先绿**
 
 ```powershell
-python -m pytest -q -p no:cacheprovider > out.txt 2>&1
+py -3.13 -m pytest -q -p no:cacheprovider > out.txt 2>&1
 # 读汇总行：必须 0 failed
 ```
 
 > ⚠️ **必须用默认 basetemp**（OS 临时目录）。指定 `--basetemp=<项目内目录>` 会触发 WorkBuddy 的 safe-delete 拦截 → 测试在断言前假失败，套件还会从 ~30s 拖到 200s+。
+>
+> 🔴 **必须用 `py -3.13`**（唯一解释器，2026-09-18 定）：这台机器上装着多个 Python，用哪个跑结果可能不同。装依赖同理：`py -3.13 -m pip install -r requirements-dev.txt`。**换解释器＝会出现"我这边绿、你那边红"**（9-17 真实踩过：`trustme` 装进了另一个解释器，真链路用例在别人机器上必挂）。自检：`py -3.13 -c "import sys; print(sys.executable)"`。
 
 **第 4 步 · 提交，并把结果拿给人看**
 
