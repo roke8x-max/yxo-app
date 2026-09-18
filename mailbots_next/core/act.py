@@ -1,8 +1,11 @@
 import email
 import email.policy
 import smtplib
+import html
 import io
 import hashlib
+import os
+import unicodedata
 import uuid
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
@@ -19,6 +22,7 @@ from ..config import SMTP_SERVER, SMTP_PORT, settings
 from .. import config
 from .log import get_logger
 from .store import write_dsk_timestamp, write_tracing_log, write_tracing_snapshot, write_forward_log
+from mailbots_next.core.extractors.waybill import XLS_SUFFIXES
 
 _log = get_logger(__name__)
 
@@ -188,6 +192,70 @@ def _record_forward(forward_id, message_id, row, send_ctx, to_list, cc_list,
     )
 
 
+WAYBILL_HEADERS = ["客户编码", "箱号", "运单号"]
+
+_TH_STYLE = ("border: 1px solid #999; padding: 4px 10px; "
+             "text-align: left; white-space: nowrap;")
+_TD_STYLE = "border: 1px solid #999; padding: 4px 10px; white-space: nowrap;"
+
+
+def _display_width(s: str) -> int:
+    """显示宽度：中文/全角算 2，ASCII/半角算 1。"""
+    w = 0
+    for ch in s:
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def _pad_display(s: str, width: int) -> str:
+    """按显示宽度左对齐补空格到固定列宽。"""
+    return s + " " * max(0, width - _display_width(s))
+
+
+def _format_plain_table(headers: List[str], rows: List[List[str]]) -> str:
+    """全表统一列宽的纯文本表格：先全表算每列最大显示宽度，再逐行填充。
+
+    列间固定 2 个空格；表头参与列宽计算。"""
+    table = [list(headers)] + [list(r) for r in rows]
+    ncols = len(headers)
+    widths = [0] * ncols
+    for r in table:
+        for c in range(ncols):
+            widths[c] = max(widths[c], _display_width(r[c]))
+    lines = []
+    for r in table:
+        lines.append("  ".join(_pad_display(r[c], widths[c]) for c in range(ncols)))
+    return "\n".join(lines)
+
+
+def _build_waybill_text_plain(rows: List[Dict]) -> str:
+    """正文纯文本部件 = 表格本身。
+
+    不加任何自撰前言（洋 2026-09-17 明确要求：下游公司只要收到按规则拆分的
+    邮件即可，机器人不擅自添加说明性文字）。"""
+    data = [[(r.get("客户编码") or "-"), (r.get("箱号") or "-"), (r.get("运单号") or "-")]
+            for r in rows]
+    return _format_plain_table(WAYBILL_HEADERS, data)
+
+
+def _build_waybill_html(rows: List[Dict]) -> str:
+    ths = "".join(f'<th style="{_TH_STYLE}">{h}</th>' for h in WAYBILL_HEADERS)
+    trs = []
+    for r in rows:
+        tds = "".join(
+            f'<td style="{_TD_STYLE}">{html.escape(str(r.get(k) or "-"))}</td>'
+            for k in WAYBILL_HEADERS)
+        trs.append(f"<tr>{tds}</tr>")
+    return (
+        '<div style="font-family: Tahoma, Arial, \'微软雅黑\', SimSun; '
+        'font-size: 13px;">'
+        '<table style="border-collapse: collapse; font-size: 13px;">'
+        f"<thead><tr>{ths}</tr></thead>"
+        f"<tbody>{''.join(trs)}</tbody>"
+        "</table></div>"
+    )
+
+
 def split_waybill_by_company(
     original_msg: email.message.Message,
     rows: List[Dict],
@@ -212,16 +280,16 @@ def split_waybill_by_company(
         msg = MIMEMultipart("mixed")
         original_subject = decode_header_safe(original_msg.get("Subject", ""))
         msg["Subject"] = original_subject
-        lines = ["本邮件仅包含贵公司相关的运单号信息：", "", "客户编码 | 箱号 | 运单号", "--- | --- | ---"]
-        for r in g["rows"]:
-            lines.append(f"{r.get('客户编码') or '-'} | {r.get('箱号') or '-'} | {r.get('运单号') or '-'}")
-        msg.attach(MIMEText("\n".join(lines), "plain", "utf-8"))
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(_build_waybill_text_plain(g["rows"]), "plain", "utf-8"))
+        alt.attach(MIMEText(_build_waybill_html(g["rows"]), "html", "utf-8"))
+        msg.attach(alt)
 
         for part in original_msg.walk():
             if part.is_multipart():
                 continue
             fn = part.get_filename()
-            if fn and fn.lower().endswith(".xls"):
+            if fn and fn.lower().endswith(XLS_SUFFIXES):
                 payload = part.get_payload(decode=True)
                 if payload:
                     new_bytes, new_name = rewrite_xls_filtered(payload, fn, g["rows"])
@@ -353,7 +421,11 @@ def rewrite_xls_filtered(raw_bytes: bytes, name: str, keep_rows: List[Dict]) -> 
                 new_ws.append([_cell_str(c) for c in row])
             buf = io.BytesIO()
             new_wb.save(buf)
-            return buf.getvalue(), name
+            base, _ = os.path.splitext(name)
+            new_name = base + ".xlsx"
+            if (name or "").lower().endswith(".xlsm"):
+                _log.warning(f"rewrite_xls_filtered: .xlsm macros dropped, renamed {name} -> {new_name}")
+            return buf.getvalue(), new_name
         except Exception:
             return None, None
 

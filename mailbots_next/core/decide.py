@@ -106,12 +106,16 @@ def decide_atb(row, routing, records) -> Decision:
 
 
 def decide_tracing(row, routing, records) -> Decision:
+    # 保守修：接受两种形态（serve 对 list 做多公司扇出、单个 RoutingResult 直接下发）。
+    # 不得破坏多公司扇出（命中 N 家 → N 次转发）。
     if isinstance(routing, list):
         if routing:
             return Decision("TRACE_HIT", "forward", f"Matched {len(routing)} companies via train")
         else:
             return Decision("TRACE_MISS", "skip", "No company matched for this train")
-    return Decision("TRACE_MISS", "skip", "Invalid routing result")
+    if getattr(routing, "success", False):
+        return Decision("TRACE_HIT", "forward", f"Matched {getattr(routing, 'company', '')} via train")
+    return Decision("TRACE_MISS", "skip", "No company matched for this train")
 
 
 def decide(email_type, row, routing, records) -> Decision:

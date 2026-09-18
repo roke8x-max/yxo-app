@@ -49,12 +49,16 @@ MARK_SEEN_FLUSH_SEC = int(os.environ.get("MARK_SEEN_FLUSH_SEC", "300"))
 # Flush a bucket early once it holds this many uids.
 MARK_SEEN_BATCH_CAP = int(os.environ.get("MARK_SEEN_BATCH_CAP", "100"))
 
-# IDLE topology: per (folder x account) connection when true (default),
-# legacy per-group connection when false (fast rollback if the server caps
-# concurrent connections).
-IDLE_PER_FOLDER = os.environ.get("IDLE_PER_FOLDER", "1") not in ("0", "false", "False")
-# How long one IDLE wait lasts before re-checking (seconds).
-MAX_IDLE_SEC = int(os.environ.get("MAX_IDLE_SEC", "1740"))
+# 唯一收信机制：短周期轮询 + UID 水位线发现（2026-09-16，IDLE 已彻底删除）。
+# 平均延迟 N/2、最坏 N，上界可预测。<=0 时 WARN + 回落 30（0 = 彻底不收信，不允许）。
+_ingest_poll_raw = int(os.environ.get("INGEST_POLL_SEC", "30"))
+if _ingest_poll_raw <= 0:
+    import warnings as _warnings
+    _warnings.warn(f"INGEST_POLL_SEC={_ingest_poll_raw} invalid, fallback to 30")
+INGEST_POLL_SEC = _ingest_poll_raw if _ingest_poll_raw > 0 else 30
+# UID 水位线状态文件：(account, folder) -> (uidvalidity, last_uid)，JSON 原子写。
+# 必须落在 DATA_DIR 下（.gitignore 已忽略 mailbots_next/data/*.json）。
+IMAP_STATE_PATH = Path(os.environ.get("IMAP_STATE_PATH", str(DATA_DIR / "imap_state.json")))
 
 # 上线护栏：只处理该时刻之后到达的邮件，防止首次 live 启动把历史未读邮件
 # 批量转发给外部客户。格式 YYYY-MM-DD，留空表示不过滤。

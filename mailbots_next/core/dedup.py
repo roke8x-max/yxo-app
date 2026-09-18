@@ -12,6 +12,7 @@ _db_lock = threading.Lock()
 
 
 def _connect() -> sqlite3.Connection:
+    Path(DEDUP_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DEDUP_DB_PATH, timeout=30, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")

@@ -41,6 +41,7 @@ def get_yxo_connection(readonly: bool = True) -> sqlite3.Connection:
 
 
 def get_bot_config_connection() -> sqlite3.Connection:
+    Path(BOT_CONFIG_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(BOT_CONFIG_DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

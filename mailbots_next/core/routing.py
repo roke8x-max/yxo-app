@@ -179,7 +179,8 @@ def route_tracing(row, records) -> RoutingResult:
     return results
 
 
-def route_row(email_type: EmailType, row, records) -> RoutingResult:
+def route_row(email_type: EmailType, row, records):  # 可能返回 RoutingResult 或 list[RoutingResult]（tracing 多公司扇出）
+    """可能返回 list[RoutingResult]（tracing 命中多家 → 每家一封副本）。"""
     if email_type == EmailType.DRAFT:
         return route_draft(row, records)
     elif email_type == EmailType.WAYBILL:

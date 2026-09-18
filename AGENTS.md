@@ -216,12 +216,23 @@ wecombot\start_server.bat    # pythonw 拉起 wecombot/server.py，监听 :5001
 ### 9.4 测试
 
 ```bash
-python -m pytest mailbots_next/tests/ -q     # 新系统；174 用例（2026-09-14 实测）
-python -m pytest mailbots/tests/unit -q      # 旧系统 core 层；约 165 用例
+py -3.13 -m pytest mailbots_next/tests/ -q -p no:cacheprovider   # 新系统
+python -m pytest mailbots/tests/unit -q                          # 旧系统 core 层
 ```
 
-- 依赖：生产必需 `beautifulsoup4` / `openpyxl` / `xlrd`；测试另需 `pytest` / `xlwt`（缺 `xlwt` 时相关用例自动 skip，属**预设行为**）。
+> 🔴 **唯一解释器（2026-09-18 定，洋批准）**：这台机器上**同时装着多个 Python**（`py -3.13` → `D:\python.exe`；WorkBuddy 助手自带的；uv 的 3.12）。**跑测试、装依赖一律用 `py -3.13`**：
+>
+> ```powershell
+> py -3.13 -c "import sys; print(sys.executable)"      # 自检：确认是哪个解释器
+> py -3.13 -m pip install -r requirements-dev.txt      # 含测试专用依赖（pytest / trustme）
+> py -3.13 -m pytest mailbots_next/tests/ -q -p no:cacheprovider
+> ```
+>
+> **换解释器会出现"我这边绿、你那边红"** —— 2026-09-17 真实发生过：`trustme` 只装进了另一个解释器，最有价值的真链路用例（真 TLS 冒烟）在别人机器上**必挂**。**别用编辑器/助手自带的 Python 跑项目测试。**
+
+- 依赖：生产必需 `beautifulsoup4` / `openpyxl` / `xlrd` / **`xlwt`**（⚠️ `mailbots_next/requirements.txt` 一度把 `xlwt` 错标"测试专用"，**实际生产 `core/act.py` 在用**）；测试另需 `pytest` / `trustme`（见 `requirements-dev.txt`）。
 - ⚠️ 仓库根 `requirements.txt` 只有 `flask` + `openpyxl` —— 跑 `mailbots_next` 的 venv **需另行安装** `mailbots_next/requirements.txt`。
+- ⚠️ 不要在这里写死"当前多少用例"：用例数随每次 PR 变动，**判据用"0 failed + 增量等于新增用例数"**。
 
 ### 9.5 部署与回滚（现行 = Windows）
 
@@ -277,6 +288,7 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1         # 出事�
 | 坑 | 说明 / 正确做法 |
 |---|---|
 | **火绒 ref 缓存** | `git status` 的 `ahead N` / `[gone]` 常是假象 → 用 `git ls-remote origin` 直连核实 |
+| **分支名不能带斜杠（2026-09-17 复现，新形态）** | 现在建 `fix/xxx` / `feature/xxx` 这类嵌套名时，`git checkout -b` 会**假报 `Switched to a new branch` 但 ref 根本没落盘** ⇒ HEAD 悬空 ⇒ **`git status` 把整仓 ~250 个文件显示成 `A`（新增）**，顺手 commit 就会造出砸掉历史的 root commit。**救法与正确姿势见 `WORKFLOW.md` §3**：`git symbolic-ref HEAD refs/heads/dev` 先把 HEAD 修回来 → 用**扁平名**（连字符，如 `fix-forward-layer-waybill-body`）+ `git update-ref refs/heads/<名> <完整 SHA>` → `ls .git/refs/heads/` 复核。`update-ref` 用嵌套名同样「返回 0 但没落盘」，手工 `mkdir` 出的目录也会被抹掉 |
 | **两个 `bot_config` 不同库** | `yxo.db.bot_config`（Flask 后台）≠ `mailbots_next/data/bot_config.db`（机器人配置）。勿混 |
 | **`python serve.py` 会崩** | 绝对导入 → `ModuleNotFoundError`。必须 `python -m mailbots_next.serve` |
 | **生产 venv 缺包** | 根 `requirements.txt` 只有 flask + openpyxl；跑 mailbots_next 要另装 bs4 / openpyxl / xlrd |
@@ -289,8 +301,8 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1         # 出事�
 | **企微无兜底** | `notify.py` import 旧 `wecombot`；客户端不可用时**只打 WARNING 就 return**，不触发邮件兜底 → 企微全链路可能静默不发。上线 TEST 必查日志有无 `WeCom client not available` |
 | **企微 8765 回调断** | 生产 WeComBot 无 8765 出站路由 → inbound「确认 N」在生产不通（已知限制） |
 | **方案 B 缺前提** | HTTP 调 WeComBot:5001 需对方先有出站端点；目前只有 `/`、`/wecom/callback`、`/health` |
-| **首次 live 会扫存量未读** | `ingest.py` 用 `search(UNSEEN)` → 必须设 `FORWARD_SINCE`，否则可能批量转发历史邮件给客户 |
-| **邮箱规则是部署前提** | 必须先由洋人工把「运单号」+「运单草单」合并重定向到「草单运单号」文件夹，否则 IDLE 抓空 |
+| **首次 live 会扫存量未读** | 收信已改为 **UID 水位线**（**不再用 `search(UNSEEN)`**，过滤退信侧例外）。但 **`FORWARD_SINCE` 仍是必设项**：state 为空的首跑、以及 **`UIDVALIDITY` 变化后的全量重扫**，起点都由它决定 → 不设会**把历史邮件批量转发给客户** |
+| **邮箱规则是部署前提** | 必须先由洋人工把「运单号」+「运单草单」合并重定向到「草单运单号」文件夹，否则**轮询抓空** |
 
 ---
 

@@ -93,9 +93,11 @@ class DraftExtractor(BaseExtractor):
 
     def _get_draft_nums(self) -> set:
         from mailbots_next.config import DRAFT_NUMS_DB_PATH
+        from pathlib import Path as _Path
         import sqlite3
         nums = set()
         try:
+            _Path(DRAFT_NUMS_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(DRAFT_NUMS_DB_PATH)
             for r in conn.execute("SELECT code_num FROM forwarded_drafts"):
                 if r[0]:

@@ -1,11 +1,14 @@
 import email
 import email.policy
 import imaplib
+import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..config import (
     IMAP_SERVER,
@@ -15,11 +18,12 @@ from ..config import (
     MARK_SEEN_FLUSH_SEC,
     MARK_SEEN_BATCH_CAP,
     FORWARD_SINCE,
+    INGEST_POLL_SEC,
+    IMAP_STATE_PATH,
     get_accounts,
 )
 from .. import config
 from .log import get_logger
-from .notify import increment_counter
 from .notify import increment_counter
 
 _log = get_logger(__name__)
@@ -51,7 +55,7 @@ class MarkSeenBatcher:
     flush them every MARK_SEEN_FLUSH_SEC (or when a bucket hits the cap).
 
     One short IMAP connection per (account, folder) bucket per flush, a
-    single STORE with all uids ("1,2,3"). Login frequency drops to at most
+    single UID STORE with all uids ("1,2,3"). Login frequency drops to at most
     one connection per account per flush window, and no extra long-lived
     connections are added. Failures retry once, then WARN + counter; never
     raises, never touches error_queue.
@@ -110,7 +114,8 @@ class MarkSeenBatcher:
                 typ, _ = conn.select(server_folder)
                 if typ != "OK":
                     raise RuntimeError(f"Cannot select folder {server_folder}")
-                typ, _ = conn.store(seq, "+FLAGS", "\\Seen")
+                # 真 UID 语义：序号会随 expunge 漂移，必须用 UID STORE。
+                typ, _ = conn.uid("STORE", seq, "+FLAGS", "(\\Seen)")
                 if typ != "OK":
                     raise RuntimeError(f"store \\Seen rejected for uids={seq}")
                 _log.log_imap(account, folder, "mark_seen_batch", f"uids={seq}")
@@ -214,16 +219,123 @@ class MailEvent:
     email_type: str = ""
 
 
-class Idler:
+# ---- UID 水位线状态（本地 JSON，原子写） ----
+_state_lock = threading.Lock()
+
+
+def _resolve_state_path(state_path: str = "") -> Path:
+    if state_path:
+        return Path(state_path)
+    return Path(IMAP_STATE_PATH)
+
+
+def _state_key(account: str, folder: str) -> str:
+    return f"{account}|{folder}"
+
+
+def _load_state(state_path: str = "") -> Dict[str, Any]:
+    p = _resolve_state_path(state_path)
+    try:
+        if not p.exists():
+            return {}
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as e:
+        _log.warning(f"IMAP state load failed, rescan constrained | path={p}: {e}")
+        return {}
+
+
+def _save_state_atomic(state_path: str, data: Dict[str, Any]) -> None:
+    p = _resolve_state_path(state_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
+
+
+def _get_uidvalidity(conn: imaplib.IMAP4_SSL) -> Optional[int]:
+    """从 untagged_responses 取 UIDVALIDITY（select 返回值不含它）。
+
+    实测：conn.untagged_responses['UIDVALIDITY'] == [b'1']（bytes 列表）。
+    取不到时返回 None，调用方按“已变化”保守重扫（仍受 FORWARD_SINCE 约束）。
+    """
+    try:
+        vals = (conn.untagged_responses or {}).get("UIDVALIDITY")
+        if vals:
+            raw = vals[0]
+            if isinstance(raw, bytes):
+                return int(raw.decode("utf-8", "replace").strip().split()[0])
+            return int(str(raw).strip().split()[0])
+    except Exception:
+        pass
+    try:
+        typ, vals = conn.response("UIDVALIDITY")
+        if vals:
+            raw = vals[0]
+            if isinstance(raw, bytes):
+                return int(raw.decode("utf-8", "replace").strip().split()[0])
+            return int(str(raw).strip().split()[0])
+    except Exception:
+        pass
+    return None
+
+
+def _parse_uid_search(data) -> List[int]:
+    out: List[int] = []
+    if not data:
+        return out
+    for chunk in data:
+        if not chunk:
+            continue
+        if isinstance(chunk, bytes):
+            parts = chunk.split()
+        elif isinstance(chunk, (list, tuple)):
+            for sub in chunk:
+                if isinstance(sub, bytes):
+                    out.extend(int(x) for x in sub.split() if x.isdigit())
+            continue
+        else:
+            continue
+        for x in parts:
+            try:
+                out.append(int(x))
+            except Exception:
+                continue
+    return sorted(set(out))
+
+
+def _extract_raw_from_fetch(msg_data) -> Optional[bytes]:
+    if not msg_data:
+        return None
+    for item in msg_data:
+        if isinstance(item, tuple) and len(item) >= 2:
+            payload = item[1]
+            if isinstance(payload, (bytes, bytearray)) and payload:
+                return bytes(payload)
+        elif isinstance(item, bytes) and len(item) > 0:
+            # 某些服务器直接回字节块（无 tuple 包装）时兜底
+            continue
+    return None
+
+
+class Poller:
+    """短周期轮询收信器：每轮遍历组内所有文件夹，用 UID 水位线发现新邮件。
+
+    唯一收信机制（IDLE 已彻底删除）。重连结构保留：
+    外层 while not stop + try/except + _connect() + close/logout +
+    异常后 sleep(10) 重连。
+    """
+
     def __init__(
         self,
         account: str,
         password: str,
         folders: List[Tuple[str, str]],
-        on_raw: Callable[[str, str, str, str, int, str, str, str, bytes], None],
-        state_path: str,
-        max_idle: int = 1740,
-        poll_fallback_secs: int = 0,
+        on_raw: Callable[..., Any],
+        state_path: str = "",
+        poll_secs: int = 30,
         forward_since: str = "",
     ):
         self.account = account
@@ -231,8 +343,10 @@ class Idler:
         self.folders = folders
         self.on_raw = on_raw
         self.state_path = state_path
-        self.max_idle = max_idle
-        self.poll_fallback_secs = poll_fallback_secs
+        if poll_secs is None or poll_secs <= 0:
+            _log.warning(f"poll_secs={poll_secs} invalid, fallback to 30")
+            poll_secs = 30
+        self.poll_secs = max(1, int(poll_secs))
         self.forward_since = forward_since
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -250,16 +364,61 @@ class Idler:
             raise RuntimeError(f"Cannot select folder {folder_utf7}")
         self._current_folder = folder_utf7
 
+    def _advance_watermark(self, folder_name: str, uidvalidity: int, uid: int) -> None:
+        with _state_lock:
+            data = _load_state(self.state_path)
+            data[_state_key(self.account, folder_name)] = {
+                "uidvalidity": uidvalidity,
+                "last_uid": int(uid),
+            }
+            _save_state_atomic(self.state_path, data)
+
     def _process_new_messages(self, conn: imaplib.IMAP4_SSL, folder_name: str, folder_utf7: str):
-        if self.forward_since:
-            criteria = f'(UNSEEN SINCE {imap_since(self.forward_since)})'
-        else:
-            criteria = "UNSEEN"
-        res, data = conn.search(None, criteria)
-        if res != "OK":
+        self._select_folder(conn, folder_utf7)
+        validity = _get_uidvalidity(conn)
+        if validity is None:
+            _log.warning(
+                f"UIDVALIDITY missing, conservative rescan | account={self.account} folder={folder_name}"
+            )
+
+        with _state_lock:
+            saved = _load_state(self.state_path).get(_state_key(self.account, folder_name), {})
+        saved_validity = saved.get("uidvalidity")
+        last_uid = int(saved.get("last_uid") or 0)
+        need_rescan = (
+            validity is None
+            or saved_validity is None
+            or (validity is not None and int(saved_validity) != int(validity))
+            or last_uid <= 0
+        )
+
+        # 取 UID 列表：水位增量或 FORWARD_SINCE 约束的全量
+        try:
+            if need_rescan:
+                if self.forward_since:
+                    typ, data = conn.uid("SEARCH", None, f"SINCE {imap_since(self.forward_since)}")
+                else:
+                    typ, data = conn.uid("SEARCH", None, "UID 1:*")
+                if typ != "OK":
+                    return
+                uids = _parse_uid_search(data)
+                # 重扫同样受 FORWARD_SINCE 门禁：起点不是 UID=1，而是 SINCE 结果的最小 UID
+            else:
+                typ, data = conn.uid("SEARCH", None, f"UID {last_uid + 1}:*")
+                if typ != "OK":
+                    return
+                uids = _parse_uid_search(data)
+        except Exception as e:
+            _log.error(f"[{self.account}] UID SEARCH failed: {e}")
             return
 
-        # Parse FORWARD_SINCE date for client-side double-check
+        if not uids:
+            # 无新邮件时仍要把（可能变化的）validity 落盘，避免每轮重扫
+            if validity is not None and need_rescan:
+                self._advance_watermark(folder_name, validity, last_uid)
+            return
+
+        # FORWARD_SINCE 客户端双重校验 + historical_skip（语义不动）
         since_dt = None
         if self.forward_since:
             try:
@@ -269,13 +428,20 @@ class Idler:
                 _log.warning(f"Invalid FORWARD_SINCE format: {self.forward_since}, skipping client-side filter")
                 since_dt = None
 
-        for uid_bytes in data[0].split():
+        for uid in uids:
             if self._stop.is_set():
                 break
             try:
-                uid = int(uid_bytes)
-                _, msg_data = conn.fetch(uid_bytes, "(RFC822)")
-                raw_bytes = msg_data[0][1]
+                typ, msg_data = conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
+                if typ != "OK":
+                    _log.warning(f"UID FETCH rejected | account={self.account} folder={folder_name} uid={uid} typ={typ}")
+                    increment_counter("uid_fetch_empty")
+                    continue
+                raw_bytes = _extract_raw_from_fetch(msg_data)
+                if not raw_bytes:
+                    _log.warning(f"UID FETCH empty payload | account={self.account} folder={folder_name} uid={uid}")
+                    increment_counter("uid_fetch_empty")
+                    continue
                 msg = email.message_from_bytes(raw_bytes, policy=email.policy.default)
                 message_id = msg.get("Message-ID", "").strip()
                 if not message_id:
@@ -285,7 +451,6 @@ class Idler:
                 sender = msg.get("From", "")
                 date_hdr = msg.get("Date", "")
 
-                # Client-side date filter (double insurance)
                 if since_dt:
                     from email.utils import parsedate_to_datetime
                     try:
@@ -293,59 +458,99 @@ class Idler:
                         if msg_date and msg_date < since_dt:
                             increment_counter("historical_skip")
                             _log.info(f"Historical skip | uid={uid} date={date_hdr} since={self.forward_since}")
+                            # 历史门禁之前的邮件视为“已处理终态”，推进水位避免每轮重扫
+                            if validity is not None:
+                                self._advance_watermark(folder_name, validity, uid)
                             continue
                     except Exception:
                         _log.warning(f"Could not parse Date header, allowing through | uid={uid} date={date_hdr}")
 
-                self.on_raw(self.account, folder_name, folder_utf7, message_id, uid, subject, sender, date_hdr, raw_bytes)
-            except Exception as e:
-                _log.error(f"[{self.account}] Failed to process uid={uid_bytes}: {e}")
+                try:
+                    ok = self.on_raw(self.account, folder_name, folder_utf7, message_id, uid, subject, sender, date_hdr, raw_bytes)
+                except Exception as e:
+                    # 致命异常专用兜底：正常路径（含部分行已入队）不经过这里。
+                    # 兜底入队须幂等检查，否则与内部已入队的行重复。
+                    _log.error(f"[{self.account}] Poll process fatal | uid={uid}: {type(e).__name__}: {e}")
+                    increment_counter("poll_process_fatal")
+                    try:
+                        from .dedup import add_error, has_pending_message
+                        from .notify import get_notifier
+                        from ..config import OPS_OWNER_EMAIL
+                        enqueued = False
+                        if has_pending_message(message_id):
+                            enqueued = True
+                        else:
+                            eid = _log.error(f"Poll fallback enqueue | uid={uid}", error_id=None)
+                            add_error(message_id, "", "ingest", "INGEST_EXCEPTION",
+                                      f"{type(e).__name__}: {e}", eid,
+                                      account=self.account, folder=folder_name, uid=uid,
+                                      subject=subject, sender=sender, date_hdr=date_hdr,
+                                      raw_bytes=raw_bytes)
+                            enqueued = True
+                        try:
+                            get_notifier().send_program_error(OPS_OWNER_EMAIL, "poll-fatal", f"Poll fatal, fallback enqueued: uid={uid} {type(e).__name__}")
+                        except Exception:
+                            pass
+                        if enqueued and validity is not None:
+                            self._advance_watermark(folder_name, validity, uid)
+                    except Exception as ee:
+                        _log.error(f"[{self.account}] Poll fallback enqueue failed | uid={uid}: {ee}")
+                    continue
 
-    def _idle_loop(self):
+                if ok:
+                    if validity is not None:
+                        self._advance_watermark(folder_name, validity, uid)
+                else:
+                    # 正常返回但未纳入持久化（理论上不应出现）：不推进 + ERROR + 告警
+                    _log.error(f"[{self.account}] Poll process not persisted, watermark held | uid={uid}")
+                    increment_counter("poll_not_persisted")
+                    try:
+                        from .notify import get_notifier
+                        from ..config import OPS_OWNER_EMAIL
+                        get_notifier().send_program_error(OPS_OWNER_EMAIL, "poll-not-persisted", f"process returned False, watermark held: uid={uid}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                _log.error(f"[{self.account}] Failed to process uid={uid}: {e}")
+
+    def _poll_loop(self):
         while not self._stop.is_set():
             try:
                 conn = self._connect()
-                for folder_name, folder_utf7 in self.folders:
-                    if self._stop.is_set():
-                        break
-                    self._select_folder(conn, folder_utf7)
-                    _log.log_imap(self.account, folder_name, "idle_start")
-                    if self.poll_fallback_secs > 0:
-                        while not self._stop.is_set():
-                            self._process_new_messages(conn, folder_name, folder_utf7)
-                            time.sleep(self.poll_fallback_secs)
-                    else:
-                        self._idle_once(conn, folder_name, folder_utf7)
-                conn.close()
-                conn.logout()
+                try:
+                    for folder_name, folder_utf7 in self.folders:
+                        if self._stop.is_set():
+                            break
+                        self._select_folder(conn, folder_utf7)
+                        _log.log_imap(self.account, folder_name, "poll_start")
+                        self._process_new_messages(conn, folder_name, folder_utf7)
+                    if not self._stop.is_set():
+                        time.sleep(self.poll_secs)
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    try:
+                        conn.logout()
+                    except Exception:
+                        pass
             except Exception as e:
-                _log.error(f"[{self.account}] IDLE error: {e}")
+                _log.error(f"[{self.account}] poll error: {e}")
                 time.sleep(10)
-
-    def _idle_once(self, conn: imaplib.IMAP4_SSL, folder_name: str, folder_utf7: str):
-        """One IDLE wait cycle on an already-selected folder: idle, wait,
-        always close the IDLE state with idle_done(), then process news."""
-        conn.idle()
-        try:
-            conn.idle_check(timeout=self.max_idle)
-        except Exception as e:
-            _log.debug(f"IDLE check interrupted (normal on timeout/stop): {type(e).__name__}: {e}")
-        finally:
-            try:
-                conn.idle_done()
-            except Exception as e:
-                _log.debug(f"IDLE done failed (normal if connection closed): {type(e).__name__}: {e}")
-        self._process_new_messages(conn, folder_name, folder_utf7)
 
     def start(self):
         self._stop.clear()
-        self._thread = threading.Thread(target=self._idle_loop, name=f"Idler-{self.account}", daemon=True)
+        self._thread = threading.Thread(target=self._poll_loop, name=f"Poller-{self.account}", daemon=True)
         self._thread.start()
 
     def stop(self):
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=10)
+
+
+# 改名说明：旧类名已彻底删除，此处不保留任何别名 —— 名字承诺不存在的东西正是本次事故根因。
 
 
 def fetch_raw_by_uid(account: str, folder: str, uid: int) -> Optional[bytes]:
@@ -362,8 +567,8 @@ def fetch_raw_by_uid(account: str, folder: str, uid: int) -> Optional[bytes]:
             typ, _ = conn.select(_server_folder(folder), readonly=True)
             if typ != "OK":
                 raise RuntimeError(f"Cannot select folder {folder}")
-            _, msg_data = conn.fetch(str(uid).encode(), "(RFC822)")
-            return msg_data[0][1]
+            _, msg_data = conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
+            return _extract_raw_from_fetch(msg_data)
         finally:
             try:
                 conn.logout()
@@ -375,8 +580,10 @@ def fetch_raw_by_uid(account: str, folder: str, uid: int) -> Optional[bytes]:
 
 
 class IngestManager:
+    """死代码（保留仅防旧引用）：实际入口为 serve.start_pollers。"""
+
     def __init__(self):
-        self.idlers: List[Idler] = []
+        self.pollers: List[Poller] = []
         self._accounts = get_accounts()
         self._enabled_types = set()
 
@@ -394,20 +601,20 @@ class IngestManager:
                 if not password:
                     _log.warning(f"No password for account {account}, skipping")
                     continue
-                idler = Idler(
+                poller = Poller(
                     account=account,
                     password=password,
                     folders=folders,
                     on_raw=self._on_raw,
                     state_path="",
-                    poll_fallback_secs=0,
+                    poll_secs=INGEST_POLL_SEC,
                     forward_since=FORWARD_SINCE,
                 )
-                self.idlers.append(idler)
-                idler.start()
-        _log.info(f"Started {len(self.idlers)} IDLE connections")
+                self.pollers.append(poller)
+                poller.start()
+        _log.info(f"Started {len(self.pollers)} ingest pollers (poll {INGEST_POLL_SEC}s)")
 
     def stop(self):
-        for idler in self.idlers:
-            idler.stop()
-        _log.info("All IDLE connections stopped")
+        for poller in self.pollers:
+            poller.stop()
+        _log.info("All ingest pollers stopped")
