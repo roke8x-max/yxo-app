@@ -13,7 +13,7 @@
 - **这个项目是什么**：一套自研的「**订舱数据管理平台**」，由**三大支柱**组成：
   ① 邮件机器人协同层（自动入口）② yxo 订舱数据管理平台（数据平台层）③ 企微机器人（人机协同层）。
 - **当前主线**：`mailbots_next/`（新版邮件机器人）准备上线替换旧系统 `mailbots/`。
-- **分支铁律**：`dev` 开发 → Pull Request → `main` 生产；**`main` 服务端保护禁直推**。
+- **分支铁律（2026-09-18 改版）**：**只用 `main`** —— 每次改动从 `main` 拉一条**扁平命名的临时分支** → Pull Request → `main`；**`main` 服务端保护禁直推**。**`dev` 已废弃**（保留作历史参照，勿推勿拉）。详见 `WORKFLOW.md` §3。
 - **新对话第一步**（先核实环境再动手）：
 
   ```bash
@@ -117,7 +117,7 @@
 
 | 用途 | 路径 |
 |---|---|
-| 本机开发仓库 | `C:\Users\Roke8x\Projects\yxo-app`（分支 `dev`） |
+| 本机开发仓库 | `C:\Users\Roke8x\Projects\yxo-app`（每次从 `main` 拉临时分支） |
 | 服务器开发 | `E:\yxo_app_dev`（小叽） |
 | 生产 · Flask 平台 | `D:\YXO_DATA\yxo_app`（git，**只拉 origin `main`**） |
 | 生产 · 旧邮件机器人 | `D:\YXO_DATA\yxo_app\mailbots`（**仍在 live**；nssm 服务 `YXO-MailBot` + 任务计划 `YXO-Tracing` / `YXO-Dsk` / `YXO-Atb`） |
@@ -149,7 +149,7 @@
 
 ## 6. 硬规则（违反任何一条立即停止）
 
-1. **绝不** `git push origin main` —— main 只接受来自 dev 的 PR（服务端保护已强制）。
+1. **绝不** `git push origin main` —— main 只接受来自临时分支的 PR（服务端保护已强制）。
 2. **绝不**在生产目录做开发 / 手改代码 —— 生产只能通过 `git pull`（拉 origin main）更新。
 3. **绝不**提交敏感数据 —— 真实客户名 / 收发货人 / 运价 / 提单号必须脱敏；`secrets.json`、`config_local.py`、`data/*.db`、`logs/` 均已被 gitignore。
 4. **绝不**在旧 `mailbots/` 上实现新功能（契约铁律：新功能只写 `mailbots_next/`）。
@@ -277,11 +277,11 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1         # 出事�
 
 ---
 
-## 10. 当前状态（2026-09-14）
+## 10. 当前状态（2026-09-18）
 
-- **分支**：本地 `dev` = 远端 `dev` = `7ea8c58`；远端 **`main` = `fef85f9`**。远端另有遗留分支 `feature/plan-b-processors-idle`(60538ce) 未清理。
+- **分支**：**只用 `main`**（2026-09-18 起）—— 每次改动从 `main` 拉**扁平命名**的临时分支、PR 回 `main`、合并后删分支；**`dev` 已废弃**（保留不删作历史参照）。远端遗留可清理分支：`fix/manifest-log-columns`、`feature/plan-b-processors-idle`。核远端一律 `git ls-remote`（本机火绒会让本地 `origin/*` 变陈旧）。
 - ⚠️ `git status` 报 `[ahead N]` / `[gone]` **通常是假象** —— 本机火绒实时防护会卡住 git 的 ref 缓存。**一律用 `git ls-remote origin` 直连核实**，别信本地数字。
-- ⚠️ **工作区有未提交改动**：约 23 个文件（`mailbots_next/` 多处、`config.py`、`wecombot/config.py`、`.gitignore`、本文件），另有 16 篇 `docs/` 未跟踪（NDR rev4.1/4.2、联运改造等）。**接手前先 `git status` 核对，别当成已上线。**
+- ✅ **工作区通常是干净的**（2026-09-18 核实）：代码与文档都已随 PR 合入 `main`。若看到大量未提交/未跟踪文件，先 `git status` 核对并在 `AGENTS.md`/日报里留痕，别当成已上线。
 - **上线切换尚未开始**：生产仍跑旧 `mailbots`。切换须「**先停旧**（杀 pythonw 进程 + 禁用计划任务）**再起新**」，且前置完成企业邮箱文件夹合并（刀5 gate）。
 - **上云**：等数科部流程，见 §9.6。
 
@@ -292,7 +292,7 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1         # 出事�
 | 坑 | 说明 / 正确做法 |
 |---|---|
 | **火绒 ref 缓存** | `git status` 的 `ahead N` / `[gone]` 常是假象 → 用 `git ls-remote origin` 直连核实 |
-| **分支名不能带斜杠（2026-09-17 复现，新形态）** | 现在建 `fix/xxx` / `feature/xxx` 这类嵌套名时，`git checkout -b` 会**假报 `Switched to a new branch` 但 ref 根本没落盘** ⇒ HEAD 悬空 ⇒ **`git status` 把整仓 ~250 个文件显示成 `A`（新增）**，顺手 commit 就会造出砸掉历史的 root commit。**救法与正确姿势见 `WORKFLOW.md` §3**：`git symbolic-ref HEAD refs/heads/dev` 先把 HEAD 修回来 → 用**扁平名**（连字符，如 `fix-forward-layer-waybill-body`）+ `git update-ref refs/heads/<名> <完整 SHA>` → `ls .git/refs/heads/` 复核。`update-ref` 用嵌套名同样「返回 0 但没落盘」，手工 `mkdir` 出的目录也会被抹掉 |
+| **分支名不能带斜杠（2026-09-17 复现，新形态）** | 现在建 `fix/xxx` / `feature/xxx` 这类嵌套名时，`git checkout -b` 会**假报 `Switched to a new branch` 但 ref 根本没落盘** ⇒ HEAD 悬空 ⇒ **`git status` 把整仓 ~250 个文件显示成 `A`（新增）**，顺手 commit 就会造出砸掉历史的 root commit。**救法与正确姿势见 `WORKFLOW.md` §3**：`git symbolic-ref HEAD refs/heads/main` 先把 HEAD 修回来 → 用**扁平名**（连字符，如 `fix-ingest-poll-uid-watermark`）+ `git update-ref refs/heads/<名> <完整 SHA>` → `ls .git/refs/heads/` 复核。`update-ref` 用嵌套名同样「返回 0 但没落盘」，手工 `mkdir` 出的目录也会被抹掉 |
 | **两个 `bot_config` 不同库** | `yxo.db.bot_config`（Flask 后台）≠ `mailbots_next/data/bot_config.db`（机器人配置）。勿混 |
 | **`python serve.py` 会崩** | 绝对导入 → `ModuleNotFoundError`。必须 `python -m mailbots_next.serve` |
 | **生产 venv 缺包** | 根 `requirements.txt` 只有 flask + openpyxl；跑 mailbots_next 要另装 bs4 / openpyxl / xlrd |
