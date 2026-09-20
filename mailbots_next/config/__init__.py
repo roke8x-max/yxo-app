@@ -66,7 +66,7 @@ from .provider import (
     snapshot,
     ConfigSnapshot,
     get_type_route,
-    get_idle_groups,
+    get_folder_groups,
     invalidate_cache,
 )
 
@@ -134,6 +134,6 @@ __all__ = [
     "snapshot",
     "ConfigSnapshot",
     "get_type_route",
-    "get_idle_groups",
+    "get_folder_groups",
     "invalidate_cache",
 ]

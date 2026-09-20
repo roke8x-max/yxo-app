@@ -219,7 +219,12 @@ def run_import(conn, filepath=None, train_type=None):
                 m = str(dep)[:7].replace("/", "-").replace(".", "-")
                 if re.match(r"^\d{4}-\d{2}$", m):
                     rec["台账月份"] = m
-        exist = conn.execute('SELECT id FROM records WHERE "客户编码"=?', (key,)).fetchone() if key else None
+        # J/K 守卫（洋 2026-09-18 拍板两个都加）：退舱记录永不作为导入更新目标，
+        # 软删记录不再被复活（命中不到 → 走 INSERT 新增）；ORDER BY id 消除未定义顺序。
+        exist = conn.execute(
+            'SELECT id FROM records WHERE "客户编码"=?'
+            " AND COALESCE(\"状态\",'')<>'退舱' AND COALESCE(is_deleted,0)=0"
+            " ORDER BY id LIMIT 1", (key,)).fetchone() if key else None
         if exist:
             sets = ", ".join([f'"{f}"=?' for f in config.BASE_FIELDS if f in rec])
             conn.execute(f"UPDATE records SET {sets} WHERE id=?",

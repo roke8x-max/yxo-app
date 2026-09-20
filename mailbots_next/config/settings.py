@@ -51,6 +51,8 @@ MARK_SEEN_BATCH_CAP = int(os.environ.get("MARK_SEEN_BATCH_CAP", "100"))
 
 # 唯一收信机制：短周期轮询 + UID 水位线发现（2026-09-16，IDLE 已彻底删除）。
 # 平均延迟 N/2、最坏 N，上界可预测。<=0 时 WARN + 回落 30（0 = 彻底不收信，不允许）。
+# ⚠️ 上限不在这里校验：--poll-secs 会绕过本模块，两条入口的夹取统一在 serve.py 合流之后
+#    （POLL_SECS_MAX / _clamp_poll_secs）。
 _ingest_poll_raw = int(os.environ.get("INGEST_POLL_SEC", "30"))
 if _ingest_poll_raw <= 0:
     import warnings as _warnings

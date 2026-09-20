@@ -248,6 +248,7 @@ def test_true_link_smoke_tls_proves_callback(tmp_path):
             # 真客户端、真 TLS：禁止 patch imaplib.IMAP4_SSL
             conn = imaplib.IMAP4_SSL("127.0.0.1", srv.port, timeout=10)
             conn.login("a@x", "p")
+            p._select_folder(conn, "F1")  # T5-1：调用方先 select，_process 内不再选
             p._process_new_messages(conn, "运单草单", "F1")
             try:
                 conn.logout()
@@ -321,6 +322,7 @@ def test_first_run_then_only_new(tmp_path):
     p = _poller(tmp_path, on_raw=Mock(return_value=True))
     p._process_new_messages(conn1, "运单草单", "F1")
     assert p.on_raw.call_count == 2
+    p._flush_watermark()  # T5-7：水位整轮落盘一次，读文件前先 flush
     import json
     saved = json.loads((tmp_path / "imap_state.json").read_text(encoding="utf-8"))
     assert saved["a@x|运单草单"]["last_uid"] == 2
@@ -346,6 +348,7 @@ def test_uidvalidity_change_rescans_with_since(tmp_path):
     p._process_new_messages(conn2, "运单草单", "F1")
     crit = conn2._seen_search[0].upper()
     assert "SINCE" in crit and "08-SEP-2026" not in crit  # 起点是 FORWARD_SINCE，非 UID=1 裸扫
+    p._flush_watermark()  # T5-7：读文件前先 flush
     import json
     saved = json.loads((tmp_path / "imap_state.json").read_text(encoding="utf-8"))
     assert saved["a@x|运单草单"]["uidvalidity"] == 222
@@ -382,6 +385,7 @@ def test_forward_since_gate_and_historical_skip(tmp_path):
     p = _poller(tmp_path, forward_since="2026-09-10", on_raw=Mock(return_value=True))
     p._process_new_messages(conn, "运单草单", "F1")
     assert p.on_raw.call_count == 0  # 门禁前历史邮件不回调
+    p._flush_watermark()  # T5-7：读文件前先 flush
     import json
     saved = json.loads((tmp_path / "imap_state.json").read_text(encoding="utf-8"))
     assert saved["a@x|运单草单"]["last_uid"] == 1
@@ -518,12 +522,14 @@ def test_data_dir_autocreate(tmp_path, monkeypatch):
     dedup_mod.init_db()
     store_mod.init_bot_config_db()
     assert (d / "dedup.db").exists() and (d / "bot_config.db").exists()
-    # state 文件同样自动建父目录
+    # state 文件同样自动建父目录（T5-7：advance 只进内存，flush 才落盘）
     from mailbots_next.core.ingest import Poller
     p = Poller(account="a@x", password="p", folders=[("F", "F")],
                on_raw=Mock(return_value=True),
                state_path=str(d / "sub" / "imap_state.json"), poll_secs=30)
     p._advance_watermark("F", 1, 5)
+    assert not (d / "sub" / "imap_state.json").exists()
+    p._flush_watermark()
     assert (d / "sub" / "imap_state.json").exists()
 
 

@@ -135,7 +135,7 @@ def get_type_route(email_type: str) -> Optional[Dict]:
     return None
 
 
-def get_idle_groups() -> Dict:
+def get_folder_groups() -> Dict:
     from .settings import IDLE_GROUPS
     return IDLE_GROUPS
 

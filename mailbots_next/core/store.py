@@ -267,6 +267,27 @@ def seed_owner_mapping():
             conn.close()
 
 
+def check_company_recipients_configured() -> bool:
+    """启动自检（只读）：company 收件人行数为 0 → ERROR（启动期绝不写 company 行）。
+
+    为空意味着 get_recipients() 永远返回空 → 所有邮件判 no_route。
+    """
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM bot_config WHERE bot='all' AND scope='company'"
+            ).fetchone()
+            n = row["n"] if row else 0
+        finally:
+            conn.close()
+    if n == 0:
+        _log.error("No company recipients configured — 所有邮件将判 no_route。"
+                   "请跑 scripts/seed_company_recipients.py --apply")
+        return False
+    return True
+
+
 init_bot_config_db()
 seed_owner_mapping()
 
