@@ -4,6 +4,7 @@ import imaplib
 import json
 import logging
 import os
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -13,12 +14,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..config import (
     IMAP_SERVER,
     IMAP_PORT,
-    DEFAULT_ACCOUNTS,
     IDLE_GROUPS,
     MARK_SEEN_FLUSH_SEC,
     MARK_SEEN_BATCH_CAP,
-    FORWARD_SINCE,
-    INGEST_POLL_SEC,
     IMAP_STATE_PATH,
     get_accounts,
 )
@@ -352,6 +350,10 @@ class Poller:
         self._thread: Optional[threading.Thread] = None
         self._conn: Optional[imaplib.IMAP4_SSL] = None
         self._current_folder: Optional[str] = None
+        # 水位批量落盘（T5-7）：内存 + dirty，轮末一次 flush（原子写不变）。
+        # 崩在中间 ⇒ 文件水位不推进 ⇒ 下轮重复处理 ⇒ dedup 兜住（不重复转发）。
+        self._watermark_cache: Dict[str, Tuple[int, int]] = {}
+        self._watermark_dirty = False
 
     def _connect(self) -> imaplib.IMAP4_SSL:
         conn = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT, timeout=60)
@@ -365,16 +367,26 @@ class Poller:
         self._current_folder = folder_utf7
 
     def _advance_watermark(self, folder_name: str, uidvalidity: int, uid: int) -> None:
+        """只更新内存 + 标 dirty，不写文件。文件落盘统一走 _flush_watermark（轮末一次）。"""
         with _state_lock:
+            self._watermark_cache[_state_key(self.account, folder_name)] = (uidvalidity, int(uid))
+            self._watermark_dirty = True
+
+    def _flush_watermark(self) -> None:
+        """把本轮内存水位一次性原子写盘。无 dirty 时不碰文件。"""
+        with _state_lock:
+            if not self._watermark_dirty:
+                return
             data = _load_state(self.state_path)
-            data[_state_key(self.account, folder_name)] = {
-                "uidvalidity": uidvalidity,
-                "last_uid": int(uid),
-            }
+            for key, (validity, uid) in self._watermark_cache.items():
+                data[key] = {"uidvalidity": validity, "last_uid": int(uid)}
             _save_state_atomic(self.state_path, data)
+            self._watermark_dirty = False
 
     def _process_new_messages(self, conn: imaplib.IMAP4_SSL, folder_name: str, folder_utf7: str):
-        self._select_folder(conn, folder_utf7)
+        """处理一个文件夹的新邮件。前置条件：调用方已 select 本文件夹，且之后
+        未执行其它 IMAP 命令 —— _get_uidvalidity 必须紧随本次 select 读取，
+        否则 untagged_responses 残留旧值会导致 UIDVALIDITY 判错（漏信）。"""
         validity = _get_uidvalidity(conn)
         if validity is None:
             _log.warning(
@@ -408,6 +420,9 @@ class Poller:
                 if typ != "OK":
                     return
                 uids = _parse_uid_search(data)
+        except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError, socket.timeout):
+            # 连接已死必须向上传播触发重连 —— 绝不能当成"这轮没有新邮件"吞掉。
+            raise
         except Exception as e:
             _log.error(f"[{self.account}] UID SEARCH failed: {e}")
             return
@@ -510,34 +525,69 @@ class Poller:
                         get_notifier().send_program_error(OPS_OWNER_EMAIL, "poll-not-persisted", f"process returned False, watermark held: uid={uid}")
                     except Exception:
                         pass
+            except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError, socket.timeout):
+                # 单封 FETCH 时连接断了：向上传播触发重连，不当成单封失败吞掉。
+                raise
             except Exception as e:
                 _log.error(f"[{self.account}] Failed to process uid={uid}: {e}")
 
-    def _poll_loop(self):
-        while not self._stop.is_set():
+    @staticmethod
+    def _drop(conn):
+        if conn is not None:
             try:
-                conn = self._connect()
+                conn.close()
+            except Exception:
+                pass
+            try:
+                conn.logout()
+            except Exception:
+                pass
+        return None
+
+    def _run_round(self, conn: imaplib.IMAP4_SSL) -> None:
+        """单轮：逐文件夹 select → 处理 → 轮末水位落盘一次。
+
+        每轮必 select（复用连接也不跳过）：UIDVALIDITY 从 untagged_responses
+        读取，跳过 select 会拿到陈旧值 ⇒ 该重扫时不扫（漏信）。
+        """
+        for folder_name, folder_utf7 in self.folders:
+            if self._stop.is_set():
+                break
+            self._select_folder(conn, folder_utf7)
+            _log.log_imap(self.account, folder_name, "poll_start")
+            self._process_new_messages(conn, folder_name, folder_utf7)
+        self._flush_watermark()
+
+    def run_once(self) -> None:
+        """顺序单轮（--once / 部署自检）：连接 → 单轮 → 关闭。不起线程，不循环。"""
+        conn = self._connect()
+        try:
+            self._run_round(conn)
+        finally:
+            self._drop(conn)
+
+    def _poll_loop(self):
+        conn = None
+        try:
+            while not self._stop.is_set():
                 try:
-                    for folder_name, folder_utf7 in self.folders:
-                        if self._stop.is_set():
-                            break
-                        self._select_folder(conn, folder_utf7)
-                        _log.log_imap(self.account, folder_name, "poll_start")
-                        self._process_new_messages(conn, folder_name, folder_utf7)
+                    if conn is None:
+                        conn = self._connect()
+                    self._run_round(conn)
                     if not self._stop.is_set():
                         time.sleep(self.poll_secs)
-                finally:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                    try:
-                        conn.logout()
-                    except Exception:
-                        pass
-            except Exception as e:
-                _log.error(f"[{self.account}] poll error: {e}")
-                time.sleep(10)
+                except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError, socket.timeout) as e:
+                    _log.warning(f"[{self.account}] connection lost, reconnecting | "
+                                 f"{type(e).__name__}: {e}")
+                    increment_counter("poll_reconnect")
+                    conn = self._drop(conn)
+                    time.sleep(10)
+                except Exception as e:
+                    _log.error(f"[{self.account}] poll error: {e}")
+                    conn = self._drop(conn)
+                    time.sleep(10)
+        finally:
+            self._drop(conn)
 
     def start(self):
         self._stop.clear()
@@ -579,42 +629,4 @@ def fetch_raw_by_uid(account: str, folder: str, uid: int) -> Optional[bytes]:
         return None
 
 
-class IngestManager:
-    """死代码（保留仅防旧引用）：实际入口为 serve.start_pollers。"""
 
-    def __init__(self):
-        self.pollers: List[Poller] = []
-        self._accounts = get_accounts()
-        self._enabled_types = set()
-
-    def set_enabled_types(self, types: List[str]):
-        self._enabled_types = set(types)
-
-    def _on_raw(self, account: str, folder: str, folder_utf7: str, message_id: str, uid: int, subject: str, sender: str, date_hdr: str, raw_bytes: bytes):
-        _log.log_email_received(message_id, folder, sender, subject)
-
-    def start(self):
-        for group_name, group_config in IDLE_GROUPS.items():
-            folders = list(zip(group_config["folders"], group_config["folder_utf7"]))
-            for account in DEFAULT_ACCOUNTS:
-                password = self._accounts.get(account)
-                if not password:
-                    _log.warning(f"No password for account {account}, skipping")
-                    continue
-                poller = Poller(
-                    account=account,
-                    password=password,
-                    folders=folders,
-                    on_raw=self._on_raw,
-                    state_path="",
-                    poll_secs=INGEST_POLL_SEC,
-                    forward_since=FORWARD_SINCE,
-                )
-                self.pollers.append(poller)
-                poller.start()
-        _log.info(f"Started {len(self.pollers)} ingest pollers (poll {INGEST_POLL_SEC}s)")
-
-    def stop(self):
-        for poller in self.pollers:
-            poller.stop()
-        _log.info("All ingest pollers stopped")

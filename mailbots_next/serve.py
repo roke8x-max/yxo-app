@@ -27,7 +27,7 @@ from mailbots_next.config import (
     EmailType,
     get_accounts,
     is_type_enabled,
-    get_idle_groups,
+    get_folder_groups,
     snapshot,
     ConfigSnapshot,
 )
@@ -70,7 +70,15 @@ class MailProcessor:
         self.records = load_records()
         self.accounts = get_accounts()
         self.notifier = get_notifier()
-        self._last_outcome: dict = {}
+        # 行级明细的线程本地槽（T5-5）：12 条轮询线程共享同一 processor 实例，
+        # 实例属性会被并发覆盖；sweeper 在自己线程内 set 后 get，行为不变。
+        self._outcome_local = threading.local()
+
+    def _set_last_outcome(self, outcome: dict) -> None:
+        self._outcome_local.value = outcome
+
+    def _get_last_outcome(self):
+        return getattr(self._outcome_local, "value", None)
 
     def process_email(self, account: str, folder: str, message_id: str, uid: int, subject: str, sender: str, date_hdr: str, raw_bytes: bytes) -> bool:
         """统一契约：返回布尔，True = 该封已纳入持久化流程（全成功 或 至少已入 error_queue）。
@@ -97,7 +105,7 @@ class MailProcessor:
                           subject=subject, sender=sender, date_hdr=date_hdr,
                           raw_bytes=raw_bytes)
             increment_counter("identify_failed")
-            self._last_outcome = {"queued": 1}
+            self._set_last_outcome({"queued": 1})
             return True
         if not email_type:
             _log.log_unclassified_email(message_id, folder, sender, subject)
@@ -109,12 +117,12 @@ class MailProcessor:
                           subject=subject, sender=sender, date_hdr=date_hdr,
                           raw_bytes=raw_bytes)
             self.notifier.send_config_missing(OPS_OWNER_EMAIL, error_id, f"Unclassified email: {subject[:100]}")
-            self._last_outcome = {"queued": 1}
+            self._set_last_outcome({"queued": 1})
             return True
 
         if not is_type_enabled(email_type):
             _log.log_type_skipped(message_id, email_type, "Type disabled via config")
-            self._last_outcome = {"skipped": 1}
+            self._set_last_outcome({"skipped": 1})
             return True
 
         _log.log_type_identified(message_id, email_type, f"sender={sender}, subject={subject[:50]}")
@@ -130,7 +138,7 @@ class MailProcessor:
                           subject=subject, sender=sender, date_hdr=date_hdr,
                           raw_bytes=raw_bytes)
             increment_counter("extract_failed")
-            self._last_outcome = {"queued": 1}
+            self._set_last_outcome({"queued": 1})
             return True
         if not rows:
             _log.warning(f"No rows extracted for {message_id} type={email_type}")
@@ -141,7 +149,7 @@ class MailProcessor:
                           account=account, folder=folder, uid=uid,
                           subject=subject, sender=sender, date_hdr=date_hdr,
                           raw_bytes=raw_bytes)
-            self._last_outcome = {"queued": 1}
+            self._set_last_outcome({"queued": 1})
             return True
 
         send_ctx = self._build_send_ctx(email_type, rows, raw_bytes)
@@ -199,7 +207,7 @@ class MailProcessor:
             mark_seen(account, folder, uid)
         # sweep_once 需要行级明细（queued  vs forwarded）来决定 resolve/attempt，
         # 但 Poller 水位线只依赖布尔返回值。两全：返回 True，同时把明细挂在实例上。
-        self._last_outcome = outcome
+        self._set_last_outcome(outcome)
         return True
 
     def _build_send_ctx(self, email_type, rows, raw_bytes):
@@ -465,15 +473,13 @@ def signal_handler(signum, frame):
     _shutdown_event.set()
 
 
-def start_pollers(processor: MailProcessor, poll_secs: int = 0):
-    """Start poll listeners. Topology is fixed: one Poller per group x account
-    (3 groups x 4 accounts = 12 connections). Each Poller traverses all folders
-    in its group every round (UID watermark discovery)."""
+def _build_pollers(processor: MailProcessor, poll_secs: int = 0):
+    """组装 12 条 Poller（3 组 × 4 账号），不起线程。start_pollers / poll_once 共用。"""
     from mailbots_next.config import FORWARD_SINCE as _FS, INGEST_POLL_SEC as _DEF
-    global _pollers
     if not poll_secs or poll_secs <= 0:
         poll_secs = _DEF
     poll_secs = max(1, int(poll_secs))
+    pollers = []
     for group_config in IDLE_GROUPS.values():
         folders = list(zip(group_config["folders"], group_config["folder_utf7"]))
         for account in DEFAULT_ACCOUNTS:
@@ -485,7 +491,7 @@ def start_pollers(processor: MailProcessor, poll_secs: int = 0):
             def callback(acct, folder, folder_utf7, message_id, uid, subject, sender, date_hdr, raw_bytes):
                 return processor.process_email(acct, folder, message_id, uid, subject, sender, date_hdr, raw_bytes)
 
-            poller = Poller(
+            pollers.append(Poller(
                 account=account,
                 password=password,
                 folders=folders,
@@ -493,13 +499,32 @@ def start_pollers(processor: MailProcessor, poll_secs: int = 0):
                 state_path="",
                 poll_secs=poll_secs,
                 forward_since=_FS,
-            )
-            _pollers.append(poller)
-            poller.start()
+            ))
+    return pollers, poll_secs
+
+
+def start_pollers(processor: MailProcessor, poll_secs: int = 0):
+    """Start poll listeners. Topology is fixed: one Poller per group x account
+    (3 groups x 4 accounts = 12 connections). Each Poller traverses all folders
+    in its group every round (UID watermark discovery)."""
+    global _pollers
+    built, poll_secs = _build_pollers(processor, poll_secs)
+    for poller in built:
+        _pollers.append(poller)
+        poller.start()
 
     n_folders = sum(len(g.get("folders", [])) for g in IDLE_GROUPS.values())
     _log.info(f"Started {len(_pollers)} ingest pollers (poll {poll_secs}s)")
     _log.info(f"Ingest mode: poll {poll_secs}s | connections={len(_pollers)} | folders={n_folders} | discovery=uid-watermark")
+
+
+def poll_once(processor: MailProcessor, poll_secs: int = 0) -> dict:
+    """顺序单轮（--once / 部署自检）：12 条 Poller 逐个 run_once，不起线程即退出。"""
+    built, poll_secs = _build_pollers(processor, poll_secs)
+    for poller in built:
+        poller.run_once()
+    _log.info(f"Once scan complete | pollers={len(built)}")
+    return {"pollers": len(built)}
 
 
 def stop_pollers():
@@ -667,16 +692,16 @@ def sweep_once(processor=None) -> dict:
                 e.get("sender") or "", e.get("date") or "",
                 raw_bytes,
             )
-            # process_email 新契约返回布尔；行级明细挂在 _last_outcome 上供 sweep 决策。
+            # process_email 新契约返回布尔；行级明细挂在线程本地槽上供 sweep 决策。
             # 兼容：布尔 True + 有明细 → 用明细；裸 True（mock）→ 视为成功；dict（旧）→ 直接用。
             if isinstance(result, dict):
                 outcome = result
             elif result is True:
-                outcome = getattr(processor, "_last_outcome", None) or {"forwarded": 1}
+                outcome = processor._get_last_outcome() or {"forwarded": 1}
             elif result is False:
                 outcome = {"queued": 1}
             else:
-                outcome = getattr(processor, "_last_outcome", None) or ({"forwarded": 1} if result else {"queued": 1})
+                outcome = processor._get_last_outcome() or ({"forwarded": 1} if result else {"queued": 1})
         except Exception as exc:
             _log.error(f"Sweep replay crashed: id={e['id']} error={type(exc).__name__}: {exc}")
             outcome = {"queued": 1}
@@ -830,6 +855,18 @@ def main():
 
     config = snapshot()
     processor = MailProcessor(config)
+
+    # 启动自检（只读）：company 收件人缺失则 ERROR（绝不在启动期写行）
+    from mailbots_next.core.store import check_company_recipients_configured
+    check_company_recipients_configured()
+
+    # --once：顺序跑一轮就退出（部署自检；不 start 线程、不循环、不起 sweeper/digest）
+    if args.once:
+        from mailbots_next.config import INGEST_POLL_SEC as _DEF_POLL
+        _once_secs = args.poll_secs if (args.poll_secs and args.poll_secs > 0) else _DEF_POLL
+        poll_once(processor, poll_secs=max(1, int(_once_secs)))
+        _log.info("Once scan complete, exiting")
+        return
 
     from mailbots_next.core.ingest import get_batcher
     from mailbots_next.config import INGEST_POLL_SEC as _DEF_POLL
