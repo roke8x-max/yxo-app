@@ -473,6 +473,28 @@ def signal_handler(signum, frame):
     _shutdown_event.set()
 
 
+# 轮询周期上限：25 分钟，相对常见的 30 分钟服务端空闲超时留 5 分钟余量（洋 2026-09-20 拍板）。
+# 必须在两条入口（INGEST_POLL_SEC / --poll-secs）合流之后夹取 —— 放在 settings.py 会被 --poll-secs 绕过。
+POLL_SECS_MAX = 1500
+
+
+def _clamp_poll_secs(secs, source: str) -> int:
+    """轮询周期上限夹取：超限 ⇒ WARN + 夹到 POLL_SECS_MAX。
+
+    周期越大，连接空闲越久，越可能被服务端空闲超时断开；而断开只能由"下一条命令失败"
+    发现 ⇒ 告警延迟最长一个周期。夹取让这个延迟有上界。
+    （不会漏信：重连后会重跑本轮，且水位不推进，邮件仍在。）
+    """
+    secs = int(secs)
+    if secs > POLL_SECS_MAX:
+        _log.warning(
+            f"poll_secs={secs} exceeds POLL_SECS_MAX={POLL_SECS_MAX} ({source}),"
+            f" clamped to {POLL_SECS_MAX}"
+        )
+        return POLL_SECS_MAX
+    return secs
+
+
 def _build_pollers(processor: MailProcessor, poll_secs: int = 0):
     """组装 12 条 Poller（3 组 × 4 账号），不起线程。start_pollers / poll_once 共用。"""
     from mailbots_next.config import FORWARD_SINCE as _FS, INGEST_POLL_SEC as _DEF
@@ -864,7 +886,7 @@ def main():
     if args.once:
         from mailbots_next.config import INGEST_POLL_SEC as _DEF_POLL
         _once_secs = args.poll_secs if (args.poll_secs and args.poll_secs > 0) else _DEF_POLL
-        poll_once(processor, poll_secs=max(1, int(_once_secs)))
+        poll_once(processor, poll_secs=max(1, _clamp_poll_secs(_once_secs, "--once")))
         _log.info("Once scan complete, exiting")
         return
 
@@ -874,7 +896,7 @@ def main():
 
     # --poll-secs 是唯一真值：已解析但从未使用过的参数现在真正接上
     poll_secs = args.poll_secs if (args.poll_secs and args.poll_secs > 0) else _DEF_POLL
-    poll_secs = max(1, int(poll_secs))
+    poll_secs = max(1, _clamp_poll_secs(poll_secs, "--poll-secs/INGEST_POLL_SEC"))
     start_pollers(processor, poll_secs=poll_secs)
     start_inbound_server()
 
