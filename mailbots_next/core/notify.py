@@ -71,9 +71,11 @@ class WeComNotifier:
 
     def _init_client(self):
         try:
-            from wecombot.cs_bot.wecom_api import notify_by_name
-            self._notify_by_name = notify_by_name
+            from .wecom_notify import WeComHttpClient
+            self._client = WeComHttpClient.from_secrets()
+            self._notify_by_name = self._client.notify_by_name
         except Exception as e:
+            self._client = None
             self._notify_by_name = None
             global _client_unavailable_logged
             if not _client_unavailable_logged:
@@ -120,7 +122,9 @@ class WeComNotifier:
                 unmapped.append(recipient)
                 continue
             try:
-                ok, channel = self._notify_by_name(name, content)
+                client = self._client
+                try_kf = client.kf_enabled(recipient) if client is not None else False
+                ok, channel = self._notify_by_name(name, content, try_kf)
                 if ok:
                     success_count += 1
                 else:
