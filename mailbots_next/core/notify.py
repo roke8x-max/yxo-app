@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from ..config import DAILY_COUNTERS_PATH, DIGEST_HOUR
-from .log import get_logger
+from .log import get_logger, mask_recipients
 
 _log = get_logger(__name__)
 _counter_lock = threading.Lock()
+
+# 客户端不可用时的启动期 ERROR 防刷屏：每个进程只记一次（B 组 T3a）。
+_client_unavailable_logged = False
 
 
 def _load_counters() -> Dict[str, Any]:
@@ -52,6 +55,15 @@ def flush_counters() -> Dict[str, int]:
     return counts
 
 
+def _mask_addrs(addrs) -> list:
+    """收件人掩码 —— 委托 log 的模块级唯一实现，保证全仓同一口径。
+
+    不再调用 EmailLogger 的私有方法：loud fail 就在这条路径上，
+    跨模块依赖私有 API 一旦改名，会从"静默失败"变成"崩在告警自身"。
+    """
+    return mask_recipients(list(addrs))
+
+
 class WeComNotifier:
     def __init__(self):
         self._client = None
@@ -61,9 +73,13 @@ class WeComNotifier:
         try:
             from wecombot.cs_bot.wecom_api import notify_by_name
             self._notify_by_name = notify_by_name
-        except Exception:
+        except Exception as e:
             self._notify_by_name = None
-            _log.warning("WeCom client not available")
+            global _client_unavailable_logged
+            if not _client_unavailable_logged:
+                _client_unavailable_logged = True
+                _log.error(f"WeCom client not available ({type(e).__name__}), "
+                           f"notifications will loud-fail with notify_failed counter")
 
     # 企微发送适配：内部以邮箱标识同事，但现网 wecom_api.notify_by_name 按企微姓名发送。
     # 本表仅作"邮箱→企微姓名"转换用，严禁把姓名当业务键流通到 notify.py 之外。
@@ -81,11 +97,13 @@ class WeComNotifier:
         display name via _WECOM_NAME_BY_EMAIL before calling notify_by_name.
         Unmapped emails are logged, counted as failed, and escalated to the
         ops owner by SMTP (never silently dropped, never sent raw)."""
-        from ..config import OPS_OWNER_EMAIL, is_live
-
+        # loud fail（B 组 T3a）：发不出去必留痕 —— ERROR（含类型与脱敏收件人）
+        # + notify_failed 计数，再返回 False。不重试、不抛异常（铁律：企微挂了
+        # 不能阻断转发主链路）。返回值语义不变（仍是 bool）。
         if not self._notify_by_name:
-            if is_live():
-                _log.warning("WeCom notify skipped: client not available")
+            _log.error(f"WeCom notify failed: client not available | type={notify_type} "
+                       f"to={_mask_addrs(recipients)}", error_id=error_id)
+            increment_counter("notify_failed")
             return False
 
         success_count = 0
@@ -98,15 +116,19 @@ class WeComNotifier:
                     error_id=error_id,
                 )
                 _log.log_notify("", notify_type, [recipient], False)
+                increment_counter("notify_failed")
                 unmapped.append(recipient)
                 continue
             try:
                 ok, channel = self._notify_by_name(name, content)
                 if ok:
                     success_count += 1
+                else:
+                    increment_counter("notify_failed")
                 _log.log_notify("", notify_type, [recipient], ok)
             except Exception as e:
                 _log.error(f"WeCom notify failed for {recipient}: {e}", error_id=error_id)
+                increment_counter("notify_failed")
         if unmapped:
             if self._fallback_owner_email(notify_type, unmapped, content, error_id):
                 success_count += 1

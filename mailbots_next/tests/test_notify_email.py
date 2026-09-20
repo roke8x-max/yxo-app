@@ -137,6 +137,74 @@ class TestWeComNotifier:
         notifier._notify_by_name.assert_not_called()
 
 
+class TestWeComLoudFail:
+    """B 组（T3a 绝不静默失败）：真行为断言，非调用断言。"""
+
+    def _force_client_failure(self, monkeypatch):
+        import sys
+        import mailbots_next.core.notify as notify_mod
+        monkeypatch.setattr(notify_mod, "_client_unavailable_logged", False)
+        monkeypatch.setitem(sys.modules, "wecombot", None)
+        monkeypatch.setitem(sys.modules, "wecombot.cs_bot", None)
+        monkeypatch.setitem(sys.modules, "wecombot.cs_bot.wecom_api", None)
+
+    def test_client_failure_errors_counts_and_returns_false(self, monkeypatch):
+        import mailbots_next.core.notify as notify_mod
+        from mailbots_next.core.notify import WeComNotifier
+        self._force_client_failure(monkeypatch)
+        before = get_counters().get("notify_failed", 0)
+        with patch.object(notify_mod._log, "error") as mock_err:
+            n = WeComNotifier()
+            assert n._notify_by_name is None
+            ok = n.notify("alarm", ["maoxiaoyang@cqtransit.com"], "content-text")
+        assert ok is False
+        err_texts = [str(c.args[0]) for c in mock_err.call_args_list]
+        assert any("alarm" in t for t in err_texts), err_texts
+        assert any("ma***g@cqtransit.com" in t for t in err_texts), err_texts
+        assert "content-text" not in "".join(err_texts)  # 不记正文全文
+        assert get_counters().get("notify_failed", 0) == before + 1
+
+    def test_mask_addrs_survives_logger_private_api_rename(self, monkeypatch):
+        """脱敏已提升为 log 模块级公共函数：即使 EmailLogger 的私有方法被改名/删除，
+        loud fail 路径的脱敏也**不能崩** —— 否则就是从"静默失败"变成"崩在告警自身"。
+        真锁：改动前 notify 走 `_log._mask_recipients`，本用例必挂。"""
+        from mailbots_next.core.log import EmailLogger
+        from mailbots_next.core.notify import _mask_addrs
+        monkeypatch.delattr(EmailLogger, "_mask_recipients", raising=False)
+        monkeypatch.delattr(EmailLogger, "_mask_email", raising=False)
+        assert _mask_addrs(["maoxiaoyang@cqtransit.com"]) == ["ma***g@cqtransit.com"]
+
+    def test_client_failure_logs_startup_error_only_once(self, monkeypatch):
+        import mailbots_next.core.notify as notify_mod
+        from mailbots_next.core.notify import WeComNotifier
+        self._force_client_failure(monkeypatch)
+        with patch.object(notify_mod._log, "error") as mock_err:
+            WeComNotifier()
+            WeComNotifier()
+        startup = [c for c in mock_err.call_args_list
+                   if "WeCom client not available" in str(c.args[0])]
+        assert len(startup) == 1
+
+    def test_send_program_error_also_loud_fails(self, monkeypatch):
+        import mailbots_next.core.notify as notify_mod
+        from mailbots_next.core.notify import WeComNotifier
+        from mailbots_next.config import OPS_OWNER_EMAIL
+        self._force_client_failure(monkeypatch)
+        before = get_counters().get("notify_failed", 0)
+        with patch.object(notify_mod._log, "error"):
+            n = WeComNotifier()
+            assert n.send_program_error(OPS_OWNER_EMAIL, "e1", "detail") is False
+        assert get_counters().get("notify_failed", 0) == before + 1
+
+    def test_normal_path_does_not_increment_counter(self):
+        from mailbots_next.core.notify import WeComNotifier
+        before = get_counters().get("notify_failed", 0)
+        n = WeComNotifier()
+        n._notify_by_name = Mock(return_value=(True, "wxwork"))
+        assert n.notify("alarm", ["maoxiaoyang@cqtransit.com"], "ok") is True
+        assert get_counters().get("notify_failed", 0) == before
+
+
 class TestModeBehavior:
     def test_test_mode_no_real_send(self, monkeypatch):
         monkeypatch.setenv("MAILBOT_MODE", "test")
