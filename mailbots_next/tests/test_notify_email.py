@@ -141,12 +141,15 @@ class TestWeComLoudFail:
     """B 组（T3a 绝不静默失败）：真行为断言，非调用断言。"""
 
     def _force_client_failure(self, monkeypatch):
-        import sys
+        """New mechanism: no URL/token anywhere => from_secrets raises
+        config-missing => notifier loud-fails (no legacy package import)."""
+        import mailbots_next.config.secrets as secrets_mod
         import mailbots_next.core.notify as notify_mod
         monkeypatch.setattr(notify_mod, "_client_unavailable_logged", False)
-        monkeypatch.setitem(sys.modules, "wecombot", None)
-        monkeypatch.setitem(sys.modules, "wecombot.cs_bot", None)
-        monkeypatch.setitem(sys.modules, "wecombot.cs_bot.wecom_api", None)
+        monkeypatch.delenv("WECOM_NOTIFY_URL", raising=False)
+        monkeypatch.delenv("WECOM_NOTIFY_TOKEN", raising=False)
+        monkeypatch.delenv("WECOM_KF_EMAILS", raising=False)
+        monkeypatch.setattr(secrets_mod, "_SECRETS_CACHE", {})
 
     def test_client_failure_errors_counts_and_returns_false(self, monkeypatch):
         import mailbots_next.core.notify as notify_mod
