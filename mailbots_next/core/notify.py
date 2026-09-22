@@ -164,7 +164,6 @@ class WeComNotifier:
 
         fp = _fingerprint(notify_type, content)
         now = _now()
-        window = _get_collapse_window()
         evicted: List[Dict[str, Any]] = []
         with _collapse_lock:
             st = _collapse_state.get(fp)
