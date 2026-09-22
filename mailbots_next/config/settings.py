@@ -57,6 +57,24 @@ if _ingest_poll_raw <= 0:
     import warnings as _warnings
     _warnings.warn(f"INGEST_POLL_SEC={_ingest_poll_raw} invalid, fallback to 30")
 INGEST_POLL_SEC = _ingest_poll_raw if _ingest_poll_raw > 0 else 30
+
+# 同类程序错误的通知折叠窗口（秒）：窗口内同类只发首条，窗口结束时补发一条"共 N 次"。
+# 0 = 关闭折叠（逐条发送）。<0 或非法值 ⇒ WARN + 回落 60。
+def _parse_collapse_window(raw: str) -> int:
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        import warnings as _warnings2
+        _warnings2.warn(f"NOTIFY_COLLAPSE_WINDOW_SEC={raw!r} invalid, fallback to 60")
+        return 60
+    if v < 0:
+        import warnings as _warnings3
+        _warnings3.warn(f"NOTIFY_COLLAPSE_WINDOW_SEC={v} invalid, fallback to 60")
+        return 60
+    return v
+
+
+NOTIFY_COLLAPSE_WINDOW_SEC = _parse_collapse_window(os.environ.get("NOTIFY_COLLAPSE_WINDOW_SEC", "60"))
 # UID 水位线状态文件：(account, folder) -> (uidvalidity, last_uid)，JSON 原子写。
 # 必须落在 DATA_DIR 下（.gitignore 已忽略 mailbots_next/data/*.json）。
 IMAP_STATE_PATH = Path(os.environ.get("IMAP_STATE_PATH", str(DATA_DIR / "imap_state.json")))

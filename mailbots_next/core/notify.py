@@ -1,11 +1,13 @@
 import json
 import os
+import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from ..config import DAILY_COUNTERS_PATH, DIGEST_HOUR
+from ..config import DAILY_COUNTERS_PATH, DIGEST_HOUR, NOTIFY_COLLAPSE_WINDOW_SEC
 from .log import get_logger, mask_recipients
 
 _log = get_logger(__name__)
@@ -13,6 +15,64 @@ _counter_lock = threading.Lock()
 
 # 客户端不可用时的启动期 ERROR 防刷屏：每个进程只记一次（B 组 T3a）。
 _client_unavailable_logged = False
+
+# 程序错误通知折叠（2026-09-21）：短时间内的同类 program_error 只发首条，
+# 窗口结束时补发一条"共 N 次"汇总。日志仍逐条、计数不受影响、不同种类绝不合并。
+_COLLAPSIBLE_TYPES = {"program_error"}
+_COLLAPSE_MAX_ENTRIES = 500
+_collapse_state: Dict[str, Dict[str, Any]] = {}
+_collapse_lock = threading.Lock()
+# 导入时刻的默认值：用于分辨"测试 monkeypatch 了 notify 模块attr"还是"动了 settings"。
+_DEFAULT_COLLAPSE_WINDOW = NOTIFY_COLLAPSE_WINDOW_SEC
+
+
+def _now() -> float:
+    """窗口时钟（单调时钟，可被测试 monkeypatch 推进；测试不许用 sleep）。"""
+    return time.monotonic()
+
+
+def _normalize_content(content: str) -> str:
+    """归一化每次必然变化的 token：① 去掉 [error_id=…] 片段 ② 连续数字→#。
+
+    只做这两件事：不同来源的错误文本归一化后天然不同 ⇒ 不同问题不会被合并。
+    """
+    text = re.sub(r"\[error_id=[^\]]*\]", "", content or "")
+    text = re.sub(r"\d+", "#", text)
+    return text
+
+
+def _fingerprint(notify_type: str, content: str) -> str:
+    return f"{notify_type}|{_normalize_content(content)}"
+
+
+def _collapse_summary(content: str, count: int) -> str:
+    """汇总文案（单实现，两处共用）：不写"最近 N 秒"——汇总可能迟到（如下一条
+    同类错误几天后才来），时间断言会失真。"""
+    return content + f"\n（同一批同类错误共发生 {count} 次，已折叠 {count - 1} 条）"
+
+
+def _get_collapse_window() -> int:
+    """折叠窗口秒数：env 优先（支持测试 setenv），否则 notify 模块attr（支持
+    monkeypatch.setattr(notify_mod, ...)，否则 settings 当前值（支持直接
+    patch settings）。非法值 ⇒ 60（与 settings 解析口径一致），不抛异常。"""
+    if "NOTIFY_COLLAPSE_WINDOW_SEC" in os.environ:
+        try:
+            v = int(os.environ["NOTIFY_COLLAPSE_WINDOW_SEC"])
+        except (TypeError, ValueError):
+            return 60
+        return 60 if v < 0 else v
+    cur = globals().get("NOTIFY_COLLAPSE_WINDOW_SEC", _DEFAULT_COLLAPSE_WINDOW)
+    if cur != _DEFAULT_COLLAPSE_WINDOW:
+        try:
+            v = int(cur)
+        except (TypeError, ValueError):
+            return 60
+        return 60 if v < 0 else v
+    try:
+        from ..config import settings as _settings_mod
+        return int(getattr(_settings_mod, "NOTIFY_COLLAPSE_WINDOW_SEC", _DEFAULT_COLLAPSE_WINDOW))
+    except (TypeError, ValueError):
+        return 60
 
 
 def _load_counters() -> Dict[str, Any]:
@@ -95,6 +155,70 @@ class WeComNotifier:
     }
 
     def notify(self, notify_type: str, recipients: List[str], content: str, error_id: Optional[str] = None) -> bool:
+        """折叠闸门（薄层）：可折叠类型 + 窗口>0 才走折叠，其余直发（行为与旧完全一致）。"""
+        # 先把过期窗口的汇总补发掉（对非折叠类型同样执行：它只清理"已过期"的窗口，
+        # 不会为当前这条建立任何 state，也不会递归）。
+        self._flush_expired_windows()
+        if notify_type not in _COLLAPSIBLE_TYPES or _get_collapse_window() <= 0:
+            return self._send_now(notify_type, recipients, content, error_id)
+
+        fp = _fingerprint(notify_type, content)
+        now = _now()
+        window = _get_collapse_window()
+        evicted: List[Dict[str, Any]] = []
+        with _collapse_lock:
+            st = _collapse_state.get(fp)
+            if st is None:
+                _collapse_state[fp] = {"window_start": now, "count": 1, "recipients": list(recipients),
+                                       "notify_type": notify_type, "content": content, "error_id": error_id}
+                send_now = True
+            else:
+                st["count"] += 1
+                send_now = False
+            while len(_collapse_state) > _COLLAPSE_MAX_ENTRIES:
+                oldest = min(_collapse_state, key=lambda k: _collapse_state[k]["window_start"])
+                evicted.append(_collapse_state.pop(oldest))
+        for est in evicted:
+            if est["count"] > 1:
+                try:
+                    self._send_now(est["notify_type"], est["recipients"],
+                                   _collapse_summary(est["content"], est["count"]),
+                                   est["error_id"])
+                except Exception as e:
+                    _log.error(f"Notify collapse evict flush failed: {type(e).__name__}: {e}")
+        if send_now:
+            _log.info(f"Notify window start | type={notify_type} | fp={fp}")
+            return self._send_now(notify_type, recipients, content, error_id)
+        with _collapse_lock:
+            cur_count = _collapse_state.get(fp, {}).get("count", 0)
+        _log.info(f"Notify collapsed | type={notify_type} | fp={fp} | count={cur_count}")
+        return True
+
+    def _flush_expired_windows(self) -> None:
+        """补发已过期窗口的汇总（count>1 才发），走 _send_now 直发（不进折叠判定 ⇒ 防递归）。
+
+        网络发送一律在锁外；state 读写在锁内。
+        """
+        window = _get_collapse_window()
+        if window <= 0:
+            return
+        now = _now()
+        expired: List[Dict[str, Any]] = []
+        with _collapse_lock:
+            for fp, st in list(_collapse_state.items()):
+                if now - st["window_start"] >= window:
+                    expired.append(st)
+                    del _collapse_state[fp]
+        for st in expired:
+            if st["count"] > 1:
+                try:
+                    self._send_now(st["notify_type"], st["recipients"],
+                                   _collapse_summary(st["content"], st["count"]),
+                                   st["error_id"])
+                except Exception as e:
+                    _log.error(f"Notify collapse flush failed: {type(e).__name__}: {e}")
+
+    def _send_now(self, notify_type: str, recipients: List[str], content: str, error_id: Optional[str] = None) -> bool:
         """Send to a list of owner *emails*; each is translated to the WeCom
         display name via _WECOM_NAME_BY_EMAIL before calling notify_by_name.
         Unmapped emails are logged, counted as failed, and escalated to the
@@ -230,3 +354,6 @@ def reset_notifier() -> None:
     global _notifier_instance
     with _notifier_lock:
         _notifier_instance = None
+    # 折叠 state 一并清空（测试隔离；生产路径不受影响）。
+    with _collapse_lock:
+        _collapse_state.clear()

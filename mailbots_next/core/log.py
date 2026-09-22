@@ -1,10 +1,11 @@
 import logging
 import os
 import sys
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from ..config import LOGS_DIR
 
@@ -149,11 +150,19 @@ class EmailLogger:
         self.info(f"Manual category | msg_id={message_id[:50]} | category={category} | reason={reason}")
 
 
-_logger_instance: Optional[EmailLogger] = None
+_logger_instances: Dict[str, EmailLogger] = {}
+_logger_lock = threading.Lock()
 
 
 def get_logger(name: str = "mailbots_next") -> EmailLogger:
-    global _logger_instance
-    if _logger_instance is None:
-        _logger_instance = EmailLogger(name)
-    return _logger_instance
+    """按 name 缓存的多实例（X3，2026-09-21）：同一 name 复用同一实例（不重复建
+    handler 的初衷不变），不同 name 各自实例 ⇒ 日志前缀反映真实调用模块。
+
+    不改变日志格式、输出目标、级别。
+    """
+    with _logger_lock:
+        inst = _logger_instances.get(name)
+        if inst is None:
+            inst = EmailLogger(name)
+            _logger_instances[name] = inst
+        return inst
