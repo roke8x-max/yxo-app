@@ -57,8 +57,7 @@ def _e2e_dbs(monkeypatch, tmp_path):
 
     for name, fname in (("YXO_DB_PATH", "yxo.db"),
                         ("BOT_CONFIG_DB_PATH", "bot_config.db"),
-                        ("DEDUP_DB_PATH", "dedup.db"),
-                        ("DRAFT_NUMS_DB_PATH", "draft_nums.db")):
+                        ("DEDUP_DB_PATH", "dedup.db")):
         target = tmp_path / fname
         for mod in (cfg_mod, store_mod, dedup_mod):
             if hasattr(mod, name):

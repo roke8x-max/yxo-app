@@ -10,7 +10,6 @@ from .settings import (
     BOT_CONFIG_DB_PATH,
     DEFAULT_ACCOUNTS,
     DEDUP_DB_PATH,
-    DRAFT_NUMS_DB_PATH,
     DAILY_COUNTERS_PATH,
 )
 from .types import EmailType, TYPE_ROUTES
@@ -31,7 +30,6 @@ class ConfigSnapshot:
     accounts: List[str]
     yxo_db_path: str
     dedup_db_path: str
-    draft_nums_db_path: str
     daily_counters_path: str
     inbound_port: int
     inbound_shared_secret: str
@@ -116,7 +114,6 @@ def snapshot() -> ConfigSnapshot:
         accounts=DEFAULT_ACCOUNTS,
         yxo_db_path=YXO_DB_PATH,
         dedup_db_path=str(DEDUP_DB_PATH),
-        draft_nums_db_path=str(DRAFT_NUMS_DB_PATH),
         daily_counters_path=str(DAILY_COUNTERS_PATH),
         inbound_port=INBOUND_PORT,
         inbound_shared_secret=INBOUND_SHARED_SECRET,

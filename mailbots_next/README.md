@@ -44,7 +44,7 @@ mailbots_next/
 │   ├── decide.py            # 八档判定引擎（规则表驱动，仅草单/运单号/DSK/ATB）
 │   ├── act.py               # 动作执行：转发(含拆分)/告警/待办、SMTP 发送结果校验
 │   └── notify.py            # 企微集中模块 + 每日汇总计数器
-├── data/                    # 运行期产物（gitignored）：dedup.db / bot_config.db / draft_nums.db / daily_counters.json
+├── data/                    # 运行期产物（gitignored）：dedup.db / bot_config.db / daily_counters.json
 ├── logs/                    # 专用日志文件夹（按日期滚动）
 └── tests/                   # 单测（含 test_inbound.py 强制 4 场景、test_notify_email.py、test_core.py）
 ```

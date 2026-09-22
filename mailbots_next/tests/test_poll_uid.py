@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from mailbots_next.config import BOT_CONFIG_DB_PATH, DEDUP_DB_PATH, DRAFT_NUMS_DB_PATH, DAILY_COUNTERS_PATH
+from mailbots_next.config import BOT_CONFIG_DB_PATH, DEDUP_DB_PATH, DAILY_COUNTERS_PATH
 from mailbots_next.core.dedup import init_db, add_error, get_pending_errors, has_pending_message
 from mailbots_next.core.store import init_bot_config_db, init_forward_log, seed_owner_mapping
 
@@ -21,7 +21,7 @@ from mailbots_next.core.store import init_bot_config_db, init_forward_log, seed_
 @pytest.fixture(autouse=True)
 def _dbs(tmp_path, monkeypatch):
     monkeypatch.setenv("MAILBOT_MODE", "test")
-    for p in (BOT_CONFIG_DB_PATH, DEDUP_DB_PATH, DRAFT_NUMS_DB_PATH, DAILY_COUNTERS_PATH):
+    for p in (BOT_CONFIG_DB_PATH, DEDUP_DB_PATH, DAILY_COUNTERS_PATH):
         try:
             if p.exists():
                 p.unlink()

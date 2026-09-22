@@ -17,7 +17,6 @@ import pytest
 from mailbots_next.config import (
     BOT_CONFIG_DB_PATH,
     DEDUP_DB_PATH,
-    DRAFT_NUMS_DB_PATH,
     DAILY_COUNTERS_PATH,
     OPS_OWNER_EMAIL,
     EmailType,
@@ -34,7 +33,7 @@ from mailbots_next.core.extract import ExtractedRow
 
 @pytest.fixture(autouse=True)
 def _r5_dbs():
-    for p in (BOT_CONFIG_DB_PATH, DEDUP_DB_PATH, DRAFT_NUMS_DB_PATH, DAILY_COUNTERS_PATH):
+    for p in (BOT_CONFIG_DB_PATH, DEDUP_DB_PATH, DAILY_COUNTERS_PATH):
         if p.exists():
             try:
                 p.unlink()
