@@ -56,7 +56,6 @@ os.environ.setdefault("YXO_DB_PATH", str(_YXO_TMP))
 os.environ.setdefault("INBOUND_SHARED_SECRET", "test_secret_123")
 os.environ.setdefault("BOT_CONFIG_DB_PATH", str(_TEST_DATA_DIR / "bot_config.db"))
 os.environ.setdefault("DEDUP_DB_PATH", str(_TEST_DATA_DIR / "dedup.db"))
-os.environ.setdefault("DRAFT_NUMS_DB_PATH", str(_TEST_DATA_DIR / "draft_nums.db"))
 os.environ.setdefault("DAILY_COUNTERS_PATH", str(_TEST_DATA_DIR / "daily_counters.json"))
 
 # Fake credentials file: tests must never touch the real secrets.json.

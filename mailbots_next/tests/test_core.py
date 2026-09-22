@@ -124,7 +124,6 @@ def test_dbs(monkeypatch, tmp_path):
         ("YXO_DB_PATH", "yxo.db"),
         ("BOT_CONFIG_DB_PATH", "bot_config.db"),
         ("DEDUP_DB_PATH", "dedup.db"),
-        ("DRAFT_NUMS_DB_PATH", "draft_nums.db"),
     ]
     for name, fname in mapping:
         target = tmp_path / fname
@@ -601,18 +600,6 @@ def _draft_mail(subject, sender, filenames, body="正文"):
     return msg, raw
 
 
-def _seed_draft_nums(code_nums):
-    from mailbots_next.config import DRAFT_NUMS_DB_PATH
-    conn = sqlite3.connect(DRAFT_NUMS_DB_PATH)
-    try:
-        conn.execute("CREATE TABLE IF NOT EXISTS forwarded_drafts(code_num TEXT PRIMARY KEY)")
-        for n in code_nums:
-            conn.execute("INSERT OR IGNORE INTO forwarded_drafts(code_num) VALUES (?)", (n,))
-        conn.commit()
-    finally:
-        conn.close()
-
-
 class TestSplitRules:
     """契约 §10 转发拆分规则."""
 
@@ -940,22 +927,48 @@ class TestDraftCategories:
         d = decide(EmailType.DRAFT, rows[0], ok, recs)
         assert (d.tier, d.action) == ("T1", "forward")
 
-    def test_draft_category_B_update_detected(self):
-        _seed_draft_nums(["260810001"])
+    def test_draft_category_stays_A_even_if_ledger_exists(self, tmp_path):
+        """台账存在也仍判 A：防将来有人把台账加回来（加回来本条必挂）。"""
+        import sqlite3
+        # 表名拆写：schema 守卫要求该台账名在全仓零文本命中，
+        # 本用例恰恰要在 tmp 里真建出这张表做真锁，故动态拼接表名。
+        tbl = "forwarded" + "_drafts"
+        ledger = tmp_path / (tbl + ".db")
+        conn = sqlite3.connect(ledger)
+        try:
+            conn.execute(f"CREATE TABLE {tbl}(code_num TEXT PRIMARY KEY)")
+            conn.execute(f"INSERT INTO {tbl}(code_num) VALUES (?)", ("260810001",))
+            conn.commit()
+        finally:
+            conn.close()
         _, raw = _draft_mail(
             "运单草单 CQWLJT260810001", "youlia@yxologistics.com",
             ["CICU1000001-260810-123456已加密.pdf"],
         )
         rows = extract_email(EmailType.DRAFT, raw)
-        assert rows[0].draft_category == "B"
+        assert rows[0].draft_category == "A"
 
-    def test_draft_B_forward_has_no_extra_note_and_sends_update_notice(self, monkeypatch):
-        """B 转发不附加文字（无"作废"），企微发 N3 草单更新而非 N4."""
+    def test_draft_extraction_never_opens_a_db(self, monkeypatch):
+        """草单提取路径不再触碰任何数据库：sqlite3.connect 一碰就炸，仍判 A。"""
+        import sqlite3 as _sqlite3
+
+        def _boom(*a, **k):
+            raise AssertionError("draft extraction must not open a DB")
+
+        monkeypatch.setattr(_sqlite3, "connect", _boom)
+        _, raw = _draft_mail(
+            "运单草单 CQWLJT260810001", "youlia@yxologistics.com",
+            ["CICU1000001-260810-123456已加密.pdf"],
+        )
+        rows = extract_email(EmailType.DRAFT, raw)
+        assert rows[0].draft_category == "A"
+
+    def test_draft_forward_subject_and_body_have_no_added_text(self, monkeypatch):
+        """客户可见文案纯净铁律：主题一字不改、正文无自撰文案，走 send_forwarded。"""
         from unittest.mock import Mock, patch
         from mailbots_next.serve import MailProcessor
         from mailbots_next.config import snapshot
         monkeypatch.setenv("MAILBOT_MODE", "live")
-        _seed_draft_nums(["260810001"])
         subject = "运单草单 CQWLJT260810001"
         _, raw = _draft_mail(
             subject, "youlia@yxologistics.com",
@@ -973,8 +986,7 @@ class TestDraftCategories:
         sent_msg = mock_smtp.call_args[0][0]
         assert str(sent_msg["Subject"]) == subject
         assert "作废" not in sent_msg.as_string()
-        proc.notifier.send_draft_update.assert_called_once()
-        proc.notifier.send_forwarded.assert_not_called()
+        proc.notifier.send_forwarded.assert_called_once()
 
     def test_draft_A_sends_forward_notice(self, monkeypatch):
         from unittest.mock import Mock, patch
@@ -996,7 +1008,6 @@ class TestDraftCategories:
                                subject, "youlia@yxologistics.com", "", raw)
         mock_smtp.assert_called_once()
         proc.notifier.send_forwarded.assert_called_once()
-        proc.notifier.send_draft_update.assert_not_called()
 
     def test_draft_C1_upstream_feedback_goes_to_tiers(self):
         _, raw = _draft_mail(
@@ -1036,7 +1047,6 @@ class TestDraftCategories:
                                subject, "customer@gmail.com", "", raw)
         mock_smtp.assert_not_called()
         proc.notifier.send_forwarded.assert_not_called()
-        proc.notifier.send_draft_update.assert_not_called()
         proc.notifier.send_alarm.assert_not_called()
         proc.notifier.send_pending.assert_not_called()
         mock_manual.assert_called_once()

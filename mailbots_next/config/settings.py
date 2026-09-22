@@ -9,7 +9,6 @@ LOGS_DIR = BASE_DIR / "logs"
 YXO_DB_PATH = os.environ.get("YXO_DB_PATH", r"\\10.0.199.184\yxo_data\yxo_app\data\yxo.db")
 BOT_CONFIG_DB_PATH = Path(os.environ.get("BOT_CONFIG_DB_PATH", str(DATA_DIR / "bot_config.db")))
 DEDUP_DB_PATH = Path(os.environ.get("DEDUP_DB_PATH", str(DATA_DIR / "dedup.db")))
-DRAFT_NUMS_DB_PATH = Path(os.environ.get("DRAFT_NUMS_DB_PATH", str(DATA_DIR / "draft_nums.db")))
 DAILY_COUNTERS_PATH = Path(os.environ.get("DAILY_COUNTERS_PATH", str(DATA_DIR / "daily_counters.json")))
 SECRETS_PATH = Path(os.environ.get("MAILBOT_SECRETS_PATH", str(BASE_DIR / "secrets.json")))
 

@@ -110,11 +110,6 @@ class TestWeComNotifier:
         result = notifier.send_forwarded("maoxiaoyang@cqtransit.com", OPS_OWNER_EMAIL, "forwarded detail")
         assert result is True
 
-    def test_send_draft_update(self, notifier):
-        from mailbots_next.config import OPS_OWNER_EMAIL
-        result = notifier.send_draft_update("maoxiaoyang@cqtransit.com", OPS_OWNER_EMAIL, "update detail")
-        assert result is True
-
     def test_send_program_error(self, notifier):
         from mailbots_next.config import OPS_OWNER_EMAIL
         result = notifier.send_program_error(OPS_OWNER_EMAIL, "err_123", "program error detail")

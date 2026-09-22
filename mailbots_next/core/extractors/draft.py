@@ -11,11 +11,9 @@ from mailbots_next.config import (
     CONTAINER_RE,
     YXO_DOMAIN,
     DRAFT_CATEGORIES,
-    OPS_OWNER_EMAIL,
 )
 from mailbots_next.core.extract import BaseExtractor, ExtractedRow, parse_email
 from mailbots_next.core.log import get_logger
-from mailbots_next.core.notify import get_notifier
 
 _log = get_logger(__name__)
 
@@ -32,7 +30,8 @@ class DraftExtractor(BaseExtractor):
         is_draft, draft_att_name = self._is_draft_attachment(att_names, body)
 
         if is_draft:
-            category = "B" if code_num and code_num in self._get_draft_nums() else "A"
+            # 台账已移除（2026-09-21）；恒 A = 永不误标；重新启用需按 README 技术债 X4 的三项前置单独立项。
+            category = "A"
         elif "运单号" in subject:
             category = "W"
         else:
@@ -91,25 +90,3 @@ class DraftExtractor(BaseExtractor):
                 return True, fn
         return False, None
 
-    def _get_draft_nums(self) -> set:
-        from mailbots_next.config import DRAFT_NUMS_DB_PATH
-        from pathlib import Path as _Path
-        import sqlite3
-        nums = set()
-        try:
-            _Path(DRAFT_NUMS_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(DRAFT_NUMS_DB_PATH)
-            for r in conn.execute("SELECT code_num FROM forwarded_drafts"):
-                if r[0]:
-                    nums.add(r[0])
-            conn.close()
-        except Exception as e:
-            error_id = _log.error(f"Failed to load draft nums: {type(e).__name__}: {e}")
-            try:
-                get_notifier().send_program_error(
-                    OPS_OWNER_EMAIL, error_id,
-                    f"Draft nums DB read failed: {type(e).__name__}: {e}"
-                )
-            except Exception as ne:
-                _log.error(f"Failed to report draft nums error: {type(ne).__name__}: {ne}")
-        return nums

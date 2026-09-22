@@ -18,13 +18,12 @@ from mailbots_next.core.log import EmailLogger
 from mailbots_next.config import (
     INBOUND_PORT,
     INBOUND_SHARED_SECRET,
-    DRAFT_NUMS_DB_PATH,
 )
 
 
 @pytest.fixture(autouse=True)
 def setup_db():
-    for _p in (DEDUP_DB_PATH, DRAFT_NUMS_DB_PATH):
+    for _p in (DEDUP_DB_PATH,):
         if _p.exists():
             try:
                 _p.unlink()
@@ -32,7 +31,7 @@ def setup_db():
                 pass
     init_db()
     yield
-    for _p in (DEDUP_DB_PATH, DRAFT_NUMS_DB_PATH):
+    for _p in (DEDUP_DB_PATH,):
         if _p.exists():
             try:
                 _p.unlink()
@@ -47,7 +46,6 @@ def mock_notifier():
         notifier.send_alarm.return_value = True
         notifier.send_pending.return_value = True
         notifier.send_forwarded.return_value = True
-        notifier.send_draft_update.return_value = True
         notifier.send_program_error.return_value = True
         notifier.send_config_missing.return_value = True
         mock.return_value = notifier

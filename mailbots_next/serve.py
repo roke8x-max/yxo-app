@@ -427,18 +427,11 @@ class MailProcessor:
             # Group-covered rows ride on their company's group mail: no
             # extra notify, no extra send.
             if detail == "forwarded" and decision.action == "forward":
-                if email_type == "draft" and row.draft_category == "B":
-                    self.notifier.send_draft_update(
-                        routing.responsible_person or "",
-                        OPS_OWNER_EMAIL,
-                        f"Draft update forwarded: {subject[:100]}"
-                    )
-                else:
-                    self.notifier.send_forwarded(
-                        routing.responsible_person or "",
-                        OPS_OWNER_EMAIL,
-                        f"Email forwarded: {subject[:100]}"
-                    )
+                self.notifier.send_forwarded(
+                    routing.responsible_person or "",
+                    OPS_OWNER_EMAIL,
+                    f"Email forwarded: {subject[:100]}"
+                )
             elif decision.action == "alarm":
                 self.notifier.send_alarm(
                     routing.responsible_person or "",

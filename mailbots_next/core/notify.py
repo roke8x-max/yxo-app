@@ -185,10 +185,6 @@ class WeComNotifier:
         content = f"✅ 已转发\n{detail}"
         return self.notify("forwarded", [responsible_person, admin_person], content, error_id)
 
-    def send_draft_update(self, responsible_person: str, admin_person: str, detail: str, error_id: Optional[str] = None) -> bool:
-        content = f"🔄 草单更新\n{detail}"
-        return self.notify("draft_update", [responsible_person, admin_person], content, error_id)
-
     def send_program_error(self, admin_person: str, error_id: str, detail: str) -> bool:
         content = f"❌ 程序错误 [error_id={error_id}]\n{detail}"
         return self.notify("program_error", [admin_person], content, error_id)
