@@ -137,8 +137,9 @@ def test_non_collapsible_types_never_collapse():
         n.send_pending(ADMIN, OPS_OWNER_EMAIL, "same pending")
         n.send_forwarded(ADMIN, OPS_OWNER_EMAIL, "same forwarded")
         n.send_digest(OPS_OWNER_EMAIL, {"forwarded": 1})
-    # alarm/pending/forwarded 各 3 收件人×... 每类 3 次 notify，每次 2 收件人 → 6 调用；digest 3 次 × 1 收件人 → 3
-    assert n._notify_by_name.call_count == 6 + 6 + 6 + 3
+    # 去重后：ADMIN == OPS_OWNER_EMAIL（测试 env 默认）⇒ alarm/pending/forwarded
+    # 每次 notify 只发 1 次（3+3+3）；digest 3 次 × 1 收件人 → 3。仍一次不折叠。
+    assert n._notify_by_name.call_count == 3 + 3 + 3 + 3
 
 
 # 8. 关闭折叠：NOTIFY_COLLAPSE_WINDOW_SEC=0 ⇒ 10 条发 10 次

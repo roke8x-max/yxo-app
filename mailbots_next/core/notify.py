@@ -233,7 +233,7 @@ class WeComNotifier:
 
         success_count = 0
         unmapped = []
-        for recipient in recipients:
+        for recipient in dict.fromkeys(recipients):      # 去重：同一人只发一次
             name = self._WECOM_NAME_BY_EMAIL.get(recipient)
             if not name:
                 _log.error(
