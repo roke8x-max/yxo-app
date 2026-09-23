@@ -22,6 +22,7 @@ class ExtractedRow:
     draft_code_num: Optional[str] = None
     is_draft_attachment: bool = False
     draft_attachment_name: Optional[str] = None
+    waybill_rejected: bool = False
 
 
 class BaseExtractor:

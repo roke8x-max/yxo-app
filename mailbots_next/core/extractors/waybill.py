@@ -3,7 +3,7 @@ import io
 from email.message import Message
 from typing import List, Dict, Any
 
-from mailbots_next.config import CODE_RE, CODE_NUM_RE, CONTAINER_RE
+from mailbots_next.config import CODE_RE, CODE_NUM_RE, CONTAINER_RE, WAYBILL_REJECT_KEYWORD
 from mailbots_next.core.extract import BaseExtractor, ExtractedRow, parse_email
 
 
@@ -15,6 +15,27 @@ class WaybillExtractor(BaseExtractor):
         subject = parsed["subject"] or ""
         body = parsed["plain_body"] or parsed["html_body"] or ""
         attachments = parsed["attachments"]
+
+        # WAY_B 单证审核驳回：无附件、编码在正文。必须在附件分流之前。
+        if WAYBILL_REJECT_KEYWORD in subject:
+            code = None
+            m = CODE_RE.search(body)
+            if m:
+                code = m.group(0).split("-")[0]
+            code_num = None
+            if code:
+                nm = CODE_NUM_RE.match(code)
+                if nm:
+                    code_num = nm.group(1)
+            return [ExtractedRow(
+                row_idx=0,
+                email_type="waybill",
+                raw_data=parsed,
+                customer_code=code,
+                customer_code_num=code_num,
+                container_no=None,
+                waybill_rejected=True,
+            )]
 
         rows = []
         xls_att = None

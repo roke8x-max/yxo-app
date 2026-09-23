@@ -75,4 +75,5 @@ DRAFT_CATEGORIES = ["A", "B", "C1", "C2", "OTHER"]
 ENC_PDF_RE = re.compile(r'^[A-Z]{4}\d{7}-\d{6}-\d{6}已加密\.pdf$', re.I)
 BOX_PDF_RE = re.compile(r'^[A-Z]{4}\d{7}\.pdf$', re.I)
 UPDATE_KEYWORDS = ("更新草单", "草单更新", "更新的草单", "请查收更新")
+WAYBILL_REJECT_KEYWORD = "单证审核驳回"
 YXO_DOMAIN = "yxologistics.com"

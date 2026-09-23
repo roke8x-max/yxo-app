@@ -80,6 +80,10 @@ def decide_draft(row, routing, records) -> Decision:
 
 
 def decide_waybill(row, routing, records) -> Decision:
+    # 🔴 必须在委托 decide_draft 之前：否则带编码的 WAY_B 会命中 T1
+    #    ⇒ action=forward ⇒ 把「单证驳回」邮件转发给【客户】。
+    if getattr(row, "waybill_rejected", False):
+        return Decision("WAY_B", "skip", "Rejected document: no action by design")
     # Waybill shares the draft eight-tier engine (客编+箱号 keys).
     return decide_draft(row, routing, records)
 
