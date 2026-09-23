@@ -27,6 +27,14 @@
 
 ⛔ **本批不做**：老系统 `mailbots/`（还在生产跑）、历史归档文档（`docs/superpowers/**`、老系统 testset、历史日志）、`T0`–`T7` 等其它 tier（另立一项）。
 
+✅ **本批顺带项（洋 2026-09-23 定；1 处，属"名字与实际不符"的同类问题）**：
+`mailbots_next/tests/test_waybill_rejected.py` 的用例 ④（`test_rejected_silent_even_when_unroutable`）
+里 `patch("mailbots_next.serve.route_row", ...)` 已成**死桩** —— 静默早分流位于 `route_row`
+**之前** ⇒ 该 patch 在当前代码下**永不生效**，两条断言变成平凡为真。
+⚠️ **它不是空测试**（撤掉早分流时它就会挂，仍有区分力），**只是名字/说明的前提已不存在**。
+⇒ 本批**只改名字与注释**（如 `test_rejected_silent_regardless_of_routing`）或删掉那个 patch，
+**不要改任何断言、不要动 `serve.py` 的早分流逻辑**（那一批刚验收过）。
+
 ---
 
 ## 2. 动作 1：删死值 + 消重复
