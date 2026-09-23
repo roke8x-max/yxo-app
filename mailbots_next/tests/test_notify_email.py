@@ -79,6 +79,26 @@ class TestWeComNotifier:
         sent_names = [c.args[0] for c in notifier._notify_by_name.call_args_list]
         assert sent_names == [_M["maoxiaoyang@cqtransit.com"], _M["yangyawen@cqtransit.com"]]
 
+    def test_duplicate_recipients_send_once(self, notifier):
+        """同一邮箱传两次 ⇒ 只发一次（负责同事 == 运维本人时的 [mao, mao] 去重）。"""
+        result = notifier.notify(
+            "alarm",
+            ["maoxiaoyang@cqtransit.com", "maoxiaoyang@cqtransit.com"],
+            "dup content",
+        )
+        assert result is True
+        assert notifier._notify_by_name.call_count == 1
+
+    def test_distinct_recipients_still_each_get_one(self, notifier):
+        """防过度修复：两个不同邮箱 ⇒ 各发一次（去重不是"只发第一个"）。"""
+        result = notifier.notify(
+            "alarm",
+            ["maoxiaoyang@cqtransit.com", "yangyawen@cqtransit.com"],
+            "two content",
+        )
+        assert result is True
+        assert notifier._notify_by_name.call_count == 2
+
     def test_notify_unknown_email_skipped(self, notifier):
         result = notifier.notify("test", ["ghost@example.com"], "test content")
         assert result is False
