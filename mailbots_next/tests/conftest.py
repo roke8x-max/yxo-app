@@ -57,6 +57,7 @@ os.environ.setdefault("INBOUND_SHARED_SECRET", "test_secret_123")
 os.environ.setdefault("BOT_CONFIG_DB_PATH", str(_TEST_DATA_DIR / "bot_config.db"))
 os.environ.setdefault("DEDUP_DB_PATH", str(_TEST_DATA_DIR / "dedup.db"))
 os.environ.setdefault("DAILY_COUNTERS_PATH", str(_TEST_DATA_DIR / "daily_counters.json"))
+os.environ.setdefault("LOGS_DIR", str(_TEST_DATA_DIR / "logs"))
 
 # Fake credentials file: tests must never touch the real secrets.json.
 # MAILBOT_SECRETS_PATH is read by settings at import time, so this must stay
