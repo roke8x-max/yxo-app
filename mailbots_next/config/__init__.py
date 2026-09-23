@@ -55,6 +55,7 @@ from .types import (
     ENC_PDF_RE,
     BOX_PDF_RE,
     UPDATE_KEYWORDS,
+    WAYBILL_REJECT_KEYWORD,
     YXO_DOMAIN,
 )
 
@@ -124,6 +125,7 @@ __all__ = [
     "ENC_PDF_RE",
     "BOX_PDF_RE",
     "UPDATE_KEYWORDS",
+    "WAYBILL_REJECT_KEYWORD",
     "YXO_DOMAIN",
     "load_secrets",
     "get_accounts",
