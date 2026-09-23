@@ -137,10 +137,10 @@ NON_AUTO_DRAFT_CATEGORIES = ("C2",)
 
 ### 3.2 改动
 
-**① `config/types.py` 新增 `DraftCategory`**
+**① `config/types.py` 新增 `DraftCategory`（用 `StrEnum`，不是 `(str, Enum)`）**
 
 ```python
-class DraftCategory(str, Enum):
+class DraftCategory(StrEnum):
     """草单分类。⚠️ 值一律保持历史字符串（A/B/C1/C2/OTHER），不要改值 ——
     老系统台账 (draft_forward_ledger.processed_mails.category 271 行) 与
     pending_queue.category (11 行) 里存的就是这些字符串，改值会造成跨系统对照困难。"""
@@ -151,13 +151,31 @@ class DraftCategory(str, Enum):
     OTHER = "OTHER"               # ⚠️ 历史值：新系统不再产生
 ```
 
+🔴 **为什么必须是 `StrEnum` 而不是 `(str, Enum)`** —— 我实测了两种写法在 Python 3.13 下的差别（不是推测）：
+
+| 表达式 | `class X(str, Enum)` | `class X(StrEnum)` |
+|---|---|---|
+| `f"{X.NEW}"` / `str()` / `format()` / `"%s" %` | **`'X.NEW'`** 🔴 | `'A'` ✅ |
+| `.value` | `'A'` | `'A'` |
+| `== "A"` / `hash == hash("A")` / `{"A":1}[X.NEW]` / `json.dumps` / `in ("C2","A")` | 全部相同 ✅ | 全部相同 ✅ |
+
+**本仓有 3 处 f-string 会直接打印分类值**，用 `(str, Enum)` 会让日志文案悄悄变成 `DraftCategory.EXTERNAL_REPLY`：
+`core/decide.py:35`、`core/serve.py:304`、`core/log.py:150`（`log_manual_category` 内部）。
+⇒ 用 `StrEnum` 后这 3 处**一个字都不用改**；若坚持 `(str, Enum)`，就必须在这 3 处（以及**以后每一处新加的**）写 `.value` —— 那是给后人埋雷，不采用。
+
+⚠️ **两条必读的前置事实（我已核实）**：
+- `StrEnum` 需要 **Python 3.11+**。**生产部署 venv `D:\YXO_DATA\yxo_app\venv` 实测 = 3.13.14** ✓、本机唯一解释器 3.13.14 ✓、网页端 `app.py` **不 import `mailbots_next`**（0 命中）⇒ 无兼容风险。
+- 🔴 **但 `mailbots_next/README.md:54` 现在写的是「Python 3.10+」** ⇒ 采纳 `StrEnum` 后**必须同步改成「Python 3.11+」**（见 ④）。否则就是"文档允许 3.10、代码却用了 3.11+ 特性"——正是本批要治的那类不一致。
+- 记住 `from enum import StrEnum`（`config/types.py:2` 现在是 `from enum import Enum`，需一并调整）。
+
 > 关于 `UPDATE`/`OTHER` 这两个"历史值"成员：**本批保留**（它们让这个枚举成为一份**完整的分类码本**，替代老系统的 `CATEGORY_LABEL`；且 §3.3 的不变性断言正好逐条覆盖这 5 个值）。**不要新增 `W` 成员** —— `W` 从来不在 `DRAFT_CATEGORIES` 里、也从未进过任何库（老库取值只有 `A/C2/C1/B/空`），给它一个成员等于凭空造一个"存在的分类"。
 > ⚠️ 若你（交付方）认为该只留新系统真正产生的 3 个（`NEW`/`UPSTREAM_FEEDBACK`/`EXTERNAL_REPLY`），**不要自行改**，在报告里写请示。
 
-**② 代码改用成员**（`str` 混入 ⇒ 与既有字符串比较天然兼容，**不需要大改**）：
+**② 代码改用成员**（`StrEnum` 本身就是 `str` 子类 ⇒ 与既有字符串比较天然兼容，**不需要大改**）：
 - `draft.py` 的赋值：`category = DraftCategory.NEW` 等；
 - `decide.py:34`、`serve.py:301` 的判定：用 `NON_AUTO_DRAFT_CATEGORIES`（动作 1 已收敛）；
-- `ExtractedRow.draft_category` 的**类型标注保持 `Optional[str]`**（不做类型收紧，避免牵动面过大）；
+- `ExtractedRow.draft_category` 的**类型标注保持 `Optional[str]`**（不做类型收紧，避免牵动面过大；成员是 `str` 子类，运行时兼容）；
+- ✅ **三处日志/文案不用动**（`decide.py:35`、`serve.py:304`、`log.py:150`）—— `StrEnum` 的 f-string 天然输出 `A`/`C1`/`C2`，这正是选它的原因；
 - 日志里可在值后面附人话，例如 `category=A(new_draft)`（可选，若做请保持格式统一）。
 
 **③ `WAY_B` tier ⇒ `waybill_rejected`**（**这条字符串可以改**：新系统里 tier **不入 DB**，只进日志与测试；且新系统 grep `WAY_A` = 0）
@@ -167,6 +185,7 @@ class DraftCategory(str, Enum):
 
 **④ 文档**
 - 更新我写的 4 份"活文档"里指向**新系统**的 `WAY_B`；（涉及老系统代号的地方**保留原样**并注明"老系统代号"）
+- 🔴 **`mailbots_next/README.md:54` 的「Python 3.10+」改成「Python 3.11+」** —— 采纳 `StrEnum` 的**必要配套**（3.11+ 才有 `enum.StrEnum`）。实测生产 venv 与开发机均为 3.13.14，改这一行即可；不改就成了"文档允许 3.10、代码用了 3.11+ 特性"。
 - **术语映射表**（`WAY_A`/`WAY_B` 含义 + 新系统对应名 + 历史数据位置）：**落 `docs/`，不进 `AGENTS.md`** —— `AGENTS.md` 是规则手册，术语映射属文档。该表**由芙蕾雅维护**（内容已在 `docs/2026-09-23-命名清理(tier代号)-前置调查与小spec.md` §4），**不在你的改动范围内**；你只需保证"活文档里指向新系统的 `WAY_B`"与新代码一致。
 
 ### 3.3 验收判据 + 真锁
@@ -175,11 +194,18 @@ class DraftCategory(str, Enum):
 1. 用例全绿；`grep -rn 'WAY_B' mailbots_next/ --include=*.py` = **0**（**不限带引号的** —— 注释、docstring、日志文案里也不许再出现；改名前它共 8 处命中：`decide.py`×2、`waybill.py`×1、`serve.py`×2、`tests/test_waybill_rejected.py`×3）；
 2. **行为不变性断言（保守方案的命门）**：新增用例断言
    `DraftCategory.NEW.value == "A"`、`UPDATE.value == "B"`、`UPSTREAM_FEEDBACK.value == "C1"`、`EXTERNAL_REPLY.value == "C2"`、`OTHER.value == "OTHER"` —— **防止后人"顺手把值也改了"**；
-3. `grep -rn 'draft_category ==' mailbots_next/tests/` 的断言仍全绿（值没变的直接证据）。
+3. ✅ **`StrEnum` 的打印语义也要断言**（这才是"选它"的实质）：新增/追加断言
+   `f"{DraftCategory.NEW}" == "A"`、`str(DraftCategory.EXTERNAL_REPLY) == "C2"`
+   ⇒ 若后人把 `StrEnum` 换回 `(str, Enum)`，这两条**必挂**（实测该写法会打印 `DraftCategory.NEW`）；
+4. `grep -rn 'draft_category ==' mailbots_next/tests/` 的断言仍全绿（值没变的直接证据）；
+5. 🔴 **`is` 比较检查（实测本仓今天 = 0 处，改完必须仍为 0）**：
+   `grep -rnE '\bis\s+["\x27]' mailbots_next/ --include=*.py` = **0**。
+   说明：枚举成员与**字符串字面量**之间**不存在 `is` 恒等**（实测两种写法 `m is "A"` 都是 `False`）⇒ 一旦有人写 `x is "C2"`，换成枚举后**永远为假且不报错**，属静默失效。本仓现在一处都没有，所以本批**不需要改任何 `is`**；这条是**改完后回归用**的判据，也是给未来加的一道闸。
 
 **真锁**
 - 把 `NEW = "A"` 改成 `"new_draft"` ⇒ **行为不变性用例必挂**；
-- 把 `decide.py` 的 tier 改回 `"WAY_B"` ⇒ tier 断言用例**必挂**。
+- 把 `decide.py` 的 tier 改回 `"WAY_B"` ⇒ tier 断言用例**必挂**；
+- （新）把 `StrEnum` 换回 `(str, Enum)` ⇒ 判据 3 的 f-string 断言**必挂**。
 
 ---
 
