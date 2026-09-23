@@ -305,6 +305,17 @@ class MailProcessor:
             )
             return "manual"
 
+        # WAY_B 单证审核驳回：业务上不需要通知（渝新欧会直接与同事沟通），
+        # 故静默跳过 —— 不通知、不转发、不进错误队列、不记 ERROR。
+        # 🔴 仍必须在路由【之前】：路由失败会走错误队列分支，又变回噪音。
+        if getattr(row, "waybill_rejected", False):
+            _log.info(
+                f"WAY_B skipped by design (no notify) | msg_id={message_id[:50]} | "
+                f"row={row.row_idx} | code={row.customer_code or '-'} | subject={subject[:100]}"
+            )
+            increment_counter("action_wayb_rejected_skipped")
+            return "rejected"
+
         routing = route_row(email_type, row, self.records)
         outcomes = []
         if isinstance(routing, list):
