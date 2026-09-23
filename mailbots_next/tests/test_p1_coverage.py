@@ -384,13 +384,18 @@ class TestCredentials:
     def test_fake_secrets_effective_and_real_untouched(self):
         import mailbots_next.config.secrets as sec_mod
         from mailbots_next.config import BASE_DIR
+        real = BASE_DIR / "secrets.json"
+        def snap():
+            return (real.stat().st_mtime_ns, real.stat().st_size) if real.exists() else None
+        before = snap()
         sec_mod._SECRETS_CACHE = None
         try:
             accounts = sec_mod.get_accounts()
-            assert accounts.get("maoxiaoyang@cqtransit.com") == "fake-pwd-mao"
-            assert not (BASE_DIR / "secrets.json").exists()
+            assert accounts.get("maoxiaoyang@cqtransit.com") == "fake-pwd-mao"   # 假凭据生效（不变）
+            assert sec_mod.SECRETS_PATH != real                                  # 确实没指向真文件
         finally:
             sec_mod._SECRETS_CACHE = None
+        assert snap() == before          # 真文件既没被创建、也没被改动
 
     def test_env_override_injection_point(self, tmp_path, monkeypatch):
         import mailbots_next.config.secrets as sec_mod
