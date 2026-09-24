@@ -1,5 +1,5 @@
 import re
-from enum import Enum
+from enum import Enum, StrEnum
 from dataclasses import dataclass
 from typing import List, Dict, Any
 
@@ -10,6 +10,17 @@ class EmailType(str, Enum):
     TRACING = "tracing"
     DSK = "dsk"
     ATB = "atb"
+
+
+class DraftCategory(StrEnum):
+    """草单分类。⚠️ 值一律保持历史字符串（A/B/C1/C2/OTHER），不要改值 ——
+    老系统台账 (draft_forward_ledger.processed_mails.category 271 行) 与
+    pending_queue.category (11 行) 里存的就是这些字符串，改值会造成跨系统对照困难。"""
+    NEW = "A"                     # 新草单（原 A）
+    UPDATE = "B"                  # ⚠️ 历史值：新系统不再产生（恒判 A），保留仅为识别老库历史数据
+    UPSTREAM_FEEDBACK = "C1"      # 上游问题反馈（原 C1）
+    EXTERNAL_REPLY = "C2"         # 外部回复/确认（原 C2）
+    OTHER = "OTHER"               # ⚠️ 历史值：新系统不再产生
 
 
 EXTRACTION_KEYS: Dict[EmailType, List[str]] = {

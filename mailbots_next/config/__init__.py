@@ -49,6 +49,7 @@ from .settings import (
 
 from .types import (
     EmailType,
+    DraftCategory,
     EXTRACTION_KEYS,
     TYPE_ROUTES,
     NON_AUTO_DRAFT_CATEGORIES,
@@ -119,6 +120,7 @@ __all__ = [
     "CODE_RE",
     "CODE_NUM_RE",
     "EmailType",
+    "DraftCategory",
     "EXTRACTION_KEYS",
     "TYPE_ROUTES",
     "NON_AUTO_DRAFT_CATEGORIES",

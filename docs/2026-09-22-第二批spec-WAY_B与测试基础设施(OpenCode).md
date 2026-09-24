@@ -1,4 +1,4 @@
-# 第二批 spec：WAY_B 单证审核驳回补实现 + 测试基础设施两处（OpenCode）
+# 第二批 spec：waybill_rejected 单证审核驳回补实现 + 测试基础设施两处（OpenCode）
 
 > 交办：芙蕾雅 ｜ 日期：2026-09-22 ｜ 执行：OpenCode ｜ 验收：芙蕾雅
 > **洋 2026-09-22 拍板三条**：**A** 单证审核驳回 → **按生产行为补实现告警** ／ **B** 修那条环境耦合断言 ／ **C** 日志目录隔离（**上线自检的命门**）。
@@ -26,7 +26,7 @@
 | **A** | `mailbots_next/config/types.py` | 新增常量 `WAYBILL_REJECT_KEYWORD` |
 | **A** | `mailbots_next/config/__init__.py` | 按现有 `CODE_RE` 等方式**同步导出**该常量（+ `__all__`） |
 | **A** | `mailbots_next/core/extract.py` | `ExtractedRow` 新增字段 `waybill_rejected: bool = False` |
-| **A** | `mailbots_next/core/extractors/waybill.py` | 新增 WAY_B 分支（**从正文取码**） |
+| **A** | `mailbots_next/core/extractors/waybill.py` | 新增 waybill_rejected 分支（**从正文取码**） |
 | **A** | `mailbots_next/core/decide.py` | `decide_waybill` 首行加**守卫**（防误判成 T1 转发给客户） |
 | **A** | `mailbots_next/core/notify.py` | 新增 `send_waybill_rejected()` |
 | **A** | `mailbots_next/serve.py` | `_process_row` 加**早分流**（在路由之前） |
@@ -37,7 +37,7 @@
 
 ---
 
-## 2. A 组：WAY_B「单证审核驳回」补实现（**本轮核心**）
+## 2. A 组：waybill_rejected「单证审核驳回」补实现（**本轮核心**）
 
 ### 2.1 现状（我已核到行号，你不要再猜）
 
@@ -73,7 +73,7 @@ WAYBILL_REJECT_KEYWORD = "单证审核驳回"
     waybill_rejected: bool = False
 ```
 
-**③ `core/extractors/waybill.py`** —— 在 `extract()` 里，取到 `subject`/`body` 之后、**附件分流之前**，加 WAY_B 分支：
+**③ `core/extractors/waybill.py`** —— 在 `extract()` 里，取到 `subject`/`body` 之后、**附件分流之前**，加 waybill_rejected 分支：
 
 - 判据：`WAYBILL_REJECT_KEYWORD in subject`
 - 编码**从正文取**，照旧系统口径（`MailBots/Waybill_Robot.py:extract_code_from_body`）：
@@ -87,10 +87,10 @@ WAYBILL_REJECT_KEYWORD = "单证审核驳回"
 
 ```python
 def decide_waybill(row, routing, records) -> Decision:
-    # 🔴 必须在委托 decide_draft 之前：否则带编码的 WAY_B 会命中 T1
+    # 🔴 必须在委托 decide_draft 之前：否则带编码的 waybill_rejected 会命中 T1
     #    ⇒ action=forward ⇒ 把「单证驳回」邮件转发给【客户】。
     if getattr(row, "waybill_rejected", False):
-        return Decision("WAY_B", "notify_rejected",
+        return Decision("waybill_rejected", "notify_rejected",
                         "Rejected document: notify responsible colleague only")
     return decide_draft(row, routing, records)
 ```
@@ -112,7 +112,7 @@ def decide_waybill(row, routing, records) -> Decision:
 **⑥ `serve.py::_process_row`** —— 紧接既有 `draft_category in ("C2","W","OTHER")` 早分流（`:299-308`）**之后**、`routing = route_row(...)`（`:309`）**之前**，加早分流：
 
 ```python
-        # WAY_B 单证审核驳回：只通知负责同事。
+        # waybill_rejected 单证审核驳回：只通知负责同事。
         # 🔴 必须在路由【之前】：路由失败会走 :375-385 的错误队列分支，
         #    那样这封"已知且预期会来"的邮件又变成 ERROR 噪音。
         if getattr(row, "waybill_rejected", False):
@@ -121,7 +121,7 @@ def decide_waybill(row, routing, records) -> Decision:
             responsible = ""
             if not isinstance(r, list):          # waybill 只会返回单个 RoutingResult，这里防御性写法
                 responsible = r.responsible_person or ""
-            _log.log_decide(message_id, row.row_idx, "WAY_B", "notify_rejected",
+            _log.log_decide(message_id, row.row_idx, "waybill_rejected", "notify_rejected",
                             f"Rejected document; responsible={responsible or 'OPS fallback'}")
             ok = self.notifier.send_waybill_rejected(
                 responsible, OPS_OWNER_EMAIL,
@@ -137,7 +137,7 @@ def decide_waybill(row, routing, records) -> Decision:
 
 ### 2.3 红线（**不许做的事**）
 
-- ❌ **不转发给任何客户**（WAY_B 只发企微通知，**不发 SMTP**）；`execute_action` **不需要**新增动作分支（本组不走它）。
+- ❌ **不转发给任何客户**（waybill_rejected 只发企微通知，**不发 SMTP**）；`execute_action` **不需要**新增动作分支（本组不走它）。
 - ❌ **不进待办队列**（不调 `send_pending`、不写 pending 相关表）。
 - ❌ **不进错误队列**、**不记 ERROR**（它不是程序错误）。
 - ❌ 不去改旧系统 `mailbots/`；不去改 `docs/superpowers/` 里那两份 8-26 设计文档。
