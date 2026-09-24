@@ -1,4 +1,4 @@
-# 第三批 spec：WAY_B 改为「静默跳过」（撤掉通知）+ 通知收件人去重（OpenCode）
+# 第三批 spec：waybill_rejected 改为「静默跳过」（撤掉通知）+ 通知收件人去重（OpenCode）
 
 > 交办：芙蕾雅 ｜ 日期：2026-09-23 ｜ 执行：OpenCode ｜ 验收：芙蕾雅
 > **洋 2026-09-23 拍板（两条）**：
@@ -22,7 +22,7 @@
 
 ## 1. 背景：上一批落了什么（现状，你据此改）
 
-上一批把「WAY_B 单证审核驳回」实现成了**发企微告警给负责同事**。**本批要把它改成"什么都不发"**。
+上一批把「waybill_rejected 单证审核驳回」实现成了**发企微告警给负责同事**。**本批要把它改成"什么都不发"**。
 现状（我已核到行号）：
 
 | 文件 | 现状 |
@@ -30,15 +30,15 @@
 | `config/types.py:78` | `WAYBILL_REJECT_KEYWORD = "单证审核驳回"` |
 | `config/__init__.py` | 已导出该常量 |
 | `core/extract.py:25` | `ExtractedRow.waybill_rejected: bool = False` |
-| `core/extractors/waybill.py:19-38` | WAY_B 分支：主题含关键词 ⇒ **从正文** `CODE_RE.search(body).group(0).split("-")[0]` 取码 ⇒ 单行 `waybill_rejected=True` |
-| `core/decide.py:85-87` | 守卫：`waybill_rejected` ⇒ `Decision("WAY_B", "notify_rejected", ...)` |
+| `core/extractors/waybill.py:19-38` | waybill_rejected 分支：主题含关键词 ⇒ **从正文** `CODE_RE.search(body).group(0).split("-")[0]` 取码 ⇒ 单行 `waybill_rejected=True` |
+| `core/decide.py:85-87` | 守卫：`waybill_rejected` ⇒ `Decision("waybill_rejected", "notify_rejected", ...)` |
 | `core/notify.py:311-316` | `send_waybill_rejected()`（`notify_type="waybill_rejected"`） |
 | `serve.py:308-324` | 早分流：`route_row` 取负责同事 ⇒ `send_waybill_rejected(...)` ⇒ `return "rejected"` |
 | `tests/test_waybill_rejected.py` | 6 条用例（其中 ③④ 断言"发了通知"） |
 
 ---
 
-## 2. A 组：WAY_B 改为**静默跳过**（撤掉通知）
+## 2. A 组：waybill_rejected 改为**静默跳过**（撤掉通知）
 
 ### 2.1 目标行为（**一句话**）
 
@@ -52,12 +52,12 @@
 **① `serve.py:308-324`：早分流整块替换为**
 
 ```python
-        # WAY_B 单证审核驳回：业务上不需要通知（渝新欧会直接与同事沟通），
+        # waybill_rejected 单证审核驳回：业务上不需要通知（渝新欧会直接与同事沟通），
         # 故静默跳过 —— 不通知、不转发、不进错误队列、不记 ERROR。
         # 🔴 仍必须在路由【之前】：路由失败会走错误队列分支，又变回噪音。
         if getattr(row, "waybill_rejected", False):
             _log.info(
-                f"WAY_B skipped by design (no notify) | msg_id={message_id[:50]} | "
+                f"waybill_rejected skipped by design (no notify) | msg_id={message_id[:50]} | "
                 f"row={row.row_idx} | code={row.customer_code or '-'} | subject={subject[:100]}"
             )
             increment_counter("action_wayb_rejected_skipped")
@@ -70,10 +70,10 @@
 **② `core/decide.py:85-87`：守卫保留，但动作改成 `skip`**
 
 ```python
-    # 🔴 必须在委托 decide_draft 之前：否则带编码的 WAY_B 会命中 T1
+    # 🔴 必须在委托 decide_draft 之前：否则带编码的 waybill_rejected 会命中 T1
     #    ⇒ action=forward ⇒ 把「单证驳回」邮件转发给【客户】。
     if getattr(row, "waybill_rejected", False):
-        return Decision("WAY_B", "skip", "Rejected document: no action by design")
+        return Decision("waybill_rejected", "skip", "Rejected document: no action by design")
 ```
 
 > 这条守卫是**第二道闸**（防有人把早分流挪走/去掉）。`"skip"` 在 `execute_action`（`act.py:560-561`）里**已有分支** ⇒ 返回 `(True, "skipped")`、不发信、不通知 ⇒ **不需要新增任何动作分支**。
@@ -84,7 +84,7 @@
 **为什么必须删而不是留着**：本项目的规矩是"**名字不得承诺代码里不存在/不再做的事**"（上一批刚因同类问题删过 `send_draft_update` 与草单台账）。留着它，将来会有人以为"单证驳回是会通知的"。
 
 **④ `core/extractors/waybill.py`：保持不动** ✓
-（仍要**识别** WAY_B，也要**从正文取码** —— 码进 info 日志，便于将来排查"哪一单被拒"。这是本轮唯一保留"多余信息"的地方，理由就是可追溯。）
+（仍要**识别** waybill_rejected，也要**从正文取码** —— 码进 info 日志，便于将来排查"哪一单被拒"。这是本轮唯一保留"多余信息"的地方，理由就是可追溯。）
 
 **⑤ `config/types.py` / `config/__init__.py` / `core/extract.py`：保持不动** ✓
 
@@ -98,7 +98,7 @@
 | ② 不转发、不入队 | **保持不变** |
 | ③ 原「通知到负责同事」 | 改为 **`test_rejected_sends_no_notification`**：走完整 `process_email` ⇒ 断言 `proc.notifier` 的**任何 send_\* 方法都没被调用**（如断言 `proc.notifier.mock_calls == []`）—— **这是本组最关键的断言** |
 | ④ 原「兜底发 OPS」 | 改为 **`test_rejected_silent_even_when_unroutable`**：路由拿不到负责同事时**同样零通知**，且 `add_error` 未被调用（仍不进错误队列） |
-| ⑤ 守卫 | 改为断言 `d.action == "skip"`、`d.tier == "WAY_B"`（**绝不是 `forward`**） |
+| ⑤ 守卫 | 改为断言 `d.action == "skip"`、`d.tier == "waybill_rejected"`（**绝不是 `forward`**） |
 | ⑥ 普通运单号回归 | **保持不变** |
 
 **新增 1 条**：`test_rejected_records_info_counter` —— 断言计数 `action_wayb_rejected_skipped` 有增长（**"静默"不等于"没痕迹"：必须能在计数和日志里看见**）。
@@ -108,7 +108,7 @@
 - ❌ **不发任何通知**（企微/邮件都不发）；**不留**新的待办项。
 - ❌ **不进错误队列、不记 ERROR**（这是上一批的成果，不能回退）。
 - ❌ **不转发给任何客户**。
-- ❌ 不删 `waybill_rejected` 字段、不删 `WAYBILL_REJECT_KEYWORD`、不删 `waybill.py` 的 WAY_B 分支（**识别能力要留**）。
+- ❌ 不删 `waybill_rejected` 字段、不删 `WAYBILL_REJECT_KEYWORD`、不删 `waybill.py` 的 waybill_rejected 分支（**识别能力要留**）。
 - ❌ 不动 `serve.py:201-207`（标已读）、不动 `draft.py`/草单逻辑、不动旧系统 `mailbots/`。
 
 ### 2.5 A 组验收判据 + 真锁
@@ -119,7 +119,7 @@
 3. `grep -rn "action_wayb_rejected_skipped" mailbots_next/ --include=*.py` 恰在 `serve.py` 出现 1 次（`increment_counter`）+ 测试内 1 次。
 
 **真锁（3 条，每条：撤改 → pytest 原始输出 → 还原 → md5 一致）**
-- **锁 1**：删掉 `serve.py` 的 WAY_B 早分流整块 ⇒ **至少 1 条挂**（会落回 `no_route` 错误队列路径）；
+- **锁 1**：删掉 `serve.py` 的 waybill_rejected 早分流整块 ⇒ **至少 1 条挂**（会落回 `no_route` 错误队列路径）；
 - **锁 2**：把 `decide_waybill` 的守卫改成直接 `return decide_draft(...)` ⇒ 用例⑤ **必挂**；
 - **锁 3**：把早分流里的 `return "rejected"` 换成 `return "manual"` ⇒ **至少 1 条挂**（若你认为这条锁不住，**说明原因**，不要静默跳过）。
 
@@ -172,6 +172,6 @@
 
 ## 5. 背景（供理解，不必回应）
 
-- 上一批把 WAY_B 做成了告警，依据是"**你 2026-07-30 拍板过『单证驳回单独告警』、且生产旧系统一直这么做**"（当时在同一份设计文档里还查到 8-26 写过"完全忽略"，两者冲突）。
+- 上一批把 waybill_rejected 做成了告警，依据是"**你 2026-07-30 拍板过『单证驳回单独告警』、且生产旧系统一直这么做**"（当时在同一份设计文档里还查到 8-26 写过"完全忽略"，两者冲突）。
 - **洋 2026-09-23 从业务角度重新判定**：渝新欧操作时会**直接与同事沟通**，所以企微提醒没有业务价值、反而是累赘 ⇒ **撤掉通知**。
 - 因此本批 = **"识别 + 静默跳过"**：既不再发通知，**也仍然不产生错误队列噪音**（后者是本轮真正的技术目标，不能回退）。

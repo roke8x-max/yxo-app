@@ -1,4 +1,4 @@
-"""WAY_B 单证审核驳回（2026-09-22）：全部用假数据，不打真企微、不发真信。"""
+"""waybill_rejected 单证审核驳回（2026-09-22）：全部用假数据，不打真企微、不发真信。"""
 import pytest
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -87,13 +87,13 @@ def test_rejected_sends_no_notification():
     assert proc.notifier.mock_calls == []
 
 
-def test_rejected_silent_even_when_unroutable():
-    """④ 路由拿不到负责同事时同样零通知，且不进错误队列。"""
+def test_rejected_silent_regardless_of_routing():
+    """④ 静默早分流位于 route_row 之前 ⇒ 与路由结果无关：同样零通知，不进错误队列。
+
+    （2026-09-23 改名：原名 test_rejected_silent_even_when_unroutable 隐含"路由先行"，
+    且原 route_row patch 在早分流之后永不生效，属死桩，已删；断言未动。）"""
     proc = _processor()
-    bad_route = RoutingResult(company="", responsible_person=None,
-                              to_list=[], cc_list=[], route_source="no_route", success=False)
-    with patch("mailbots_next.serve.route_row", return_value=bad_route), \
-         patch("mailbots_next.serve.add_error") as mock_err:
+    with patch("mailbots_next.serve.add_error") as mock_err:
         proc.process_email("t@t.com", "运单草单", "wayb-msg-3", 3,
                            REJECT_SUBJECT, REJECT_FROM, "", _reject_raw())
     assert proc.notifier.mock_calls == []
@@ -101,7 +101,7 @@ def test_rejected_silent_even_when_unroutable():
 
 
 def test_decide_guard_blocks_forward():
-    """⑤ 守卫独立生效：带编码 WAY_B 直接调 decide_waybill ⇒ skip（绝非 forward）。"""
+    """⑤ 守卫独立生效：带编码 waybill_rejected 直接调 decide_waybill ⇒ skip（绝非 forward）。"""
     from mailbots_next.core.decide import decide_waybill
     row = ExtractedRow(row_idx=0, email_type="waybill",
                        customer_code="CQWLJT260917002", customer_code_num="260917002",
@@ -112,7 +112,7 @@ def test_decide_guard_blocks_forward():
              "状态": "正常", "is_deleted": 0}]
     d = decide_waybill(row, ok_route, recs)
     assert d.action == "skip"
-    assert d.tier == "WAY_B"
+    assert d.tier == "waybill_rejected"
 
 
 def test_rejected_records_info_counter():

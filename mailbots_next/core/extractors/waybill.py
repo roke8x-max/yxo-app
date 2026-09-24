@@ -16,7 +16,7 @@ class WaybillExtractor(BaseExtractor):
         body = parsed["plain_body"] or parsed["html_body"] or ""
         attachments = parsed["attachments"]
 
-        # WAY_B 单证审核驳回：无附件、编码在正文。必须在附件分流之前。
+        # 单证审核驳回（waybill_rejected）：无附件、编码在正文。必须在附件分流之前。
         if WAYBILL_REJECT_KEYWORD in subject:
             code = None
             m = CODE_RE.search(body)

@@ -51,7 +51,7 @@ mailbots_next/
 
 ## 环境依赖
 
-- Python 3.10+
+- Python 3.11+
 - 依赖包：见 **`mailbots_next/requirements.txt`**（运行 `pip install -r mailbots_next/requirements.txt`）
 - 关键包：`xlrd`、`.xls/.xlsx` 解析用 `openpyxl`、`beautifulsoup4`（`bs4`）、`requests`（经旧 wecombot 链路）、**`xlwt`**（`act.py` 重写 `.xls` 时在用；曾在本文件里被错标"测试专用"）
 - 测试专用依赖：**`requirements-dev.txt`**（`pytest`、`trustme`）

@@ -1061,3 +1061,22 @@ class TestDraftCategories:
         )
         rows = extract_email(EmailType.DRAFT, raw)
         assert rows[0].draft_category in ("C1", "C2")
+
+
+class TestDraftCategoryEnum:
+    """DraftCategory 保守方案两道闸：值不变 + StrEnum 打印语义。"""
+
+    def test_draft_category_values_frozen(self):
+        """值一律保持历史字符串（老库 282 行对照）；后人改值必挂。"""
+        from mailbots_next.config import DraftCategory
+        assert DraftCategory.NEW.value == "A"
+        assert DraftCategory.UPDATE.value == "B"
+        assert DraftCategory.UPSTREAM_FEEDBACK.value == "C1"
+        assert DraftCategory.EXTERNAL_REPLY.value == "C2"
+        assert DraftCategory.OTHER.value == "OTHER"
+
+    def test_draft_category_strenum_prints_value(self):
+        """f-string/str() 直接输出值（决定用 StrEnum 而非 (str, Enum) 的实质）；换回必挂。"""
+        from mailbots_next.config import DraftCategory
+        assert f"{DraftCategory.NEW}" == "A"
+        assert str(DraftCategory.EXTERNAL_REPLY) == "C2"
