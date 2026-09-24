@@ -1054,6 +1054,18 @@ class TestDraftCategories:
         assert [e for e in get_pending_errors(100)
                 if e["message_id"] == "c2-msg-1"] == []
 
+    def test_draft_C2_manual_via_decide_direct(self):
+        """decide.py 的"留人工"早退必须自身被直接锁住：C2 行直调 decide ⇒ tier=MANUAL、action=skip。
+
+        2026-09-24 补：上一批删掉 test_draft_OTHER_unknown_category_skips 后，这条早退一度
+        无任何用例覆盖（把该分支中和掉，全量 323 条仍全绿 —— 已实测）。C2 是现在唯一
+        会走到这里的值；这条不是空跑，中和该分支时它必挂。"""
+        row = _tier_row("CQWLJT260810001", "CICU1000001", category="C2")
+        recs = [_tier_rec("CQWLJT260810001", "CICU1000001")]
+        ok = RoutingResult("太平洋", "m@x.com", ["t@x.com"], [], "full_match", True)
+        d = decide(EmailType.DRAFT, row, ok, recs)
+        assert (d.tier, d.action) == ("MANUAL", "skip")
+
     def test_draft_subject_with_waybill_keyword_no_longer_yields_W(self):
         """主题含运单号 + 非白名单发件人 + 附件名含"箱号" ⇒ 落 C1/C2（不再有 W）。"""
         _, raw = _draft_mail(
