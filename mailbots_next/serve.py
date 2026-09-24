@@ -18,6 +18,7 @@ from mailbots_next.config import (
     DEFAULT_ACCOUNTS,
     IDLE_GROUPS,
     INGEST_POLL_SEC,
+    NON_AUTO_DRAFT_CATEGORIES,
     INBOUND_PORT,
     INBOUND_SHARED_SECRET,
     OPS_OWNER_EMAIL,
@@ -298,7 +299,7 @@ class MailProcessor:
 
         # Manual categories leave it to humans: skip before routing so
         # they never enter the error queue (留人工，不标已读).
-        if getattr(row, "draft_category", None) in ("C2", "W", "OTHER"):
+        if getattr(row, "draft_category", None) in NON_AUTO_DRAFT_CATEGORIES:
             _log.info(
                 f"Manual skip | msg_id={message_id[:50]} | row={row.row_idx} | "
                 f"category={row.draft_category} | left unread for humans"

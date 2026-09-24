@@ -97,7 +97,7 @@
 
 | 业务域 | 干什么 | 代码落点 | 数据落点 | 参考文档 |
 |---|---|---|---|---|
-| **草单** | A原始 / C1问题 / C2确认 / W运单号 分类；客编 + 箱号提取；转发或转待确认 | `mailbots_next/core/extractors/draft.py`；旧 `mailbots/Draft_Forward_Robot.py` + `draft_pending.py` | 读 `yxo.db.records` | `草单转发规则稿_v3.1_全量验证修正.md`；**B「更新草单」已移除**（恒判 A，见 `mailbots_next/README.md` 技术债 X4） |
+| **草单** | A原始 / C1问题 / C2确认 分类；客编 + 箱号提取；转发或转待确认 | `mailbots_next/core/extractors/draft.py`；旧 `mailbots/Draft_Forward_Robot.py` + `draft_pending.py` | 读 `yxo.db.records` | `草单转发规则稿_v3.1_全量验证修正.md`；**B「更新草单」已移除**（恒判 A，见 `mailbots_next/README.md` 技术债 X4） |
 | **运单号** | 按外部公司**拆分转发**（小 xls + 正文） | `extractors/waybill.py` | `bot_config.db.forward_log` | `运单号草单_匹配四档判定补全规范.md` |
 | **运踪** | 班列号 + 箱号；xls 附件解析；按公司**整封副本** | `extractors/tracing.py` + `tracing_xls.py` | `yxo.db.tracing_log` | |
 | **DSK** | 箱号提取（附件名主源 + HTML 表格辅助）；HTML 行裁剪 | `extractors/dsk.py` | 回写 `yxo.db.records.dsk` | |

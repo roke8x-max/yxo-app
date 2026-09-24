@@ -1054,9 +1054,10 @@ class TestDraftCategories:
         assert [e for e in get_pending_errors(100)
                 if e["message_id"] == "c2-msg-1"] == []
 
-    def test_draft_OTHER_unknown_category_skips(self):
-        row = _tier_row("CQWLJT260810001", "CICU1000001", category="OTHER")
-        recs = [_tier_rec("CQWLJT260810001", "CICU1000001")]
-        ok = RoutingResult("太平洋", "m@x.com", ["t@x.com"], [], "full_match", True)
-        d = decide(EmailType.DRAFT, row, ok, recs)
-        assert (d.tier, d.action) == ("MANUAL", "skip")
+    def test_draft_subject_with_waybill_keyword_no_longer_yields_W(self):
+        """主题含运单号 + 非白名单发件人 + 附件名含"箱号" ⇒ 落 C1/C2（不再有 W）。"""
+        _, raw = _draft_mail(
+            "关于运单号的咨询", "customer@gmail.com", ["箱号说明.txt"], body="收到",
+        )
+        rows = extract_email(EmailType.DRAFT, raw)
+        assert rows[0].draft_category in ("C1", "C2")

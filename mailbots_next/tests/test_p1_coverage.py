@@ -616,14 +616,14 @@ class TestMarkSeen:
         mock_cls.assert_not_called()
 
     def test_manual_rows_exempt_from_mark_seen(self, monkeypatch):
-        """C2/W/OTHER 留人工行 → 即使 live 也不标已读."""
+        """C2 留人工行 → 即使 live 也不标已读."""
         monkeypatch.setenv("MAILBOT_MODE", "live")
         proc = _harness([_rec("CQWLJT260810001", "CICU1000001")])
         rows = [
             ExtractedRow(row_idx=i, email_type=EmailType.DRAFT,
                          customer_code=None, container_no=None,
                          draft_category=cat)
-            for i, cat in enumerate(("C2", "W", "OTHER"))
+            for i, cat in enumerate(("C2",))
         ]
         with patch("mailbots_next.serve.extract_email", return_value=rows), \
              patch("mailbots_next.serve.mark_seen") as mock_mark, \

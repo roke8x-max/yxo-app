@@ -70,7 +70,11 @@ TYPE_ROUTES = [
     },
 ]
 
-DRAFT_CATEGORIES = ["A", "B", "C1", "C2", "OTHER"]
+# 需要"留人工"的草单分类：不自动转发、不进错误队列、不标已读。
+# 2026-09-23 收敛：原全量分类表（五个历史字符串，注意 W 从来不在其中）已删
+# （删掉死值后零消费者，且原名会让人误以为它是"所有分类"）；
+# 原三处各写一遍的留人工元组（draft.py／decide.py／serve.py）收敛到这里。
+NON_AUTO_DRAFT_CATEGORIES = ("C2",)
 
 ENC_PDF_RE = re.compile(r'^[A-Z]{4}\d{7}-\d{6}-\d{6}已加密\.pdf$', re.I)
 BOX_PDF_RE = re.compile(r'^[A-Z]{4}\d{7}\.pdf$', re.I)
