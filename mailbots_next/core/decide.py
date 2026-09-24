@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from ..config import EmailType, CODE_NUM_RE
+from ..config import EmailType, CODE_NUM_RE, NON_AUTO_DRAFT_CATEGORIES
 from .log import get_logger
 
 _log = get_logger(__name__)
@@ -31,7 +31,7 @@ class Decision:
 
 
 def decide_draft(row, routing, records) -> Decision:
-    if row.draft_category in ("C2", "W", "OTHER"):
+    if row.draft_category in NON_AUTO_DRAFT_CATEGORIES:
         return Decision("MANUAL", "skip", f"Non-auto category: {row.draft_category}")
 
     code = row.customer_code or ""

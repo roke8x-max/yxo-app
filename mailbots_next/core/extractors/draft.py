@@ -10,7 +10,7 @@ from mailbots_next.config import (
     CODE_NUM_RE,
     CONTAINER_RE,
     YXO_DOMAIN,
-    DRAFT_CATEGORIES,
+    NON_AUTO_DRAFT_CATEGORIES,
 )
 from mailbots_next.core.extract import BaseExtractor, ExtractedRow, parse_email
 from mailbots_next.core.log import get_logger
@@ -32,13 +32,11 @@ class DraftExtractor(BaseExtractor):
         if is_draft:
             # 台账已移除（2026-09-21）；恒 A = 永不误标；重新启用需按 README 技术债 X4 的三项前置单独立项。
             category = "A"
-        elif "运单号" in subject:
-            category = "W"
         else:
             domain = sender.split("@")[-1].lower() if "@" in sender else ""
             category = "C1" if domain == YXO_DOMAIN else "C2"
 
-        if category in ("C2", "W", "OTHER") or category not in DRAFT_CATEGORIES:
+        if category in NON_AUTO_DRAFT_CATEGORIES:
             _log = __import__("mailbots_next.core.log", fromlist=["get_logger"]).get_logger(__name__)
             _log.log_manual_category(msg.get("Message-ID", "")[:50], category, f"Non-auto category: {category}")
 
