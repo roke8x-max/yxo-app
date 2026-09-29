@@ -1,10 +1,8 @@
 # 权限与隔离模块设计（内部简化版 · RBAC + 服务端 Session）
 
-> ⚠️ 设计稿 · 未落码（2026-09-24 归档）：本文是设计阶段产物，代码尚未实现。
-> 归档目的是保留“设计意图”供将来参考；看到本文不代表相关模块已落码。
-
 - **日期**：2026-09-21
-- **状态**：设计定稿 v2.4（v2.3 基础上：补 2 处落码必崩问题——① §6.1 第二层加 `request.url_rule is None → return`（防 500 替代 404）+ 显式放行 `endpoint=='static'`（防 CSS/JS 被 403 与 §6.3 自检误杀）；② §6.3 自检跳过 static endpoint；顺手精简 §6.1 第一层豁免清单、§14 补「前端不显示 admin 入口」），待 OpenCode 落码、芙蕾雅验收
+- **状态**：**已正式发出（2026-09-28）为落码任务书** —— §16 即给 OpenCode 的执行单（自包含）。落码：OpenCode；验收：芙蕾雅。设计演进 v2.0→v2.4 已归档于协作记录，本文不再保留「归档 / 仅参考」性质说明。
+- **版本**：v2.5 终审（v2.4 基础上：① §7.1 把 `/api/state` 的 GET/POST 拆成两行独立登记，避免 `ROUTE_PERMISSIONS` 键歧义；② §6.1 第二层显式「未登记」判定——模块加载预构建 `ROUTE_PERMISSIONS_SET`，`if (method, rule) not in ROUTE_PERMISSIONS_SET: return 403`，语义不再靠猜。两处均为 ds 终评小瑕疵，不阻塞，落码前已钉。本版即为正式发出任务书终版。）
 - **范围决策来源**：洋拍板「内部简化版」（**ds 仅为第三方评审建议，最终决策以洋为准**；本版已按洋决策**加回访客角色**、§9 加反向依赖硬约束、§7 改「不靠猜、按写入表定」）
 - **作者**：芙蕾雅（Freya）｜**落码**：OpenCode｜**验收**：芙蕾雅
 - **关联文档**：
@@ -184,10 +182,11 @@ yxo-app/
 - **前置兜底（防 500 / 防静态资源被误杀，必须先于查表）**：
   1. `if request.url_rule is None: return` —— 若请求未匹配任何路由（如 `/nonexistent`）时 `request.url_rule` 为 `None`，直接 `.rule` 会抛 `AttributeError` → 500 而非 404；判空后交回 Flask 走原生 404。（防御性写法，零成本覆盖自定义 404 / 边界路径。）
   2. `if request.endpoint == 'static': return` —— Flask 的 `/static/<path:filename>` 会出现在 `app.url_map` 但**不在 §7 登记表**；若让其走查表，会因「未登记 → 403」把 CSS/JS 拦成页面裸奔，也会让 §6.3 自检在 DEBUG 下误杀退出。静态资源是框架级路由，不该进业务权限表，故此处显式放行（§6.3 自检同步跳过 `static` endpoint）。
-- 对每个请求，按 `request.url_rule.rule`（**含 `<rid>` 占位符的规则串，不是实际 URL 字符串**；例：`/api/row/123` 必须用 `request.url_rule.rule == "/api/row/<rid>"` 查表）查 `ROUTE_PERMISSIONS[method][rule]`：
+- 对每个请求，按 `request.url_rule.rule`（**含 `<rid>` 占位符的规则串，不是实际 URL 字符串**；例：`/api/row/123` 必须用 `request.url_rule.rule == "/api/row/<rid>"` 查表）查 `ROUTE_PERMISSIONS[method][rule]`。模块加载时**预先构建一次**集合 `ROUTE_PERMISSIONS_SET = {(m, r) for m, d in ROUTE_PERMISSIONS.items() for r in d}`（即所有「已登记 (方法, 规则) 对」），供未登记判定使用：
+  - **先判未登记（默认拒绝安全网）**：`if (method, rule) not in ROUTE_PERMISSIONS_SET: return 403`（记审计「未授权/越权访问」）。任何漏登的 `/api` 路由都不会被半保护放行；该判定独立于下面对 `public / authenticated / 具体权限` 的取值，保证「表外即拒绝」语义明确、不靠猜。
   - **`public`** → 直接放行，不要求登录。用于：`/api/csrf`、`/api/version`、`/api/login`，以及**所有页面 HTML 路由 `/`、`/tuoshu`、`/manifest`、`/admin`**（见下「页面路由处理」）。
   - **`authenticated`** → 要求已登录（解析 session 注入 `g.identity`）；未登录 → **401 JSON**（前端拦截弹 modal）。
-  - **具体权限（如 `record:read`）** → 要求已登录且持有该权限；未登录 → 401；已登录缺权限 → 403（审计「越权访问」）；**未登记 → 403 + 日志（默认拒绝安全网）**。
+  - **具体权限（如 `record:read`）** → 要求已登录且持有该权限；未登录 → 401；已登录缺权限 → 403（审计「越权访问」）。（已登记的 `public/authenticated/具体权限` 取值均经由上方 `ROUTE_PERMISSIONS_SET` 命中，故「未登记」分支已在首步统一拦截，此处无需重复判空。）
 - **页面路由处理（关键，防 v2.1 同类自锁）**：`/`、`/tuoshu`、`/manifest`、`/admin` 在表中标 `public`，**不拦截、不返 401**——直接返回 HTML。页面照常加载后，前端 JS 调 `/api/meta`：401（未登录）则弹登录 modal，200 则按返回 `permissions` 隐藏无权入口。**若本层对页面路由也返 401 JSON，浏览器只拿到 `{"error":"unauthorized"}`、JS 无机会执行、modal 永远弹不出，登录入口被自锁。故页面 HTML 路由一律公开，权限完全在 API 层强制。**
 
 > 关键：`/api/login` 标 `public` 但仍过第一层 CSRF——登录前 `GET /api/csrf` 取 token → `POST /api/login` 带 token → 通过（否则永远登不进）。所有 `/api/*` 非白名单请求默认拒绝（未登记 → 403）。开发阶段先把 §7.1/§7.2/§7.4 全部路由登记完 + §6.3 启动自检（覆盖全部需权限路由，含页面路由，不仅 /api/*）通过再上线。
@@ -248,7 +247,8 @@ yxo-app/
 | `/api/manifest/batch/<id>` | GET | `manifest:import` | |
 | `/api/manifest/revert` | POST | `manifest:apply` | |
 | `/api/manifest/restore` | POST | `manifest:apply` | |
-| `/api/state` | GET/POST | authenticated | 个人筛选状态 |
+| `/api/state` | GET | authenticated | 个人筛选状态 |
+| `/api/state` | POST | authenticated | 个人筛选状态 |
 
 ### 7.2 admin_api.py（`url_prefix` 见 `app.py:36` 注册，路径前缀 `/api/admin`）
 
