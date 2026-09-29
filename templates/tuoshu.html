@@ -155,10 +155,22 @@
 </main>
 
 <script>
-const STORE_KEY = "yxo_user";
-const TUOSHU_ADMINS = ["毛骁洋", "杨雅雯"];
+const TUOSHU_ADMINS = ["毛骁洋", "杨雅雯"];  // 仅历史文案用，真闸门在服务端（tuoshu:generate）
 let USER = "";
 let GROUPS = [];
+let CSRF_TOKEN = "";
+const _origFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  opts = opts || {};
+  opts.credentials = "same-origin";
+  const method = (opts.method || "GET").toUpperCase();
+  opts.headers = opts.headers || {};
+  const sameOrigin = typeof url === "string" && !/^https?:\/\//i.test(url);
+  if (sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
+    opts.headers["X-CSRF-Token"] = CSRF_TOKEN;
+  }
+  return _origFetch(url, opts);
+};
 
 function esc(s){ const d=document.createElement("div"); d.textContent = s==null?"":String(s); return d.innerHTML; }
 function $(id){ return document.getElementById(id); }
@@ -173,49 +185,29 @@ function enterPage(u){
   loadMeta();
 }
 
-// 身份闸门：URL 带 ?user= 且在名单内 → 无感进入；否则给出选择/拒绝
-function showGate(){
+// 身份：服务端 session 判定（不再有「我是」选择 / ?user=）；未登录回首页登录
+function showDenied(who) {
   const box = $("denied");
   box.classList.remove("hidden");
-  const remembered = localStorage.getItem(STORE_KEY) || "";
-  if (remembered && !TUOSHU_ADMINS.includes(remembered)) {
-    box.innerHTML = '<p style="font-size:15px">当前身份 <b>'+esc(remembered)+'</b> 无权使用托书生成。</p>'
-                  + '<p class="muted">该功能仅限：'+TUOSHU_ADMINS.join("、")+'</p>'
-                  + '<p><a href="./">← 返回订舱系统</a></p>';
-    return;
-  }
-  box.innerHTML = '<p style="margin:0 0 12px">请选择你的身份：</p><div id="gateCards"></div>';
-  const wrap = $("gateCards");
-  TUOSHU_ADMINS.forEach(u => {
-    const isRem = (u === remembered);
-    const card = document.createElement("div");
-    card.style.cssText = "display:inline-block;min-width:120px;margin:6px;padding:14px 18px;border:1px solid "+(isRem?"#0f6e56":"#cbd5e1")+";border-radius:10px;cursor:pointer;text-align:center;background:"+(isRem?"#eafaf4":"#fff")+";vertical-align:top";
-    card.innerHTML = '<div style="font-size:22px;font-weight:700;margin-bottom:6px">'+esc(u.slice(0,1))+'</div>'
-                   + '<div style="font-weight:600">'+esc(u)+'</div>'
-                   + '<div style="font-size:12px;color:#64748b;margin-top:4px">'+(isRem?"上次选择 ✓ 点击确认":"点击以该身份进入")+'</div>';
-    card.onclick = () => {
-      localStorage.setItem(STORE_KEY, u);
-      const url = new URL(location.href);
-      url.searchParams.set("user", u);
-      history.replaceState(null, "", url);
-      enterPage(u);
-    };
-    wrap.appendChild(card);
-  });
+  box.innerHTML = '<p style="font-size:15px">当前身份 <b>' + esc(who || "") + '</b> 无权使用托书生成。</p>'
+                + '<p class="muted">需要 tuoshu:generate 权限（服务端判定）</p>'
+                + '<p><a href="./">← 返回订舱系统</a></p>';
 }
-
-const urlUser = new URLSearchParams(location.search).get("user");
-if (urlUser && TUOSHU_ADMINS.includes(urlUser)) {
-  localStorage.setItem(STORE_KEY, urlUser);
-  enterPage(urlUser);
-} else {
-  showGate();
-}
+_origFetch("api/csrf", { credentials: "same-origin" }).then((r) => r.json()).then((j) => {
+  CSRF_TOKEN = j.csrf_token || "";
+  return _origFetch("api/auth_meta", { credentials: "same-origin" });
+}).then((r) => {
+  if (!r || r.status === 401) { location.href = "./"; return null; }
+  return r.json();
+}).then((m) => {
+  if (!m) return;
+  if (!(m.permissions || []).includes("tuoshu:generate")) { showDenied(m.username); return; }
+  enterPage(m.username);
+});
 
 function payload(){
   const nos = $("trainNos").value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);
   return {
-    user: USER,
     date_from: $("dateFrom").value,
     date_to: $("dateTo").value,
     train_type: $("trainType").value,
@@ -227,7 +219,7 @@ function payload(){
 }
 
 function loadMeta(){
-  fetch("api/tuoshu/meta?user=" + encodeURIComponent(USER))
+  fetch("api/tuoshu/meta")
     .then(r => r.json())
     .then(d => {
       if (!d.ok) { $("msg").innerHTML = '<span class="bad">'+esc(d.msg||"加载失败")+'</span>'; return; }
@@ -387,7 +379,7 @@ $("btnMap").onclick = () => {
 };
 
 function loadMap(){
-  fetch("api/tuoshu/dest_map?user=" + encodeURIComponent(USER))
+  fetch("api/tuoshu/dest_map")
     .then(r => r.json()).then(d => {
       if (!d.ok) { $("mapMsg").innerHTML = '<span class="bad">'+esc(d.msg||"加载失败")+'</span>'; return; }
       window.__mapRows = d.rows || [];
@@ -419,7 +411,7 @@ $("mapBody").addEventListener("click", e => {
   } else if (del) {
     if (confirm("确认删除映射「"+del+"」？")) {
       fetch("api/tuoshu/dest_map", {method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({user:USER, station_cn:del, _delete:true})})
+        body: JSON.stringify({station_cn:del, _delete:true})})
         .then(r=>r.json()).then(()=>loadMap());
     }
   }
@@ -433,7 +425,7 @@ $("mapUnresolved").addEventListener("click", e => {
 $("btnMapSave").onclick = () => {
   const station = $("mStation").value.trim();
   if (!station) { $("mapMsg").innerHTML = '<span class="bad">目的站(中文)不能为空</span>'; return; }
-  const body = { user: USER, station_cn: station, en_name: $("mEn").value.trim(),
+  const body = { station_cn: station, en_name: $("mEn").value.trim(),
                  country: $("mCountry").value.trim(), alias: $("mAlias").value.trim() };
   $("mapMsg").textContent = "保存中…";
   fetch("api/tuoshu/dest_map", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)})

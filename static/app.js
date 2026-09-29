@@ -1,6 +1,77 @@
 /* YXO 订舱数据管理 · 前端逻辑 */
 "use strict";
 
+/* ---------- 登录认证基座（2026-09-28 RBAC，spec §13） ----------
+   身份来自服务端 session（/api/auth_meta），不再有「我是」下拉与 localStorage USER。
+   所有 fetch 自动带 credentials + X-CSRF-Token；401（非登录接口）→ 弹登录层。 */
+let IDENTITY = { username: "", role: "", permissions: [], scope: { type: "none", companies: [] } };
+let CSRF_TOKEN = "";
+let _loginBound = false;
+function hasPerm(p) { return (IDENTITY.permissions || []).includes(p); }
+const _origFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  opts = opts || {};
+  opts.credentials = "same-origin";
+  const method = (opts.method || "GET").toUpperCase();
+  const sameOrigin = typeof url === "string" && !/^https?:\/\//i.test(url);
+  opts.headers = opts.headers || {};
+  if (sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
+    opts.headers["X-CSRF-Token"] = CSRF_TOKEN;
+  }
+  return _origFetch(url, opts).then((r) => {
+    if (r.status === 401 && sameOrigin && typeof url === "string"
+        && url.indexOf("api/login") < 0 && url.indexOf("api/auth_meta") < 0) {
+      showLoginModal();
+    }
+    return r;
+  });
+};
+function apiCSRF() {
+  return _origFetch("api/csrf", { credentials: "same-origin" }).then((r) => r.json())
+    .then((j) => { CSRF_TOKEN = j.csrf_token || ""; return j; });
+}
+function apiAuthMeta() {
+  return fetch("api/auth_meta").then((r) => {
+    if (r.status === 401) return null;
+    return r.json();
+  }).catch(() => null);
+}
+function showLoginModal(msg) {
+  const m = document.getElementById("loginModal");
+  if (!m) return;
+  m.classList.remove("hidden");
+  const e = document.getElementById("loginErr");
+  if (e && msg) e.textContent = msg;
+  if (!_loginBound) {
+    _loginBound = true;
+    const go = () => {
+      const u = (document.getElementById("loginUser") || {}).value || "";
+      const p = (document.getElementById("loginPass") || {}).value || "";
+      const rm = ((document.getElementById("loginRemember") || {}).checked) || false;
+      fetch("api/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, password: p, remember_me: rm }),
+      }).then((r) => r.json().then((j) => ({ status: r.status, body: j }))).then(({ status, body }) => {
+        if (status === 200 && body.ok) { location.reload(); }
+        else {
+          const e2 = document.getElementById("loginErr");
+          if (e2) e2.textContent = "登录失败: " + (body.msg || status);
+        }
+      }).catch(() => {
+        const e2 = document.getElementById("loginErr");
+        if (e2) e2.textContent = "登录失败(网络)";
+      });
+    };
+    const btn = document.getElementById("loginGo");
+    if (btn) btn.onclick = go;
+    const pw = document.getElementById("loginPass");
+    if (pw) pw.addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
+  }
+}
+function doLogout() {
+  fetch("api/logout", { method: "POST" }).then(() => location.reload()).catch(() => location.reload());
+}
+
 let META = { columns: [], users: [], company_field: "", groupable: [], followup_fields: [] };
 let DATA = [];
 let USER = "";
@@ -579,7 +650,7 @@ function saveStateSoon() {
 function saveState() {
   fetch("api/state", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user: USER, state: STATE }),
+    body: JSON.stringify({ state: STATE }),
   }).catch(() => {});
 }
 
@@ -679,11 +750,9 @@ function buildStatic() {
     fr.appendChild(fth);
   });
 
-  // 用户下拉
-  const us = document.getElementById("userSel"); us.innerHTML = "";
-  META.users.forEach((u) => us.appendChild(el("option", { value: u, text: u })));
-  us.value = USER;
-  us.onchange = () => { USER = us.value; localStorage.setItem("yxo_user", USER); loadUserState().then(renderAll); };
+  // 当前用户显示（身份由服务端 session 判定，不可切换）
+  const ul = document.getElementById("userLabel");
+  if (ul) ul.textContent = USER + (IDENTITY.role ? "（" + IDENTITY.role + "）" : "");
 
   // 公司弹层列表
   const cl = document.getElementById("companyList"); cl.innerHTML = "";
@@ -1149,8 +1218,11 @@ function flushPending() {
   });
   if (!edits.length) return;
   try {
-    const blob = new Blob([JSON.stringify({ user: USER, edits })], { type: "application/json" });
-    navigator.sendBeacon("api/cells", blob);
+    // sendBeacon 不能带自定请求头，过不了 CSRF；改用 keepalive fetch（包装器自动加 CSRF）
+    fetch("api/cells", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ edits }), keepalive: true,
+    }).catch(() => {});
   } catch (_) { /* 兜底失败也无能为力，正常 blur 保存已覆盖绝大多数情况 */ }
 }
 window.addEventListener("beforeunload", flushPending);
@@ -1162,7 +1234,7 @@ function saveCell(id, field, val) {
   markPending(id, field, val);
   fetch("api/row/" + id, {
     method: "PATCH", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ field, value: val, user: USER }),
+    body: JSON.stringify({ field, value: val }),
   }).then((r) => r.json()).then((j) => {
     if (j.ok) {
       clearPending(id, field);
@@ -1504,7 +1576,7 @@ function loadRows(keepNew) {
   return fetch("api/rows").then((r) => r.json()).then((rows) => { DATA = rows; });
 }
 function loadUserState() {
-  return fetch("api/state?user=" + encodeURIComponent(USER)).then((r) => r.json()).then((j) => {
+  return fetch("api/state").then((r) => r.json()).then((j) => {
     const s = j.state || {};
     STATE = Object.assign({
       view: "grid", search: "", company: [], filters: {}, contains: {},
@@ -1559,7 +1631,7 @@ function insertRow(position, refId) {
 }
 function deleteRow(id) {
   if (!confirm("确定删除这条记录吗？\n删除后会进入回收站（系统管理 → 回收站），可随时恢复。")) return;
-  fetch("api/row/" + id + "?user=" + encodeURIComponent(USER), { method: "DELETE" }).then((r) => r.json()).then((j) => {
+  fetch("api/row/" + id, { method: "DELETE" }).then((r) => r.json()).then((j) => {
     if (j.ok) { DATA = DATA.filter((x) => x.id !== id); renderAll(); toast("已移入回收站"); }
     else toast("删除失败");
   }).catch(() => toast("删除失败(网络)"));
@@ -1570,7 +1642,7 @@ async function deleteRows(ids) {
   if (!confirm(`确定删除选中的 ${ids.length} 条记录吗？\n删除后进入回收站（系统管理 → 回收站），可随时恢复。`)) return;
   let ok = 0, fail = 0;
   await Promise.all(ids.map((id) =>
-    fetch("api/row/" + id + "?user=" + encodeURIComponent(USER), { method: "DELETE" })
+    fetch("api/row/" + id, { method: "DELETE" })
       .then((r) => r.json()).then((j) => { if (j.ok) { ok++; DATA = DATA.filter((x) => x.id !== id); } else fail++; })
       .catch(() => fail++)
   ));
@@ -1938,7 +2010,7 @@ function undo() {
     const edits = op.edits.map((e) => ({ id: e.id, field: e.field, value: e.oldValue }));
     fetch("api/cells", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: USER, edits }),
+      body: JSON.stringify({ edits }),
     }).then((r) => r.json()).then((j) => {
       if (j.ok) {
         edits.forEach((e) => {
@@ -1953,7 +2025,7 @@ function undo() {
     // 单行保存 / 单行粘贴 / 整行粘贴的撤销：把该格恢复为旧值
     fetch("api/row/" + op.id, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ field: op.field, value: op.oldValue, user: USER }),
+      body: JSON.stringify({ field: op.field, value: op.oldValue }),
     }).then((r) => r.json()).then((j) => {
       if (j.ok) {
         const rec = DATA.find((x) => x.id === op.id);
@@ -2386,49 +2458,26 @@ function enterApp() {
     document.querySelectorAll("#trainTypeSeg .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.type === STATE.trainType));
     toggleBulkBar();
     syncVersion();
-    // 系统管理入口：毛骁洋 全权；杨雅雯/冯茜/韩文豪 受限（仅价格维护/选项维护/回收站）。服务端接口另有权限校验，前端只是隐藏入口。
-    const LIMITED_ADMINS = ["杨雅雯","冯茜","韩文豪"];
-    document.getElementById("adminBtn").classList.toggle("hidden", !(USER === "毛骁洋" || LIMITED_ADMINS.includes(USER)));
-    // 托书生成入口：独立分组，仅毛骁洋/杨雅雯（服务端 config.TUOSHU_ADMINS 另有校验，前端只隐藏入口）
-    const TUOSHU_ADMINS = ["毛骁洋","杨雅雯"];
+    // 入口显隐按服务端下发的 permissions（仅 UI 友好，真闸门在服务端）
+    document.getElementById("adminBtn").classList.toggle("hidden", !hasPerm("admin:view"));
     const tsBtn = document.getElementById("tuoshuBtn");
-    if (tsBtn) tsBtn.classList.toggle("hidden", !TUOSHU_ADMINS.includes(USER));
-    // 舱单导入入口：仅 config.MANIFEST_ADMIN（毛骁洋），服务端另有校验，前端只隐藏入口
-    const MANIFEST_ADMINS = (META && META.manifest_admins) || ["毛骁洋"];
+    if (tsBtn) tsBtn.classList.toggle("hidden", !hasPerm("tuoshu:generate"));
     const mfBtn = document.getElementById("manifestBtn");
-    if (mfBtn) mfBtn.classList.toggle("hidden", !MANIFEST_ADMINS.includes(USER));
+    if (mfBtn) mfBtn.classList.toggle("hidden", !hasPerm("manifest:import"));
+    const loBtn = document.getElementById("logoutBtn");
+    if (loBtn) loBtn.onclick = doLogout;
     setInterval(pollRemoteChanges, 4000);   // 每 4 秒检查他人改动（同 WPS 在线协同）
   });
 }
-/* 账户选择界面：首次进入 / 无 user 时显示；也可通过 ?user=姓名 无感进入 */
-function showUserGate() {
-  const gate = document.getElementById("userGate");
-  const wrap = document.getElementById("gateCards"); wrap.innerHTML = "";
-  META.users.forEach((u) => {
-    const card = el("div", { class: "gate-card" },
-      el("div", { class: "gate-avatar", text: u.slice(0, 1) }),
-      el("div", { class: "gate-name", text: u }),
-      el("div", { class: "gate-sub", text: "点击以该身份进入" }));
-    card.onclick = () => {
-      USER = u; localStorage.setItem("yxo_user", u);
-      gate.classList.add("hidden");
-      enterApp();
-    };
-    wrap.appendChild(card);
-  });
-  gate.classList.remove("hidden");
-}
 function init() {
-  loadMeta().then(loadRows).then(() => {
-    const urlUser = new URLSearchParams(location.search).get("user");
-    // 1) URL ?user=xxx 无感进入；2) 否则用 localStorage 记住的上次选择；3) 都没有则显示选择界面
-    if (urlUser && META.users.includes(urlUser)) {
-      USER = urlUser; localStorage.setItem("yxo_user", USER); enterApp();
-    } else {
-      USER = localStorage.getItem("yxo_user") || "";
-      if (USER && META.users.includes(USER)) enterApp();
-      else showUserGate();
-    }
+  loadMeta().then(apiCSRF).then(apiAuthMeta).then((meta) => {
+    if (!meta || !meta.ok) { showLoginModal(); return; }  // 未登录 → 登录层
+    IDENTITY = {
+      username: meta.username || "", role: meta.role || "",
+      permissions: meta.permissions || [], scope: meta.scope || { type: "none", companies: [] },
+    };
+    USER = IDENTITY.username;
+    loadRows().then(() => enterApp());
   });
 
   // 工具条
@@ -2515,7 +2564,7 @@ function init() {
       "2. 排序：点列名可升/降序切换；按住 Shift 点多个列可叠加多条件（如先时间升序、再客编升序）。也可点“⇅ 排序”按钮在面板里增删条件。\n" +
       "3. 新增/删除：表格里右键某一行，可选“在上方/下方插入”“在末尾新增”“删除此行”；也可用工具栏“＋ 新增行”。\n" +
       "4. 公司：点“公司”可多选，满足一人看多家客户。\n" +
-      "5. 个人：右上“我是”选自己，筛选/看板标签只属于你，不影响他人。\n" +
+      "5. 个人：登录身份由服务端判定（右上显示当前用户），筛选/看板标签只属于你，不影响他人。\n" +
       "6. 看板：选分组字段生成列；点“＋新建标签”把某个条件存成标签栏，可✎编辑、×关闭。\n" +
       "7. 月份标签：工具条下方自动按“发班时间”分月，默认打开当前月，点“全部”看全部。\n" +
       "8. 统计：按当前筛选汇总单价（合计/平均/按公司/按月）。\n" +

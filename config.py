@@ -17,8 +17,8 @@ PORT = 5011
 
 # 时间戳回写接口（/api/stamp）校验令牌：经 nginx 公网暴露时防滥用。
 # 生产值请写到 config_local.py（不入库）覆盖，或设环境变量 YXSTAMP_TOKEN。
-# 下面的默认值是本地开发占位，仅本机可用，切勿用于生产公网环境。
-STAMP_TOKEN = os.environ.get("YXSTAMP_TOKEN", "yxo_stamp_local_2026")
+# 无弱默认：缺 env 即 None，生产缺失由 init_auth 拒启（B 工单），函数体 not 短路返 403。
+STAMP_TOKEN = os.environ.get("YXSTAMP_TOKEN")
 
 # Excel 数据源（首次启动 / 点"导入"时读取）
 IMPORT_FILE = r"D:\YXO_DATA\output\八月记录汇总.xlsx"
@@ -144,6 +144,19 @@ WECOM_USER_MAP = {
     "BanXian": "冯茜",
     "HanWenHao": "韩文豪",
 }
+
+# ==================== 权限认证（2026-09-28 内部简化版 RBAC）====================
+# 设计见 docs/superpowers/specs/2026-09-21-permission-rbac-module-design.md
+# auth.db 独立于 yxo.db（yxo.db 严格只读不动结构）。初始口令绝不写这里，
+# 仅从环境变量读（见 auth/schema.py），缺失时 seed 用开发占位口令并 WARNING。
+AUTH_DB_PATH = os.environ.get("YXO_AUTH_DB", os.path.join(DATA_DIR, "auth.db"))
+# CSRF/会话签名的密钥：生产必须设 YXO_AUTH_SECRET（任意长随机串）；
+# 为空时 init_auth 生成进程内随机值并 WARNING（重启后旧 CSRF token 失效，session 不受影响）。
+AUTH_SECRET_KEY = os.environ.get("YXO_AUTH_SECRET", "")
+AUTH_SESSION_HOURS = int(os.environ.get("YXO_AUTH_SESSION_HOURS", "12"))
+AUTH_REMEMBER_DAYS = int(os.environ.get("YXO_AUTH_REMEMBER_DAYS", "30"))
+AUTH_MAX_FAILS = 5          # 连续失败 N 次锁定（spec §5.4）
+AUTH_LOCK_MINUTES = 15
 
 # real name -> managed company keywords (substring match on 开票子公司名称)
 USER_COMPANIES = {

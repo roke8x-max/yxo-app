@@ -157,12 +157,18 @@ SERVICES = [
 # 其存活状态改由导航页 /index 以"状态卡片"展示（轮询 /api/service_status），链接不对外。
 
 
-# ====================== 权限 ======================
+# ====================== 权限（2026-09-28 RBAC：服务端基于角色，不再信任客户端 user） ======================
 def _check_user(allow_limited=False):
-    u = request.args.get("user") or (request.get_json(silent=True) or {}).get("user", "")
+    from flask import g
+    ident = getattr(g, "identity", None)
+    if ident is None:
+        return False
+    perms = ident.permissions or []
     if allow_limited:
-        return u == ADMIN_USER or u in LIMITED_ADMINS
-    return u == ADMIN_USER
+        # 价格维护：price:manage（admin/manager 持有）
+        return "price:manage" in perms or "config:manage" in perms
+    # 配置管理 / 服务状态 / 日志：config:manage（admin/manager 持有，visitor 无）
+    return "config:manage" in perms
 
 
 def _forbid():
@@ -726,8 +732,7 @@ def api_draft_robot_config_save():
     if not _check_user():
         return _forbid()
     data = request.get_json(silent=True) or {}
-    if (data.get("user") or "") != ADMIN_USER:
-        return _forbid()
+    # 注：身份由门禁层 session 判定（config:manage），不再信任 body 里的 user 字段
     try:
         live = bool(data.get("live", False))
         fs = data.get("forward_since")  # "YYYY-MM-DDTHH:MM:SS" 或 None
@@ -772,8 +777,7 @@ def api_bot_config_save(name):
     if not _check_user():
         return _forbid()
     data = request.get_json(silent=True) or {}
-    if (data.get("user") or "") != ADMIN_USER:
-        return _forbid()
+    # 注：身份由门禁层 session 判定（config:manage），不再信任 body 里的 user 字段
     path = BOT_CONFIG_MAP.get(name)
     if not path:
         return jsonify(ok=False, msg="未知机器人"), 404

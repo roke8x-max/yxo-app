@@ -255,24 +255,34 @@
 </div>
 
 <script>
-const STORE_KEY = "yxo_user";
-const ADMIN = "毛骁洋";
-// 受限管理员：可进系统管理页，但只开放 价格维护 / 选项维护 / 回收站 三项
-const LIMITED_ADMINS = ["杨雅雯","冯茜","韩文豪"];
-const ALL_USERS = [ADMIN, ...LIMITED_ADMINS];
 let USER = "";
+let USER_PERMS = [];
+let CSRF_TOKEN = "";
+const _origFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  opts = opts || {};
+  opts.credentials = "same-origin";
+  const method = (opts.method || "GET").toUpperCase();
+  opts.headers = opts.headers || {};
+  const sameOrigin = typeof url === "string" && !/^https?:\/\//i.test(url);
+  if (sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
+    opts.headers["X-CSRF-Token"] = CSRF_TOKEN;
+  }
+  return _origFetch(url, opts);
+};
 
-// 进入系统管理（原逻辑原样搬进函数）
-function enterAdmin(u) {
+// 进入系统管理（身份与可见范围由服务端 session + permissions 判定）
+function enterAdmin(u, perms) {
   USER = u;
+  USER_PERMS = perms || [];
+  const has = (p) => USER_PERMS.includes(p);
   document.getElementById("who").textContent = u || "未选择身份";
   document.getElementById("app").classList.remove("hidden");
-  document.getElementById("denied").classList.add("hidden"); // 身份卡点确认后消失
-  const IS_FULL = u === ADMIN;
-  const IS_LIMITED = LIMITED_ADMINS.includes(u);
+  document.getElementById("denied").classList.add("hidden"); // 身份确认后消失
+  const IS_FULL = has("config:manage");  // admin/manager：管理页全开
   if (IS_FULL) {
     loadStatus();
-  } else {
+  } else if (has("price:manage")) {
     const HIDDEN = ["status","logs","config"];
     const SHOWN  = ["price","options","trash"];
     HIDDEN.forEach(k => {
@@ -291,46 +301,30 @@ function enterAdmin(u) {
     const priceTab = document.querySelector('.tab[data-tab="price"]');
     if (priceTab) priceTab.classList.add("active");
     if (!window._priceLoaded) { loadPrice(); window._priceLoaded = true; }
+  } else {
+    document.getElementById("app").classList.add("hidden");
+    const box = document.getElementById("denied");
+    box.classList.remove("hidden");
+    box.innerHTML = '<p>当前身份 <b>' + esc(u || "") + '</b> 无权访问系统管理。</p>'
+                  + '<p><a href="./">← 返回订舱系统</a></p>';
   }
 }
 
-// 身份卡弹窗：URL 里已有 ?user=姓名 时直接无感进入；否则弹窗选择
-function showAdminGate() {
-  const box = document.getElementById("denied");
-  box.classList.remove("hidden");
-  const remembered = localStorage.getItem(STORE_KEY) || "";
-  box.innerHTML = '<p style="margin:0 0 12px">请选择你的身份：</p><div class="admin-gate-cards"></div>';
-  const wrap = box.querySelector(".admin-gate-cards");
-  ALL_USERS.forEach(u => {
-    const isRem = (u === remembered);
-    const card = document.createElement("div");
-    card.style.cssText = "display:inline-block;min-width:120px;margin:6px;padding:14px 18px;border:1px solid "+(isRem?"#0f6e56":"#cbd5e1")+";border-radius:10px;cursor:pointer;text-align:center;background:"+(isRem?"#eafaf4":"#fff")+";vertical-align:top";
-    card.innerHTML = '<div style="font-size:22px;font-weight:700;margin-bottom:6px">'+u.slice(0,1)+'</div>'
-                   + '<div style="font-weight:600">'+u+'</div>'
-                   + '<div style="font-size:12px;color:#64748b;margin-top:4px">'+(isRem?"上次选择 ✓ 点击确认":"点击以该身份进入")+'</div>';
-    card.onclick = () => {
-      localStorage.setItem(STORE_KEY, u);
-      const url = new URL(location.href);
-      url.searchParams.set("user", u);
-      history.replaceState(null, "", url);
-      enterAdmin(u);
-    };
-    wrap.appendChild(card);
-  });
-}
-
-const urlUser = new URLSearchParams(location.search).get("user");
-if (urlUser && ALL_USERS.includes(urlUser)) {
-  localStorage.setItem(STORE_KEY, urlUser);
-  enterAdmin(urlUser);
-} else {
-  showAdminGate();
-}
+// 身份：服务端 session 判定（不再有身份卡 / ?user=）；未登录回首页登录
+_origFetch("api/csrf", { credentials: "same-origin" }).then((r) => r.json()).then((j) => {
+  CSRF_TOKEN = j.csrf_token || "";
+  return _origFetch("api/auth_meta", { credentials: "same-origin" });
+}).then((r) => {
+  if (!r || r.status === 401) { location.href = "./"; return null; }
+  return r.json();
+}).then((m) => {
+  if (!m) return;
+  enterAdmin(m.username, m.permissions || []);
+});
 
 // ---------- 通用 ----------
 function api(path, opts) {
-  const sep = path.includes("?") ? "&" : "?";
-  return fetch(path + sep + "user=" + encodeURIComponent(USER), opts).then(r => r.json());
+  return fetch(path, opts).then(r => r.json());
 }
 function esc(s) { const d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
 
@@ -488,7 +482,7 @@ function submitAdd() {
   CFG.fields.forEach(f => fields[f] = document.getElementById("add-"+f).value.trim());
   if (!Object.values(fields).some(v=>v)) return alert("请至少填一个字段");
   api("api/admin/table/" + CFG.key, { method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ user: USER, fields }) })
+      body: JSON.stringify({ fields }) })
     .then(j => j.ok ? loadCfg() : alert("保存失败：" + j.msg));
 }
 function editRow(i) {
@@ -502,7 +496,7 @@ function submitEdit(i) {
   const fields = {};
   CFG.fields.forEach(f => fields[f] = document.getElementById(`edit-${i}-${f}`).value.trim());
   api("api/admin/table/" + CFG.key + "/" + r.record_id, { method:"PATCH", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ user: USER, fields }) })
+      body: JSON.stringify({ fields }) })
     .then(j => j.ok ? loadCfg() : alert("更新失败：" + j.msg));
 }
 function delRow(i) {
@@ -573,7 +567,7 @@ function saveBot(name) {
   since = since ? since + ":00" : null;                 // 存 "YYYY-MM-DDTHH:MM:SS"
   const accounts = card.querySelector(".bot-accounts").value
     .split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-  const body = { user: USER, live, forward_since: since, accounts };
+  const body = { live, forward_since: since, accounts };
   api("api/admin/bot_config/" + name, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) })
     .then(j => {
       const msg = card.querySelector(".bot-msg");
@@ -623,14 +617,14 @@ function prSaveRate() {
   const rate = document.getElementById("prRate").value.trim();
   if (!rate) return alert("请输入汇率");
   api("api/admin/price/exrate", { method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ user: USER, month: PR.month, currency: "USD", rate }) })
+      body: JSON.stringify({ month: PR.month, currency: "USD", rate }) })
     .then(j => j.ok ? (alert("汇率已保存"), loadPrice()) : alert("保存失败：" + j.msg));
 }
 function prSaveEntry() {
   const port = document.getElementById("prPort").value.trim();
   const dest = document.getElementById("prDest").value.trim();
   api("api/admin/price/entry", { method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ user: USER, month: PR.month, port, dest,
+      body: JSON.stringify({ month: PR.month, port, dest,
         SOC: document.getElementById("prSOC").value.trim(),
         COC: document.getElementById("prCOC").value.trim(),
         currency: document.getElementById("prCur").value }) })
@@ -653,13 +647,13 @@ function prDel(i) {
   const r = PR.entries[i];
   if (!confirm(`删除 ${PR.month} 的「${r.port} → ${r.dest}」价格？`)) return;
   api("api/admin/price/entry/delete", { method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ user: USER, month: PR.month, port: r.port, dest: r.dest }) })
+      body: JSON.stringify({ month: PR.month, port: r.port, dest: r.dest }) })
     .then(j => j.ok ? loadPrice() : alert("删除失败：" + j.msg));
 }
 function prRecalc() {
   if (!confirm(`重算 ${PR.month} 发班的记录价格？\n只覆盖由「算价/批量算价/重算」写入的行，手填价格不动；单价为空的行会补算。`)) return;
   api("api/admin/price/recalc", { method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ user: USER, month: PR.month }) })
+      body: JSON.stringify({ month: PR.month }) })
     .then(j => j.ok
       ? alert(`重算完成：扫描 ${j.scanned} 行，覆盖 ${j.updated} 行，补算 ${j.filled} 行，无匹配价 ${j.failed} 行`)
       : alert("重算失败：" + j.msg));
@@ -669,10 +663,9 @@ function prUpload() {
   if (!f) return alert("请先选择模板文件（.xlsx）");
   const fd = new FormData();
   fd.append("file", f);
-  fd.append("user", USER);
   const view = document.getElementById("prPreview");
   view.innerHTML = '<p class="muted">解析中…</p>';
-  fetch("api/admin/price/import?user=" + encodeURIComponent(USER), { method:"POST", body: fd })
+  fetch("api/admin/price/import", { method:"POST", body: fd })
     .then(r => r.json()).then(j => {
       if (!j.ok) { view.innerHTML = "❌ " + esc(j.msg); return; }
       let html = "";
@@ -700,7 +693,7 @@ function prUpload() {
 }
 function prConfirmImport() {
   api("api/admin/price/import/confirm", { method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ user: USER }) })
+      body: JSON.stringify({}) })
     .then(j => {
       if (!j.ok) return alert("导入失败：" + j.msg);
       alert("导入完成，覆盖月份：" + j.months.join("、"));

@@ -10,9 +10,10 @@
   <header class="topbar">
     <div class="brand">YXO 订舱数据管理</div>
     <div class="topbar-right">
-      <label class="who">我是
-        <select id="userSel"></select>
+      <label class="who">当前用户
+        <span id="userLabel"></span>
       </label>
+      <button id="logoutBtn" class="tbtn ghost icon" title="登出">登出</button>
       <span id="filterBadge" class="filter-badge" title="点击清空所有列筛选" style="display:none"></span>
       <span class="pending">待跟进 <b id="pending">0</b></span>
       <span class="count">共 <b id="total">0</b> 行</span>
@@ -41,9 +42,9 @@
     <button id="fieldBtn" class="tbtn ghost icon" title="字段管理">⚙</button>
     <button id="gridLinesBtn" class="tbtn ghost icon" title="表格线">▦</button>
     <button id="helpBtn" class="tbtn ghost icon" title="说明">?</button>
-    <button id="tuoshuBtn" class="tbtn ghost icon hidden" title="托书生成" onclick="location.href='tuoshu?user='+encodeURIComponent(localStorage.getItem('yxo_user')||'')">📄</button>
-    <button id="manifestBtn" class="tbtn ghost icon hidden" title="舱单导入" onclick="location.href='manifest?user='+encodeURIComponent(localStorage.getItem('yxo_user')||'')">🚢</button>
-    <button id="adminBtn" class="tbtn ghost icon hidden" title="系统管理" onclick="location.href='admin?user='+encodeURIComponent(localStorage.getItem('yxo_user')||'')+'&v=20260730k'">🛠</button>
+    <button id="tuoshuBtn" class="tbtn ghost icon hidden" title="托书生成" onclick="location.href='tuoshu'">📄</button>
+    <button id="manifestBtn" class="tbtn ghost icon hidden" title="舱单导入" onclick="location.href='manifest'">🚢</button>
+    <button id="adminBtn" class="tbtn ghost icon hidden" title="系统管理" onclick="location.href='admin'">🛠</button>
   </div>
 
   <!-- 月份标签栏（按发班时间自动分月） -->
@@ -197,6 +198,24 @@
       <div class="gate-sub">请选择你的身份进入（也可通过带 <code>?user=姓名</code> 的链接直接无感进入）</div>
       <div id="gateCards" class="gate-cards"></div>
       <div class="gate-foot">数据本地存储 · 4 人协同 · 切换身份不影响他人视图</div>
+    </div>
+  </div>
+
+  <!-- 登录弹层（未登录访问受保护接口 → 401 → 弹出本层；无独立 /login 路由） -->
+  <div id="loginModal" class="user-gate hidden">
+    <div class="gate-inner">
+      <div class="gate-title">渝新欧 · 订舱数据管理</div>
+      <div class="gate-sub">请登录（服务端 session，关闭页面后需重新登录除非勾选记住我）</div>
+      <div class="pop-body">
+        <label>用户名 <input id="loginUser" type="text" style="width:100%" autocomplete="username"></label>
+        <label>密码 <input id="loginPass" type="password" style="width:100%" autocomplete="current-password"></label>
+        <label><input id="loginRemember" type="checkbox"> 记住我（30 天）</label>
+        <div id="loginErr" class="muted"></div>
+        <div class="pop-foot">
+          <button id="loginGo" class="tbtn">登录</button>
+        </div>
+      </div>
+      <div class="gate-foot">数据本地存储 · 4 人协同 · 身份由服务端判定</div>
     </div>
   </div>
 

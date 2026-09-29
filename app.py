@@ -10,17 +10,20 @@ YXO 订舱数据管理（方案 A 正式版）
 启动: 双击 start.bat
 """
 import os
+import hmac
 import re
 import json
 import sqlite3
 import socket
 from datetime import datetime
 
-from flask import Flask, request, jsonify, render_template, send_file, g
+from flask import Flask, request, jsonify, render_template, send_file, g, abort
 
 import config
 from import_excel import run_import
 from admin_api import admin_bp
+from data import records_dao
+from auth.rbac import require_permission
 import uuid
 import traceback
 import logging
@@ -445,6 +448,8 @@ def index():
 
 @app.route("/api/meta")
 def api_meta():
+    # 说明：本接口是表格元数据（列定义/选项/用户列表），前端启动强依赖，保持 public。
+    # spec §7.4 的认证身份接口因重名改用 GET /api/auth_meta（见 auth/rbac.py）。
     conn = get_db()
     opt_map = {}
     for row in conn.execute("SELECT field, options FROM field_options"):
@@ -530,6 +535,7 @@ def api_train_summary():
     rows = conn.execute(
         f'SELECT {cols} FROM records '
         f'WHERE COALESCE(is_deleted,0)=0 AND "班列类型"=\'专列\'').fetchall()
+    rows = records_dao.train_summary_rows(rows, g.identity)  # spec §8：按 scope 过滤
     meta_rows = conn.execute('SELECT train, year, train_status FROM train_meta').fetchall()
     conn.close()
     meta_map = {(r["train"], r["year"]): r["train_status"] for r in meta_rows}
@@ -636,13 +642,10 @@ def api_service_status():
 
 
 @app.route("/api/rows")
+@require_permission("record:read")
 def api_rows():
     conn = get_db()
-    flds = ", ".join([f'"{f}"' for f in config.ALL_FIELDS])
-    rows = conn.execute(
-        f'SELECT id, seq, order_idx, {flds}, updated_at, updated_by FROM records '
-        f'WHERE COALESCE(is_deleted,0)=0 ORDER BY order_idx, id'
-    ).fetchall()
+    rows = records_dao.list_records(conn, g.identity)
     conn.close()
     return jsonify([dict(r) for r in rows])
 
@@ -705,9 +708,10 @@ def api_insert_row():
 
 
 @app.route("/api/row/<int:rid>", methods=["DELETE"])
+@require_permission("record:write")
 def api_delete_row(rid):
     """软删除：只打标记进回收站，可在管理页恢复。"""
-    user = request.args.get("user", "")
+    user = g.identity.username  # spec §10：不再信任客户端自报 user
     conn = get_db()
     conn.execute(
         "UPDATE records SET is_deleted=1, deleted_at=?, deleted_by=? WHERE id=?",
@@ -715,18 +719,17 @@ def api_delete_row(rid):
     bump_version(conn)
     conn.commit()
     conn.close()
+    from auth import audit as _audit
+    _audit.log_event("删除", user, target=f"records:{rid}", detail="软删除")
     return jsonify({"ok": True})
 
 
 # ====================== 回收站 ======================
 @app.route("/api/trash")
+@require_permission("record:read")
 def api_trash_list():
     conn = get_db()
-    flds = ", ".join([f'"{f}"' for f in config.ALL_FIELDS])
-    rows = conn.execute(
-        f'SELECT id, seq, {flds}, deleted_at, deleted_by FROM records '
-        f'WHERE COALESCE(is_deleted,0)=1 ORDER BY deleted_at DESC'
-    ).fetchall()
+    rows = records_dao.list_trash(conn, g.identity)
     conn.close()
     return jsonify([dict(r) for r in rows])
 
@@ -742,6 +745,7 @@ def api_trash_restore(rid):
 
 
 @app.route("/api/trash/<int:rid>", methods=["DELETE"])
+@require_permission("record:write")
 def api_trash_purge(rid):
     """彻底删除（仅回收站里的记录）。"""
     conn = get_db()
@@ -749,6 +753,8 @@ def api_trash_purge(rid):
     bump_version(conn)
     conn.commit()
     conn.close()
+    from auth import audit as _audit
+    _audit.log_event("删除", g.identity.username, target=f"records:{rid}", detail="彻底删除")
     return jsonify({"ok": True})
 
 
@@ -784,11 +790,12 @@ def sync_departure(conn, rid, field, value, now, user, old_year):
 
 
 @app.route("/api/row/<int:rid>", methods=["PATCH"])
+@require_permission("record:write")
 def api_update(rid):
     data = request.get_json(force=True, silent=True) or {}
     field = data.get("field")
     value = data.get("value", "")
-    user = data.get("user", "")
+    user = g.identity.username  # spec §10：不再信任客户端自报 user
     if field not in config.ALL_FIELDS:
         return jsonify({"ok": False, "msg": "非法字段"}), 400
     conn = get_db()
@@ -810,12 +817,13 @@ def api_update(rid):
 
 
 @app.route("/api/cells", methods=["POST"])
+@require_permission("record:write")
 def api_cells():
     """批量保存（兜底用）：前端在页面关闭/刷新前用 sendBeacon 把未提交的单元格一次性发来。
     也支持普通调用。edits: [{id, field, value}]。"""
     data = request.get_json(force=True, silent=True) or {}
     edits = data.get("edits") or []
-    user = data.get("user", "")
+    user = g.identity.username  # spec §10：不再信任客户端自报 user
     if not isinstance(edits, list):
         return jsonify({"ok": False, "msg": "edits 需为数组"}), 400
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -851,8 +859,16 @@ STAMP_TOKEN = config.STAMP_TOKEN
 
 @app.route("/api/stamp", methods=["POST"])
 def api_stamp():
-    if request.headers.get("X-Stamp-Token") != STAMP_TOKEN:
-        return jsonify(ok=False, error="unauthorized"), 403
+    # B 加固：先拒代理头（防同机 nginx 反代绕过白名单），再验 IP 白名单，最后验 token。
+    # 本机 DSK/ATB 机器人直连 127.0.0.1 不带代理头，不误伤。
+    if request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP"):
+        abort(403)
+    if request.remote_addr not in ("127.0.0.1", "::1"):
+        abort(403)
+    # compare_digest 防时序侧信道；not STAMP_TOKEN 短路防测试环境 None 抛 TypeError
+    if not STAMP_TOKEN or not hmac.compare_digest(
+            request.headers.get("X-Stamp-Token", "") or "", STAMP_TOKEN):
+        abort(403)
     data = request.get_json(force=True, silent=True) or {}
     box_no = (data.get("box_no") or "").strip()
     field = data.get("field")
@@ -902,6 +918,8 @@ def api_price(rid):
     bump_version(conn)
     conn.commit()
     conn.close()
+    from auth import audit as _audit
+    _audit.log_event("改价", g.identity.username, target=f"records:{rid}", detail=f"price={price}")
     return jsonify({"ok": True, "price": price})
 
 
@@ -926,6 +944,8 @@ def api_price_batch():
     bump_version(conn)
     conn.commit()
     conn.close()
+    from auth import audit as _audit
+    _audit.log_event("改价", g.identity.username, detail=f"批量算价 priced={priced}")
     return jsonify({"ok": True, "priced": priced})
 
 
@@ -934,7 +954,9 @@ def api_export():
     """按前端传入的“字段顺序 + 当前筛选行”导出 Excel（WPS 在线表风格：彩色表头/边框/冻结首行/自适应列宽）"""
     data = request.get_json(force=True, silent=True) or {}
     columns = data.get("columns") or config.ALL_FIELDS
-    rows = data.get("rows") or []
+    rows = records_dao.filter_export_rows(data.get("rows") or [], g.identity)  # spec §8：服务端按 scope 过滤
+    from auth import audit as _audit
+    _audit.log_event("导出", g.identity.username, detail=f"rows={len(rows)}")
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -976,9 +998,9 @@ def api_export():
 # ====================== 托书自动生成 ======================
 # 引擎由芙蕾雅提供（tuoshu_engine.py，纯逻辑无 Flask 依赖），这里只做集成。
 def _check_tuoshu_user():
-    """托书权限：仅 config.TUOSHU_ADMINS（独立分组，不复用系统管理的 LIMITED_ADMINS）"""
-    u = request.args.get("user") or (request.get_json(silent=True) or {}).get("user", "")
-    return u in config.TUOSHU_ADMINS
+    """托书权限：服务端基于角色判断（spec §10，不再信任客户端自报 user）。"""
+    ident = getattr(g, "identity", None)
+    return ident is not None and "tuoshu:generate" in (ident.permissions or [])
 
 
 def _tuoshu_forbid():
@@ -1254,6 +1276,8 @@ def api_tuoshu_generate():
 
         # 注意：send_file 是惰性发送，这里不能删除正在返回的文件所在目录。
         if len(files) == 1:
+            from auth import audit as _audit
+            _audit.log_event("生成托书", g.identity.username, detail=f"train={groups[0]['train_no']}")
             return send_file(files[0], as_attachment=True,
                              download_name=os.path.basename(files[0]))
         zip_path = os.path.join(config.DATA_DIR, "托书_%s.zip" % stamp)
@@ -1261,6 +1285,8 @@ def api_tuoshu_generate():
             for f in files:
                 zf.write(f, os.path.basename(f))
         shutil.rmtree(out_dir, ignore_errors=True)   # zip 已含全部内容，可安全删源目录
+        from auth import audit as _audit
+        _audit.log_event("生成托书", g.identity.username, detail=f"groups={len(groups)} zip")
         return send_file(zip_path, as_attachment=True,
                          download_name="渝新欧订舱委托书_%s.zip" % stamp)
     except Exception as e:
@@ -1359,6 +1385,8 @@ def api_import():
     bump_version(conn)
     conn.commit()
     conn.close()
+    from auth import audit as _audit
+    _audit.log_event("导入", g.identity.username, detail=f"imported={n}")
     return jsonify({"ok": True, "imported": n})
 
 
@@ -1406,15 +1434,23 @@ def api_import_upload():
             os.remove(tmp)
         except Exception:
             pass
+    from auth import audit as _audit
+    _audit.log_event("导入", g.identity.username, detail=f"imported={n} train_type={train_type}")
     return jsonify({"ok": True, "imported": n, "train_type": train_type})
 
 
 # ====================== 舱单 / 箱号 统一导入（#199）======================
 # 引擎 manifest_engine.py 由小叽实现（纯逻辑，无 Flask 依赖），这里只做集成 + 权限闸门。
 def _check_manifest_user():
-    """舱单导入权限：仅 config.MANIFEST_ADMIN（毛骁洋）。"""
-    u = request.args.get("user") or (request.get_json(silent=True) or {}).get("user", "")
-    return u == config.MANIFEST_ADMIN
+    """舱单空跑/查看权限：服务端基于角色判断（spec §10）。"""
+    ident = getattr(g, "identity", None)
+    return ident is not None and "manifest:import" in (ident.permissions or [])
+
+
+def _check_manifest_apply():
+    """舱单应用/回退/还原权限：需 manifest:apply（比空跑更高）。"""
+    ident = getattr(g, "identity", None)
+    return ident is not None and "manifest:apply" in (ident.permissions or [])
 
 
 def _manifest_forbid():
@@ -1474,13 +1510,13 @@ def api_manifest_upload():
 @app.route("/api/manifest/apply", methods=["POST"])
 def api_manifest_apply():
     """应用：快照 → 事务写入 → 留痕。失败整体回滚。"""
-    if not _check_manifest_user():
+    if not _check_manifest_apply():
         return _manifest_forbid()
     body = request.get_json(silent=True) or {}
     diff = body.get("diff")
     if not diff:
         return jsonify({"ok": False, "msg": "缺少 diff"}), 400
-    operator = body.get("user", config.MANIFEST_ADMIN)
+    operator = g.identity.username  # spec §10：不再信任客户端自报 user
     files = body.get("files", [])
     if isinstance(files, str):
         files = [files]
@@ -1534,7 +1570,7 @@ def api_manifest_batch_detail(batch_id):
 @app.route("/api/manifest/revert", methods=["POST"])
 def api_manifest_revert():
     """整批回退（batch_id）或单条撤销（log_id）。"""
-    if not _check_manifest_user():
+    if not _check_manifest_apply():
         return _manifest_forbid()
     body = request.get_json(silent=True) or {}
     from manifest_engine import revert_batch, revert_item
@@ -1563,7 +1599,7 @@ def api_manifest_revert():
 @app.route("/api/manifest/restore", methods=["POST"])
 def api_manifest_restore():
     """核弹级：用批次快照整库还原。前端需二次确认。"""
-    if not _check_manifest_user():
+    if not _check_manifest_apply():
         return _manifest_forbid()
     body = request.get_json(silent=True) or {}
     batch_id = body.get("batch_id")
@@ -1586,9 +1622,7 @@ def api_manifest_restore():
 # —— 个人视图状态（按用户隔离，互不干扰）——
 @app.route("/api/state", methods=["GET", "POST"])
 def api_state():
-    user = request.args.get("user") or (request.get_json(silent=True) or {}).get("user", "")
-    if not user:
-        return jsonify({"ok": False, "msg": "缺少 user"}), 400
+    user = g.identity.username  # spec §10：个人筛选状态按登录身份隔离，不再信任 user 参数
     conn = get_db()
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
@@ -1625,6 +1659,13 @@ def init_user_table():
     """)
     conn.commit()
     conn.close()
+
+
+# ====================== 权限门禁（2026-09-28 内部简化版 RBAC）======================
+# 设计见 docs/superpowers/specs/2026-09-21-permission-rbac-module-design.md
+# 必须在所有路由定义之后接线（启动自检要比对完整 url_map）。
+from auth import init_auth as _init_auth
+_init_auth(app)
 
 
 if __name__ == "__main__":
