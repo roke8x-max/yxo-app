@@ -7,16 +7,13 @@ init_auth(app)：设 secret_key、注册 auth_bp、挂 _auth_gate、建表+种�
 只对外暴露 init_auth / g.identity / require_permission。
 """
 from types import SimpleNamespace
-import logging
 
-from flask import g, jsonify, request
+from flask import g, jsonify, request, current_app
 
 import config
 from auth import audit, dao, service
 from auth.rbac import (AUTHENTICATED, PUBLIC, ROUTE_PERMISSIONS,
                        ROUTE_PERMISSIONS_SET, PERMISSIONS)
-
-logger = logging.getLogger("auth")
 
 
 def _deny(code, msg, status, event="越权访问"):
@@ -67,8 +64,8 @@ def _dry_run_log(req):
     else:
         key = (req.method, req.url_rule.rule)
         matched = "未登记" if key not in ROUTE_PERMISSIONS_SET else ROUTE_PERMISSIONS[key]
-    logger.info("AUTH_DRY_RUN path=%s method=%s ip=%s matched=%s has_session=False",
-                req.path, req.method, req.remote_addr, matched)
+    current_app.logger.info("AUTH_DRY_RUN path=%s method=%s ip=%s matched=%s has_session=False",
+                            req.path, req.method, req.remote_addr, matched)
 
 
 def _auth_gate():

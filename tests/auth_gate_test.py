@@ -401,11 +401,11 @@ def test_dry_run_log_fields(dclient, caplog):
     # 每行 5 字段齐；matched 与 ROUTE_PERMISSIONS 一致；path 为实际路径（非 rule 原串）
     import logging
     c, _ = dclient
-    caplog.set_level(logging.INFO, logger="auth")
+    caplog.set_level(logging.INFO, logger="app")  # D4：dry-run 走 current_app.logger（名 "app"）
     r = c.patch("/api/row/1", json={"field": "备注", "value": "x"})
     assert r.status_code == 200
     recs = [rec for rec in caplog.records
-            if rec.name == "auth" and "AUTH_DRY_RUN" in rec.getMessage()]
+            if rec.name == "app" and "AUTH_DRY_RUN" in rec.getMessage()]
     assert recs, "disabled 期非噪声请求必须记 AUTH_DRY_RUN"
     msg = recs[-1].getMessage()
     assert "path=/api/row/1" in msg      # 实际路径，不是 /api/row/<int:rid>
@@ -436,3 +436,29 @@ def test_enabled_gate_still_enforced(client, monkeypatch):
     assert r2.status_code == 403
     body = r2.get_json()
     assert body["ok"] is False  # D3：拒体 JSON，不再是 HTML 错误页
+
+
+def test_dry_run_log_lands_in_app_log(dclient):
+    from app import app as _app
+    import os
+    from logging.handlers import RotatingFileHandler
+    # 从 handler 取真实日志路径（不要自己拼目录约定，避免与 _LOG_DIR 不一致而对不上）
+    log_path = next(h.baseFilename for h in _app.logger.handlers
+                    if isinstance(h, RotatingFileHandler))
+    # —— 防「假通过」：日志是追加写入，若文件里已有旧的 AUTH_DRY_RUN（调试跑过 / A 工单测试写过），
+    # 仅看 "AUTH_DRY_RUN" in content 会误判通过。先记 size_before，本次请求后必须增长。
+    size_before = os.path.getsize(log_path) if os.path.exists(log_path) else 0
+    # 触发一次非噪声请求（disabled 态 _auth_gate 注入 system 并调 _dry_run_log）
+    dclient[0].get("/api/rows")  # 任意已知端点均可；GET 也会触发 _dry_run_log
+    # flush 必须针对 app.logger 上的 handler —— 不要用 root.handlers！
+    # RotatingFileHandler 挂在 app.logger 上（app.py:67-84），root 没有这个 handler，
+    # logging.getLogger().manager.root.handlers 是空列表，flush 它毫无作用。
+    # （FileHandler 默认同步落盘，flush 是双保险；若不想 flush 也可直接删掉本段。）
+    for h in _app.logger.handlers:
+        h.flush()
+    size_after = os.path.getsize(log_path)
+    assert size_after > size_before, "日志文件未增长，AUTH_DRY_RUN 未真写入（D4 修复未生效？）"
+    # 读文件断言内容（errors="ignore" 兜底：handler 已指定 encoding="utf-8"(app.py:73)，
+    # 但加 ignore 防 Windows 编码读取异常导致解码崩溃）
+    content = open(log_path, encoding="utf-8", errors="ignore").read()
+    assert "AUTH_DRY_RUN" in content, "disabled 期观察日志未落到 logs/app.log"
