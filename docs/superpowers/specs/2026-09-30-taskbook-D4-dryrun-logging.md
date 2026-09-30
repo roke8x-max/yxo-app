@@ -68,31 +68,38 @@ from flask import g, jsonify, request, current_app
 
 ```python
 def test_dry_run_log_lands_in_app_log(dclient):
+    from app import app as _app
+    import os
+    from logging.handlers import RotatingFileHandler
+    # 从 handler 取真实日志路径（不要自己拼目录约定，避免与 _LOG_DIR 不一致而对不上）
+    log_path = next(h.baseFilename for h in _app.logger.handlers
+                    if isinstance(h, RotatingFileHandler))
+    # —— 防「假通过」：日志是追加写入，若文件里已有旧的 AUTH_DRY_RUN（调试跑过 / A 工单测试写过），
+    # 仅看 "AUTH_DRY_RUN" in content 会误判通过。先记 size_before，本次请求后必须增长。
+    size_before = os.path.getsize(log_path) if os.path.exists(log_path) else 0
     # 触发一次非噪声请求（disabled 态 _auth_gate 注入 system 并调 _dry_run_log）
     dclient.get("/api/rows")  # 任意已知端点均可；GET 也会触发 _dry_run_log
     # flush 必须针对 app.logger 上的 handler —— 不要用 root.handlers！
     # RotatingFileHandler 挂在 app.logger 上（app.py:67-84），root 没有这个 handler，
     # logging.getLogger().manager.root.handlers 是空列表，flush 它毫无作用。
     # （FileHandler 默认同步落盘，flush 是双保险；若不想 flush 也可直接删掉本段。）
-    from app import app as _app
-    import os
     for h in _app.logger.handlers:
         h.flush()
-    # 从 handler 取真实日志路径 —— 不要自己拼目录约定，避免与 _LOG_DIR 不一致而对不上
-    from logging.handlers import RotatingFileHandler
-    log_path = next(h.baseFilename for h in _app.logger.handlers
-                    if isinstance(h, RotatingFileHandler))
-    assert os.path.exists(log_path), f"日志文件未生成: {log_path}"
-    content = open(log_path, encoding="utf-8").read()
+    size_after = os.path.getsize(log_path)
+    assert size_after > size_before, "日志文件未增长，AUTH_DRY_RUN 未真写入（D4 修复未生效？）"
+    # 读文件断言内容（errors="ignore" 兜底：handler 已指定 encoding="utf-8"(app.py:73)，
+    # 但加 ignore 防 Windows 编码读取异常导致解码崩溃）
+    content = open(log_path, encoding="utf-8", errors="ignore").read()
     assert "AUTH_DRY_RUN" in content, "disabled 期观察日志未落到 logs/app.log"
 ```
 
 > 说明：`app.py` 在 import 时已按 `_LOG_DIR = <仓库根>/logs` 挂好 RotatingFileHandler（在
-> `app.logger` 上），测试 import app 即完成配置；请求在 disabled 态必定写一行 `AUTH_DRY_RUN`。
-> 两条常见误写（已修）：① flush 写成 `logging.getLogger().manager.root.handlers`（root 无
+> `app.logger` 上，且 `encoding="utf-8"`，见 app.py:71-73），测试 import app 即完成配置；
+> 请求在 disabled 态必定写一行 `AUTH_DRY_RUN`。
+> 三条常见误写（均已修）：① flush 写成 `logging.getLogger().manager.root.handlers`（root 无
 > 该 handler，flush 无效）；② 日志路径用 `os.path.dirname(_app.__file__)+"logs/app.log"` 自拼
-> （依赖目录约定，配置一迁移就对不上）。本测试改用 `_app.logger.handlers` + `h.baseFilename`，
-> 不再依赖任何目录假设。
+> （依赖目录约定，配置一迁移就对不上）；③ 仅断言 `"AUTH_DRY_RUN" in content`（文件里若有旧的
+> 调试/A 工单日志行会假通过）——本测试额外用 `size_before/size_after` 增长断言自证「本次真的写入」。
 
 ### 3.2 既有断言不得删
 `tests/auth_gate_test.py` 既有 31 条断言一个不删；本测试为新增。
