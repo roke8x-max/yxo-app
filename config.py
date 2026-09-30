@@ -158,6 +158,10 @@ AUTH_REMEMBER_DAYS = int(os.environ.get("YXO_AUTH_REMEMBER_DAYS", "30"))
 AUTH_MAX_FAILS = 5          # 连续失败 N 次锁定（spec §5.4）
 AUTH_LOCK_MINUTES = 15
 
+# RBAC 灰度开关（A 工单）：默认关。关 = 门禁只观察不拒绝（dry-run），
+# system 身份全权限 + scope=all 放行，等价于 RBAC 上线前行为；开 = 门禁全效。
+AUTH_ENABLED = os.environ.get("YX_AUTH_ENABLED", "0") == "1"
+
 # real name -> managed company keywords (substring match on 开票子公司名称)
 USER_COMPANIES = {
     "毛骁洋": ["太平洋", "港九港铁"],

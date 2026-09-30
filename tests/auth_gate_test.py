@@ -55,9 +55,22 @@ def _seed_records(db_path):
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
+    # A 工单：既有用例假设门禁生效，fixture 显式开 AUTH_ENABLED=1（不断言不动）。
+    return _make_client(tmp_path, monkeypatch, auth_enabled=True)
+
+
+@pytest.fixture()
+def dclient(tmp_path, monkeypatch):
+    # A 工单：disabled 模式（AUTH_ENABLED=0）客户端，门禁只观察不拒绝。
+    return _make_client(tmp_path, monkeypatch, auth_enabled=False)
+
+
+def _make_client(tmp_path, monkeypatch, auth_enabled):
     auth_db = str(tmp_path / "auth.db")
     yxo_db = str(tmp_path / "yxo.db")
     monkeypatch.setattr(config, "AUTH_DB_PATH", auth_db)
+    # raising=False：A 落码前 config 尚无该属性（RED 期），落码后按值覆盖
+    monkeypatch.setattr(config, "AUTH_ENABLED", auth_enabled, raising=False)
     import app as appmod  # 延迟导入：gate 每次请求都动态读 config.AUTH_DB_PATH
     monkeypatch.setattr(appmod, "DB", yxo_db)
     _seed_records(yxo_db)
@@ -69,8 +82,8 @@ def client(tmp_path, monkeypatch):
                         scope_type="companies", companies=["太平洋、港九港铁", "保时达"])
     service.create_user(NONEU, PW[NONEU], role="visitor", scope_type="none")
     appmod.app.config["TESTING"] = True
-    with appmod.app.test_client() as c:
-        yield c, appmod
+    c = appmod.app.test_client()
+    return c, appmod
 
 
 def _csrf(c):
@@ -327,3 +340,99 @@ def test_init_auth_refuses_without_token(client, monkeypatch):
     prod.testing = False
     with pytest.raises(RuntimeError, match="YXSTAMP_TOKEN"):
         init_auth(prod)
+
+
+# ---------------- A 工单：AUTH_ENABLED 灰度开关 + system 兜底 + dry-run ----------------
+
+def test_system_identity_shape():
+    # 与 _load_identity 同形状 5 字段；权限必须全量（§1.3 修正），scope 全量
+    from auth import _system_identity
+    from auth.rbac import PERMISSIONS
+    from data.records_dao import resolve_scope
+    ident = _system_identity()
+    assert ident.username == "system"
+    assert ident.role == "system"
+    assert sorted(ident.permissions) == sorted(PERMISSIONS.keys())
+    assert ident.scope_type == "all"
+    assert ident.companies == []
+    assert resolve_scope(ident) == ("all", [])  # companies=[] 不挡全量
+
+
+def test_disabled_row_200(dclient):
+    # POST /api/row（record:write）：disabled 直接 200，无需登录/CSRF
+    c, _ = dclient
+    r = c.post("/api/row", json={})
+    assert r.status_code == 200
+
+
+def test_disabled_admin_status_200(dclient):
+    # GET /api/admin/status（admin:view，过 admin_api 内联 ident.permissions 判定）
+    c, _ = dclient
+    r = c.get("/api/admin/status")
+    assert r.status_code == 200
+
+
+def test_disabled_tuoshu_manifest_not_blocked(dclient):
+    # 内联判定点：403 只能来自视图层拒绝以外的因由——此处断言门禁/内联不挡（401/403 绝不出现；
+    # 400/500 来自视图参数校验或引擎，同样证明已穿过权限层）
+    c, _ = dclient
+    r = c.post("/api/tuoshu/generate", json={})
+    assert r.status_code not in (401, 403)
+    r2 = c.post("/api/manifest/apply", json={})
+    assert r2.status_code not in (401, 403)
+
+
+def test_disabled_delete_marks_system(dclient):
+    # 13 处裸 g.identity.username 不崩，且 updated_by 署 system（灰度通知口径）
+    import sqlite3
+    c, appmod = dclient
+    conn = sqlite3.connect(appmod.DB)
+    rid = conn.execute("SELECT id FROM records LIMIT 1").fetchone()[0]
+    conn.close()
+    r = c.delete(f"/api/row/{rid}")
+    assert r.status_code == 200
+    conn = sqlite3.connect(appmod.DB)
+    by = conn.execute("SELECT deleted_by FROM records WHERE id=?", (rid,)).fetchone()[0]
+    conn.close()
+    assert by == "system"
+
+
+def test_dry_run_log_fields(dclient, caplog):
+    # 每行 5 字段齐；matched 与 ROUTE_PERMISSIONS 一致；path 为实际路径（非 rule 原串）
+    import logging
+    c, _ = dclient
+    caplog.set_level(logging.INFO, logger="auth")
+    r = c.patch("/api/row/1", json={"field": "备注", "value": "x"})
+    assert r.status_code == 200
+    recs = [rec for rec in caplog.records
+            if rec.name == "auth" and "AUTH_DRY_RUN" in rec.getMessage()]
+    assert recs, "disabled 期非噪声请求必须记 AUTH_DRY_RUN"
+    msg = recs[-1].getMessage()
+    assert "path=/api/row/1" in msg      # 实际路径，不是 /api/row/<int:rid>
+    assert "method=PATCH" in msg
+    assert "ip=" in msg
+    assert "matched=record:write" in msg  # 与 ROUTE_PERMISSIONS 登记一致
+    assert "has_session=False" in msg
+
+
+def test_dry_run_skips_noise(dclient, caplog):
+    # 噪声（404 无 url_rule）不记 dry-run
+    import logging
+    c, _ = dclient
+    caplog.set_level(logging.INFO, logger="auth")
+    caplog.clear()
+    c.get("/no/such/route/xyz")
+    assert not [rec for rec in caplog.records
+                if rec.name == "auth" and "AUTH_DRY_RUN" in rec.getMessage()]
+
+
+def test_enabled_gate_still_enforced(client, monkeypatch):
+    # AUTH_ENABLED=1：门禁全效；stamp 仍按 B 逻辑（与开关无关，拒体为 JSON）
+    c, appmod = client
+    r = c.get("/api/rows")
+    assert r.status_code == 401
+    monkeypatch.setattr(appmod, "STAMP_TOKEN", FAKE_STAMP)
+    r2 = _stamp_post(c, appmod, "wrong-token")
+    assert r2.status_code == 403
+    body = r2.get_json()
+    assert body["ok"] is False  # D3：拒体 JSON，不再是 HTML 错误页

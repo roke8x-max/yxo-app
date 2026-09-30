@@ -17,7 +17,7 @@ import sqlite3
 import socket
 from datetime import datetime
 
-from flask import Flask, request, jsonify, render_template, send_file, g, abort
+from flask import Flask, request, jsonify, render_template, send_file, g
 
 import config
 from import_excel import run_import
@@ -861,14 +861,15 @@ STAMP_TOKEN = config.STAMP_TOKEN
 def api_stamp():
     # B 加固：先拒代理头（防同机 nginx 反代绕过白名单），再验 IP 白名单，最后验 token。
     # 本机 DSK/ATB 机器人直连 127.0.0.1 不带代理头，不误伤。
+    # D3：拒绝分支走 jsonify（与门禁 _deny 同形态），状态码仍 403。
     if request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP"):
-        abort(403)
+        return jsonify(ok=False, error="HTTP_403", msg="拒绝代理转发"), 403
     if request.remote_addr not in ("127.0.0.1", "::1"):
-        abort(403)
+        return jsonify(ok=False, error="HTTP_403", msg="仅允许本机调用"), 403
     # compare_digest 防时序侧信道；not STAMP_TOKEN 短路防测试环境 None 抛 TypeError
     if not STAMP_TOKEN or not hmac.compare_digest(
             request.headers.get("X-Stamp-Token", "") or "", STAMP_TOKEN):
-        abort(403)
+        return jsonify(ok=False, error="HTTP_403", msg="token 校验失败"), 403
     data = request.get_json(force=True, silent=True) or {}
     box_no = (data.get("box_no") or "").strip()
     field = data.get("field")

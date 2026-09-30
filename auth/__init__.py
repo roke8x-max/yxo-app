@@ -7,11 +7,16 @@ init_auth(app)：设 secret_key、注册 auth_bp、挂 _auth_gate、建表+种�
 只对外暴露 init_auth / g.identity / require_permission。
 """
 from types import SimpleNamespace
+import logging
 
 from flask import g, jsonify, request
 
+import config
 from auth import audit, dao, service
-from auth.rbac import AUTHENTICATED, PUBLIC, ROUTE_PERMISSIONS, ROUTE_PERMISSIONS_SET
+from auth.rbac import (AUTHENTICATED, PUBLIC, ROUTE_PERMISSIONS,
+                       ROUTE_PERMISSIONS_SET, PERMISSIONS)
+
+logger = logging.getLogger("auth")
 
 
 def _deny(code, msg, status, event="越权访问"):
@@ -43,15 +48,45 @@ def _load_identity():
         companies=companies if isinstance(companies, list) else [])
 
 
+def _system_identity():
+    """disabled 期兜底身份（A 工单）：与 _load_identity 同形状 5 字段。
+    permissions 必须全权限（list(PERMISSIONS.keys())），否则视图层
+    @require_permission/内联 ident.permissions 判定会把整站 403 挡死。"""
+    return SimpleNamespace(
+        username="system",
+        role="system",                              # 仅供形状对齐；disabled 期不参与任何 role 判定
+        permissions=list(PERMISSIONS.keys()),
+        scope_type="all",                           # records_dao.resolve_scope 全量放行
+        companies=[])
+
+
+def _dry_run_log(req):
+    """disabled 期观察日志（A 工单）：每非噪声请求一行 INFO，前缀 AUTH_DRY_RUN。"""
+    if req.url_rule is None:
+        matched = "未登记"
+    else:
+        key = (req.method, req.url_rule.rule)
+        matched = "未登记" if key not in ROUTE_PERMISSIONS_SET else ROUTE_PERMISSIONS[key]
+    logger.info("AUTH_DRY_RUN path=%s method=%s ip=%s matched=%s has_session=False",
+                req.path, req.method, req.remote_addr, matched)
+
+
 def _auth_gate():
-    # 前置兜底：未匹配路由（url_rule None）交回 Flask 原生 404；静态资源放行
+    # 噪声过滤（disabled 与 enabled 都要跳）：未匹配路由交回 Flask 原生 404；静态资源放行。
+    # ⚠️ 不跳 OPTIONS / HEAD：HEAD 会实际执行 GET 视图，若 return 不注入身份，
+    #    视图内裸 g.identity.username 会 AttributeError。
     if request.url_rule is None:
         return None
     if request.endpoint == "static":
         return None
-    if request.method == "OPTIONS":
-        return None
 
+    # —— A 工单：灰度开关 ——
+    if not config.AUTH_ENABLED:
+        g.identity = _system_identity()   # username="system"，全权限 + scope=all
+        _dry_run_log(request)
+        return None                        # 不拒任何请求
+
+    # 以下为 enabled 正常逻辑（CSRF + 登录/权限），保持现有实现不变
     # 第一层 · CSRF（所有非 GET；/api/stamp 靠 X-Stamp-Token 豁免）
     if request.method != "GET":
         if request.path not in service.CSRF_EXEMPT_PATHS and not service.verify_csrf(request):
