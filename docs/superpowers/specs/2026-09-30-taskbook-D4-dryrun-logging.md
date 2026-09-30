@@ -65,30 +65,47 @@ from flask import g, jsonify, request, current_app
 
 ### 3.1 新增测试 `tests/auth_gate_test.py::test_dry_run_log_lands_in_app_log`
 沿用既有 `dclient` fixture（AUTH_ENABLED=0，disabled 态）：
+
 ```python
 def test_dry_run_log_lands_in_app_log(dclient):
     # 触发一次非噪声请求（disabled 态 _auth_gate 注入 system 并调 _dry_run_log）
     dclient.get("/api/rows")  # 任意已知端点均可；GET 也会触发 _dry_run_log
-    # flush 所有 handler，确保 RotatingFileHandler 落盘
-    import logging
-    for h in logging.getLogger().manager.root.handlers:
-        h.flush()
-    # 读 app.py 同一路径的日志文件
+    # flush 必须针对 app.logger 上的 handler —— 不要用 root.handlers！
+    # RotatingFileHandler 挂在 app.logger 上（app.py:67-84），root 没有这个 handler，
+    # logging.getLogger().manager.root.handlers 是空列表，flush 它毫无作用。
+    # （FileHandler 默认同步落盘，flush 是双保险；若不想 flush 也可直接删掉本段。）
     from app import app as _app
     import os
-    log_path = os.path.join(os.path.dirname(os.path.abspath(_app.__file__)), "logs", "app.log")
+    for h in _app.logger.handlers:
+        h.flush()
+    # 从 handler 取真实日志路径 —— 不要自己拼目录约定，避免与 _LOG_DIR 不一致而对不上
+    from logging.handlers import RotatingFileHandler
+    log_path = next(h.baseFilename for h in _app.logger.handlers
+                    if isinstance(h, RotatingFileHandler))
     assert os.path.exists(log_path), f"日志文件未生成: {log_path}"
     content = open(log_path, encoding="utf-8").read()
     assert "AUTH_DRY_RUN" in content, "disabled 期观察日志未落到 logs/app.log"
 ```
-> 说明：`app.py` 在 import 时已按 `_LOG_DIR = <仓库根>/logs` 挂好 RotatingFileHandler，
-> 测试 import app 即完成配置；请求在 disabled 态必定写一行 `AUTH_DRY_RUN`，断言文件内含该串即证明已落盘。
+
+> 说明：`app.py` 在 import 时已按 `_LOG_DIR = <仓库根>/logs` 挂好 RotatingFileHandler（在
+> `app.logger` 上），测试 import app 即完成配置；请求在 disabled 态必定写一行 `AUTH_DRY_RUN`。
+> 两条常见误写（已修）：① flush 写成 `logging.getLogger().manager.root.handlers`（root 无
+> 该 handler，flush 无效）；② 日志路径用 `os.path.dirname(_app.__file__)+"logs/app.log"` 自拼
+> （依赖目录约定，配置一迁移就对不上）。本测试改用 `_app.logger.handlers` + `h.baseFilename`，
+> 不再依赖任何目录假设。
 
 ### 3.2 既有断言不得删
 `tests/auth_gate_test.py` 既有 31 条断言一个不删；本测试为新增。
 
 ### 3.3 全仓回归
 `pytest -q` 仍全绿（当前基线 517）。
+
+### 3.4 验收证据（必附，不能只贴「测试通过」）
+落码后提交时必须附**真实证据**，芙蕾雅要核对日志是真落盘、不是「路径恰好拼对 + flush 恰好没用」偶然过的：
+1. 贴 `pytest tests/auth_gate_test.py::test_dry_run_log_lands_in_app_log -v` 的输出（passed）；
+2. **贴 `logs/app.log` 里 `AUTH_DRY_RUN` 那行的真实内容**（grep 出来整行），
+   形如：`2026-09-30 ... INFO auth: AUTH_DRY_RUN path=/api/rows method=GET ip=127.0.0.1 matched=... has_session=False`。
+   缺这行真实日志，视为验收不通过。
 
 ## 4. 不得触碰范围
 - 只改 `auth/__init__.py`（§1）与 `tests/auth_gate_test.py`（§3.1）。
