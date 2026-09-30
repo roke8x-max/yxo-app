@@ -419,11 +419,11 @@ def test_dry_run_skips_noise(dclient, caplog):
     # 噪声（404 无 url_rule）不记 dry-run
     import logging
     c, _ = dclient
-    caplog.set_level(logging.INFO, logger="auth")
+    caplog.set_level(logging.INFO, logger="app")
     caplog.clear()
     c.get("/no/such/route/xyz")
     assert not [rec for rec in caplog.records
-                if rec.name == "auth" and "AUTH_DRY_RUN" in rec.getMessage()]
+                if rec.name == "app" and "AUTH_DRY_RUN" in rec.getMessage()]
 
 
 def test_enabled_gate_still_enforced(client, monkeypatch):
