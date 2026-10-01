@@ -16,8 +16,8 @@
 ## 1. 仓库与分支（git pull 目标）
 
 - 仓库：`https://github.com/roke8x-max/yxo-app.git`
-- 分支：`rbac-v2.5-stamp-b`（对应 PR #25，已含 B+v2.5+A 全部代码与文档）
-- 拉取：`git fetch origin && git checkout rbac-v2.5-stamp-b && git pull --ff-only`
+- 分支：`main`（PR #25 已合并入 main，含 B+v2.5+A+D4 全部代码与文档）
+- 拉取：`git fetch origin && git checkout main && git pull --ff-only`
 
 ## 2. 部署前置（环境变量）⚠️ 本次为权限模块**首次**上线，以下变量生产从未设过，必须新建
 
@@ -99,7 +99,7 @@
 ## 8. 回滚
 
 - 初始阶段（=0）：回滚只需 `YX_AUTH_ENABLED=0`（或不设）重启，不需删 `auth.db`。
-- 翻到 =1 后回滚：同 B/v2.5（删 `auth.db` + git 切回分支）。
+- 翻到 =1 后回滚：同 B/v2.5（删 `auth.db` + git 切回 main）。
 
 ## 9. 可选收尾（不影响本次）
 
