@@ -17,6 +17,7 @@
 
 - 仓库：`https://github.com/roke8x-max/yxo-app.git`
 - 分支：`main`（PR #25 已合并入 main，含 B+v2.5+A+D4 全部代码与文档）
+- ⚠️ 追加项：外部只读账号「游客」+ 禁用 `visitor_demo`（见 §10）随本单后续 commit 合入 main，部署前请先 `git pull` 确保含该提交。
 - 拉取：`git fetch origin && git checkout main && git pull --ff-only`
 
 ## 2. 部署前置（环境变量）⚠️ 本次为权限模块**首次**上线，以下变量生产从未设过，必须新建
@@ -30,7 +31,8 @@
 | `YXO_AUTH_PASSWORD_FENGQIAN` | **必须设** | 同上 |
 | `YXO_AUTH_PASSWORD_YANGYAWEN` | **必须设** | 同上 |
 | `YXO_AUTH_PASSWORD_HANWENHAO` | **必须设** | 同上 |
-| `YXO_AUTH_PASSWORD_VISITOR_DEMO` | **必须设** | 验收账号 `visitor_demo` 初始口令（scope 绑定太平洋/港九港铁 + 保时达）。 |
+| `YXO_AUTH_PASSWORD_VISITOR_DEMO` | **建议设** | 测试账号 `visitor_demo` 初始口令；本单将禁用（见 §2.5 步骤 4），仍建议设以防 dev 占位口令。 |
+| `YXO_AUTH_PASSWORD_YOUKE` | **必须设** | 真实外部只读账号 `游客` 初始口令（scope=全量 5 家开票子公司，供集团下属数科公司同事看数据）。 |
 | `YXO_AUTH_DB` | 默认 `data/auth.db` | 一般不改；见 §2.5 清旧库。 |
 
 ⚠️ 切勿在本次部署时设 `YX_AUTH_ENABLED=1`——那会让 v2.5 门禁立即全效，跳过观察期。
@@ -41,8 +43,11 @@
 
 - ⚠️ **（清旧库，防 dev 弱口令带上线）** `init_auth_db` 幂等：用户已存在则跳过。若部署机 `data/auth.db` 已存在（来自任何旧测试/拷贝，含 dev 弱口令种子），重跑 `init_auth_db` **不会**用环境变量真口令覆盖。故部署前必须：
   1. 删除 `data/auth.db`（`del data\auth.db`）；
-  2. 设好上面 5 个 `YXO_AUTH_PASSWORD_*`；
-  3. 再跑 `python scripts/init_auth_db.py`（此时用真口令 seed）。
+  2. 设好上面全部 `YXO_AUTH_PASSWORD_*`（含新增的 `YOUKE`；`VISITOR_DEMO` 见步骤 4 禁用）：
+  3. 再跑 `python scripts/init_auth_db.py`（此时用真口令 seed，含新建的 `游客` 账号）。
+  4. （禁用测试号）重建后 `visitor_demo` 会以启用态存在，测试账号不应在生产对外可用，执行一次性禁用（幂等，`init_db` 不会回写 `disabled`）：
+     `sqlite3 data/auth.db "UPDATE auth_users SET disabled=1 WHERE username='visitor_demo';"`
+     未装 sqlite3 CLI 时改用 Python：`import sqlite3; c=sqlite3.connect('data/auth.db'); c.execute("UPDATE auth_users SET disabled=1 WHERE username='visitor_demo'"); c.commit()`
   若不清旧库，翻 `=1` 后 dev 弱口令仍可用，等于没设密码。**此项为真正阻塞前置，必须完成。**
 
 ## 3. 启动与冒烟
@@ -105,3 +110,12 @@
 
 - **nginx `/api/stamp` location 摘除**：若第 6 节抽查发现 nginx 把 `/api/stamp` 暴露到公网，需在 nginx 侧摘掉该 location（仅限本机/内网可达）。此步**不前置**，按抽查结果决定。
 - 跨域 OPTIONS 预检：当前前端与后端同源，不受影响；若将来引入跨域调用，需补 CSRF 预检豁免（A 验收报告 §6 已记）。
+
+## 10. 外部只读账号「游客」（本次随 RBAC 同批部署）
+
+- **是什么**：真实外部只读账号（角色 `visitor`，仅 `record:read`+`record:export`，无写无管理），供集团下属数科公司同事通过网页看集团全量 5 家开票子公司数据。取代此前的测试账号 `visitor_demo`。
+- **怎么来**：已写入 `auth/schema.py` 的 `SEED_USERS`，`init_auth_db`（随服务启动自动跑，见 §3）会幂等建号；口令来自环境变量 `YXO_AUTH_PASSWORD_YOUKE`（见 §2，必须设真实强口令，否则 dev 占位 + WARNING）。
+- **`visitor_demo` 处理**：测试账号，本单 §2.5 步骤 4 已将其 `disabled=1` 禁用；它仍保留在 `SEED_USERS` 中仅供开发/测试安装使用，生产上应保持禁用。
+- **部署后验证（洋/小叽任选）**：
+  - 查账号存在且角色/禁用态正确：`sqlite3 data/auth.db "SELECT username,role,scope_type,disabled FROM auth_users WHERE username IN ('游客','visitor_demo');"` → 应见 `游客|visitor|companies|0` 与 `visitor_demo|visitor|companies|1`。
+  - 用 `游客` + `YXO_AUTH_PASSWORD_YOUKE` 的口令登录网页，确认只能看（不能改）全量 5 家数据。

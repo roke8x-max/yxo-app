@@ -26,6 +26,11 @@ SEED_USERS = {
     "韩文豪": ("manager", "all", [], "HANWENHAO"),
     # 验收账号：scope 绑定 yxo.db 开票子公司名称实际取值（完整字符串，禁用简写）
     "visitor_demo": ("visitor", "companies", ["太平洋、港九港铁", "保时达"], "VISITOR_DEMO"),
+    # 真实外部只读方：集团下属数科公司同事，看集团全量数据。visitor 角色纯只读
+    # (record:read + record:export)，无写无管理权限。口令经 YXO_AUTH_PASSWORD_YOUKE
+    # 设置；不设则 init_db 用开发占位 + WARNING（生产必须设真实口令）。
+    "游客": ("visitor", "companies",
+             ["太平洋、港九港铁", "保时达", "同程配、东盟", "沙坪坝、中欧木业", "联运"], "YOUKE"),
 }
 
 SCHEMA_SQL = """
