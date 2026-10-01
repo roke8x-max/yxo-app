@@ -17,7 +17,7 @@
 
 - 仓库：`https://github.com/roke8x-max/yxo-app.git`
 - 分支：`main`（PR #25 已合并入 main，含 B+v2.5+A+D4 全部代码与文档）
-- ⚠️ 追加项：外部只读账号「游客」+ 禁用 `visitor_demo`（见 §10）随本单后续 commit 合入 main，部署前请先 `git pull` 确保含该提交。
+- ⚠️ 外部只读账号「游客」+ 禁用 `visitor_demo`（见 §10）**已随 commit `d219f80` 合入 main**（即当前 main HEAD）；部署前 `git pull` 拉到 `d219f80` 即含 RBAC + 游客全部内容，无需再等后续提交。
 - 拉取：`git fetch origin && git checkout main && git pull --ff-only`
 
 ## 2. 部署前置（环境变量）⚠️ 本次为权限模块**首次**上线，以下变量生产从未设过，必须新建
