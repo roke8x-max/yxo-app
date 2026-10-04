@@ -1,8 +1,9 @@
-# 重庆物流集团 yxo 系统 —— 协作工作流
+# 重庆物流集团 yxo 系统 —— 单人开发 Git 工作流规范
 
 > **本文只讲 git / 协作流程**（分支、PR、部署、故障自查）。
 > 项目全貌（三大支柱、模块职责、硬规则、当前状态）见 **`AGENTS.md`** —— 新开对话请先读它。
-> 最后更新：2026-09-18（**分支模型改版：只用 `main`，`dev` 废弃**；补唯一解释器、Squash 合并、故障自查新条目）
+> 最后更新：2026-10-04（**确立单人分支工作流：七步标准循环，直推 `main` 一律禁止**；仓库转私有的影响与注意见 **§12**）
+> 历次改版：2026-09-18 分支模型改版（只用 `main`，`dev` 废弃）；补唯一解释器、Squash 合并、故障自查新条目
 
 ---
 
@@ -35,8 +36,18 @@
 **三句话记住：**
 
 1. 从 `main` 拉一条**扁平命名的临时分支**干活；**谁都不许直接推 `main`**
-2. 干完开 Pull Request，骁洋点合并才进 `main`
+2. 干完开 Pull Request，用 **Squash and merge** 合进 `main`
 3. 生产环境只认 `main`，而且只能用 `deploy.ps1` 部署（自动备份，出事能回滚）
+
+**每一次改动的七步标准循环（背下来，顺序不能变）：**
+
+```
+  ① 切 main 拉最新  →  ② 建临时分支  →  ③ 本地提交  →  ④ 推远程同名分支
+        →  ⑤ 网页开 PR  →  ⑥ Squash and merge  →  ⑦ 删远端分支 + 本地切回 main 拉取并删本地分支
+```
+
+> 🔴 **第 ① 步和第 ⑦ 步最容易忘。** 跳过 ① 就基于旧代码开发，跳到 ⑦ 就留下一堆僵尸分支；
+> 两者都是后面冲突和混乱的根源。完整命令见 **§3.1**。
 
 > 📌 **2026-09-18 起：`dev` 已废弃**（洋批准）。所有临时分支**从 `main` 拉、PR 回 `main`**；`dev` 落后多少都无所谓，不要再往它推、也不要再从它拉。详见 §3。
 
@@ -54,7 +65,8 @@
 |---|---|
 | 改动只走临时分支，不碰 main | 半成品代码进不了生产 |
 | PR 才能合 main | 每次进生产都有一次人工过目 |
-| 服务端分支保护拦截直推 main | main 由 GitHub 服务端强制，禁止直推，只能经 PR 合入 |
+| 本地 pre-push hook 拦截直推 main | 每台机器装上后，误推 main 会被当场拦下（见 §9.2） |
+| ~~服务端分支保护拦截直推 main~~ | ⚠️ **转私有后会失效**（Free 私有仓库无此能力，见 §12.3）⇒ 届时**本地 hook 是唯一防线** |
 | 每条 PR 都有独立验收 | 合进 main 的东西是"已验证代码"，不需要再靠一个集成分支兜底 |
 | deploy.ps1 先备份 | 部署前数据库和配置有快照 |
 | rollback.ps1 | 出事 30 秒退回上一版 |
@@ -74,7 +86,10 @@
 
 三个目录都是完整的 git 仓库，各自独立，**互不直接通信**——所有交流都经过 GitHub。
 
-GitHub 仓库：`roke8x-max/yxo-app`（**公开仓库**，代码任何人可见；敏感信息一律走 `config_local.py` / 环境变量，代码内不硬编码）
+GitHub 仓库：`roke8x-max/yxo-app`（**私有仓库**，只有被显式授权的账号可见。转私有的操作清单与其带来的影响见 **§12**）
+
+> ⚠️ **私有 ≠ 可以往代码里写敏感信息。** 私有只是"外人看不到"，同事账号、误加的协作者、以及本地备份依然看得到。
+> 口令、令牌一律还是走 `config_local.py` / `secrets.json` / 环境变量（这几类文件已被 `.gitignore` 挡住），**代码内不硬编码**。
 
 ---
 
@@ -116,6 +131,73 @@ git checkout fix-ingest-poll-uid-watermark               # ③ 切过去干活
 > ```
 >
 > `git update-ref refs/heads/fix/xxx` 同样「返回 0 但没落盘」；连手工 `mkdir` 建出的那层目录也会被抹掉。**扁平名实测稳定可用**（已用过：`fix-forward-layer-waybill-body`、`docs-interpreter-path`、`chore-workflow-main-only`）—— 这条已由洋确认写进 `AGENTS.md` §11。
+
+### 3.1 单人开发七步标准循环（**写死流程，顺序不可变**）
+
+> 本项目是**单人开发**（洋 + 芙蕾雅设计 / OpenCode 落码 / 小叽在服务器上改），但依然**每一处改动都走临时分支 + PR**。
+> 理由不是"要给谁看代码"，而是：① 半成品永远进不了 `main`；② 每次进生产都留一次可回退的记录；③ 本机和服务器两台机器同时干活时不会互相覆盖。
+
+**分支命名：`<类型>-<简短描述>`，全小写 + 连字符，绝不用斜杠**（原因见上方红线）
+
+| 类型 | 什么时候用 |
+|---|---|
+| `feature-` | 新功能 |
+| `fix-` | 修 bug |
+| `docs-` | 只改文档 |
+| `chore-` | 杂项（改配置、清理文件） |
+| `refactor-` | 重构，功能没变 |
+
+> 📌 **遗留斜杠分支**：`feature/external-visitor-yuke`（本地 + 远端）与远端 `feature/plan-b-processors-idle` 是**斜杠命名时期留下的**，按原样用完即弃、不再新增；**新建分支一律扁平名**。
+
+```powershell
+# ── ① 起点：回到 main 并拉到最新 ────────────────────────────
+git checkout main
+git pull --ff-only origin main
+# 你会看到：Already up-to-date.   或   Fast-forward 并列出新提交
+# 卡住：报 "Not possible to fast-forward" → 本地 main 被人 commit 过，别自己 reset，找芙蕾雅
+
+# ── ② 建临时分支（扁平名！绝不用斜杠）────────────────────────
+$SHA = git rev-parse main                       # 拿到 main 的完整 SHA
+git update-ref refs/heads/fix-xxx-yyy $SHA      # 用 update-ref，不用 checkout -b（见上方红线）
+git checkout fix-xxx-yyy
+# 你会看到：Switched to branch 'fix-xxx-yyy'
+# 复核（必做）：ls .git/refs/heads/ 里要有 fix-xxx-yyy 这个文件
+#              git status 只应显示你改过的文件；若整仓都显示 A，立刻停下按 §3 救援步骤修
+
+# ── ③ 本地提交（勤做；定向 add，绝不用 git add .）─────────────
+git add <你改的那几个文件>
+git commit -m "fix: 一句话说清改了什么"
+# 完整的安全提交流程见 §4.5（含测试必须先绿、push 前须获批）
+
+# ── ④ 推到远程同名分支 ──────────────────────────────────
+git push origin fix-xxx-yyy
+# 你会看到：remote: Create a pull request for 'fix-xxx-yyy' on GitHub by visiting ...
+# 卡住：看到"已拦截：不允许直接 push 到 main" → 说明你还站在 main 上，回到 ② 建分支再来一遍
+#      看到 non-fast-forward → 别人先推了，git fetch origin + git merge origin/main 解决冲突再推
+
+# ── ⑤ 网页端开 PR ──────────────────────────────────────
+# 浏览器打开 https://github.com/roke8x-max/yxo-app/pulls → New pull request
+#   base: main      ←      compare: fix-xxx-yyy
+# 逐步点击见 §5.1
+
+# ── ⑥ Squash and merge 合并 ────────────────────────────
+# PR 页面点 "Squash and merge" → "Confirm squash and merge"
+# ⚠️ 不要用 Create a merge commit / Rebase and merge —— 本仓库 main 开了强制线性历史，详见 §5.3
+
+# ── ⑦ 收尾：删分支 → 本地切回 main 拉最新 → 删本地分支 ──────────
+# 网页：合并后 GitHub 会弹 "Delete branch" 按钮，点它（远端分支删除）
+git checkout main
+git pull --ff-only origin main      # 让本机 main 跟上刚合进去的提交
+git branch -d fix-xxx-yyy           # 删本地临时分支
+# 你会看到：Deleted branch fix-xxx-yyy (was xxxxxxx).
+# 卡住：-d 报 "not fully merged" → 还有提交没进 main，回到 ④ 推上去再合；
+#      别用 -D 强删 —— 那是"我不知道这些改动去哪了"的意思
+```
+
+**两条最容易踩的**：
+
+- **跳过 ①** —— 基于几天前的 `main` 开发，推上去必冲突，且改的是已经被人改过的旧代码。
+- **跳过 ⑦** —— 本机和服务器上堆一堆僵尸分支，下次开工分不清哪个是当前在改的。
 
 ---
 
@@ -282,9 +364,40 @@ git show --stat HEAD                 # 确认这个提交恰好只包含预期�
 
 什么时候开 PR：**临时分支上的改动已经自测通过、可以上生产了。**
 
-### 5.1 开 PR
+### 5.1 开 PR（**网页端 —— 本流程默认走这条**）
 
-命令行（推荐，装了 `gh` 的话）：
+**第 1 步 · 推完立刻开**
+
+浏览器打开 https://github.com/roke8x-max/yxo-app
+
+- 刚 push 过的话，页面顶部会出现一条提示条 `fix-xxx-yyy had recent pushes`，右边是 **Compare & pull request** —— 点它。
+- 没看到提示条：直接访问 https://github.com/roke8x-max/yxo-app/pulls → 右上 **New pull request**。
+
+**第 2 步 · 确认方向（最容易点错的一步）**
+
+页面中间有一排选择器：`base: xxx ← compare: yyy`
+
+- `base` 必须是 **`main`**（合到哪去）
+- `compare` 必须是 **你的临时分支**（从哪来）
+
+方向反了会变成"把 main 合进你的分支"，diff 是空的或整个反过来。**发现反了就点两边的下拉框换回来**，别硬着头皮往下开。
+
+**第 3 步 · 填标题和正文**
+
+- 标题：一句话说清这次改了什么（它会变成 `main` 上那条提交的标题，认真写）
+- 正文建议三段：改了什么 / 为什么改 / **测过什么**（把跑过的命令贴出来）
+
+**第 4 步 · 提交**
+
+点 **Create pull request**。页面出现 `#编号` 就是成功了。
+
+**第 5 步 · 开完先看一眼 Files changed**
+
+切到 **Files changed** 标签核对：只有你预期的文件、没有密钥 / 数据库 / 日志。
+
+> 📌 Squash 历史会让 **Commits 标签拖出一大串历史提交**，那是正常的 —— **看 Files changed 的 diff 才算数**（详见 §5.3）。
+
+**命令行备选**（装了 `gh` 的话，非默认路径）：
 
 ```powershell
 gh pr create --base main --head <你的临时分支名> --title "本周订舱模块改进" --body "改了什么、测过什么"
@@ -424,13 +537,54 @@ cd yxo-app
 git checkout main        # 唯一的分支就是 main（dev 已废弃，见 §3）
 ```
 
-### 9.2 装 hook（**重新 clone 后必须重做**）
+### 9.2 装 hook（**每台机器都要装；重新 clone 后必须重做**）
+
+> 为什么必须装：转私有后 GitHub 免费版**不再提供服务端分支保护**（见 §12），
+> 本地 hook 就从"第二道防线"变成**唯一一道防线**。不装，直推 `main` 就没人拦了。
+> hook 文件存在 `.git\hooks\` 里，这个目录**不入库、不跟着 clone 走**，所以每台机器、每次重新 clone 都得重装一次。
+
+**第 1 步 · 进到仓库根目录**
+
+```powershell
+cd C:\Users\Roke8x\Projects\yxo-app      # ← 换成你这台机器上的实际路径，见下表
+```
+
+| 机器 | 仓库路径 | 谁负责装 |
+|---|---|---|
+| 洋的本机 | `C:\Users\Roke8x\Projects\yxo-app` | 芙蕾雅已于 2026-10-04 装好 |
+| 服务器开发（小叽） | `E:\yxo_app_dev` | **待装** |
+| 服务器生产 | `D:\YXO_DATA\yxo_app` | 待装（该目录只 `pull` 不 `push`，装上是多一层保险） |
+
+**第 2 步 · 执行安装**
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install-hooks.ps1
 ```
 
-hook 存在 `.git\hooks\` 里，这个目录**不会跟着 git 走**，所以每台机器、每次重新 clone 都得重装一次。不装的话直推 main 就没人拦了。
+你会看到两行绿色 `已安装  post-fetch` / `已安装  pre-push`，最后 `完成，共安装 2 个 hook。`
+
+**第 3 步 · 验证真的生效（别只看"完成"两个字）**
+
+```powershell
+Get-ChildItem .git\hooks -File | Where-Object { $_.Name -notlike '*.sample' }
+```
+
+应该列出 `post-fetch` 和 `pre-push` 两个文件。再实测一次拦截（在仓库根目录）：
+
+```bash
+printf 'refs/heads/main aaa refs/heads/main bbb\n' | sh .git/hooks/pre-push; echo "退出码=$?"
+```
+
+看到 `已拦截：不允许直接 push 到 main` 且 **退出码=1** 才算装对了。
+
+**卡住怎么办**
+
+| 现象 | 原因 | 怎么办 |
+|---|---|---|
+| 提示"找不到 scripts\hooks，仓库可能不完整" | 没 `git pull` 或不在仓库根目录 | 先 `git pull --ff-only`，再确认 `git rev-parse --show-toplevel` 能输出路径 |
+| 提示"当前目录不是 git 仓库" | `cd` 错了 | 对照上表的路径重新 `cd` |
+| 执行后 `.git\hooks` 里还是空的 | 杀软拦截写入（本机火绒有过前科，见 §4.1） | 把仓库的 `.git` 目录加进杀软信任区/排除项，再跑一次 |
+| `git push` 时 hook 完全没反应 | hook 文件缺可执行位 | 重跑安装脚本；仍不行就 `chmod +x .git/hooks/pre-push` |
 
 ### 9.3 配身份
 
@@ -530,7 +684,7 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1         # 出事�
 **关键位置**
 
 ```
-GitHub       roke8x-max/yxo-app（公开）
+GitHub       roke8x-max/yxo-app（**私有**，见 §12）
 本机开发     C:\Users\Roke8x\Projects\yxo-app       临时分支（从 main 拉）
 服务器开发   E:\yxo_app_dev                          临时分支（从 main 拉）
 服务器生产   D:\YXO_DATA\yxo_app                     main
@@ -542,10 +696,80 @@ GitHub       roke8x-max/yxo-app（公开）
 
 ---
 
+## 12. 仓库转私有（2026-10-04 定）
+
+### 12.1 先说结论：本次转私有代价为零
+
+2026-10-04 实测 `roke8x-max/yxo-app`：**forks = 0，stars = 0，watchers = 0，GitHub Pages 未启用，仓库内没有 `.github`（即无 CI 工作流）**。
+
+也就是说，官方列出的那些转私有副作用（fork 残留、star 清空、Pages 下线、Actions 配额）**这次一条都不会碰到**。放心转。
+
+### 12.2 转换操作（网页端，约 1 分钟）
+
+1. 打开 https://github.com/roke8x-max/yxo-app/settings
+2. 页面滚到最底部 **Danger Zone**
+3. **Change repository visibility** → **Change visibility**
+4. 选 **Make private**
+5. 按提示**输入仓库名 `roke8x-max/yxo-app`** 确认，点 **I have read and understand these effects**
+
+### 12.3 转私有后会变什么（GitHub 官方口径，逐条对照本仓库）
+
+| 项目 | 官方说明 | 对本仓库的实际影响 |
+|---|---|---|
+| **服务端分支保护** | Free 个人账户的**私有**仓库不含 Protected branches（该能力属 Pro） | 🔴 **最重要的一条**：`main` 的服务端保护会失效 ⇒ **本地 pre-push hook 成为唯一防线**，三台机器都必须装（§9.2），且绝不用 `--no-verify` 绕过 |
+| 已有 fork | 公开 fork 会**保持公开**并从本仓库网络分离 | forks = 0，无影响 |
+| Stars / Watchers | 会被**清除** | 都是 0，无影响 |
+| GitHub Pages | Free 私有仓库不支持；已发布站点自动下线 | 未启用，无影响 |
+| GitHub Actions | 公开仓库不限量免费；私有仓库按配额（Free 2000 分钟/月） | 无 `.github/workflows`，无影响 |
+| 代码扫描 / Advanced Security | 停用（除非组织版配了许可） | 未使用，无影响 |
+| GitHub Archive Program（北极代码归档） | 不再纳入 | 无影响 |
+| 谁能看代码 | 必须**逐个显式邀请**协作者；未被邀请者立刻失去访问 | 见 12.5 |
+
+### 12.4 🔴 转私有不撤回「已经公开过」的东西
+
+这是最容易被误解的一点：**转私有只挡"以后"，不擦"以前"。** 仓库此前是公开的，历史提交里的任何内容都已被看到过、也可能被别人克隆或缓存过。
+
+2026-10-04 实测本仓库的历史：
+
+- ✅ **从未**有 `secrets.json`、`config_local.py`、`*.db` 进入过 git 历史（`.gitignore` 一直挡得住），这一项干净。
+- ⚠️ 但 `mailbots_next/config/secrets.py` 里**硬编码了 4 位同事的公司邮箱**（`maoxiaoyang@` / `yangyawen@` / `fengqian@` / `hanwenhao@cqtransit.com`）—— 这些已经在公开历史里了，转私有也撤不回。
+
+**据此要做的事**（按优先级）：
+
+1. 如果这几个邮箱的**口令**曾出现在任何代码、文档、日志或聊天记录里 —— **换掉**。
+2. 服务器上的 **GitHub PAT**、企微通知 token 等凭据，若曾出现在公开仓库里 —— **重新生成并替换**。
+3. 以后新增凭据一律走 `config_local.py` / `secrets.json` / 环境变量，不进代码（§2）。
+
+### 12.5 转私有后每台机器要做的事
+
+1. **验证三个 clone 都能正常 fetch**（私有仓库要求认证，凭证失效会直接报 403 / 404）
+   - 服务器上存的是 PAT（`git config --global credential.helper store`），PAT 必须带 `repo` 权限且**未过期**
+   - 服务器上还要确认代理仍通：见 §9.4 的 `Test-NetConnection`
+2. **重跑一次 deploy 演习**，确认生产目录仍能拉到代码：
+   ```powershell
+   cd D:\YXO_DATA\yxo_app
+   powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -DryRun
+   ```
+   ⚠️ PAT 过期的话，自动拉取会**静默失败**（深夜跑的时候没人看见），所以这一步必须在转私有后当天做一次。
+3. **三台机器都装 hook**：见 §9.2。
+4. **到 Settings → Branches 复查 `main` 的保护规则**：若规则消失或不再强制，**本地 hook 就是唯一防线**。
+5. **给需要看代码的人发邀请**：Settings → Collaborators → Add people（Free 私有仓库支持无限协作者，但必须逐个邀请）。
+
+### 12.6 常见误解（说清楚，别把私有化当万能药）
+
+- ❌ **"转私有能解决两台机器的同步问题"** —— 不能。同步问题的根因是**两台机器直接推同一条 `main`**；真正解决它的是 §3.1 那套"临时分支 + PR"流程，跟仓库公开还是私有**没有关系**。
+- ❌ **"转私有后就能往代码里写口令"** —— 不能，见 §2 的提示。
+- ✅ 转私有真正解决的只有一件事：**代码不再对全网可见**。
+
+---
+
 ## 附：还没做的事
 
 - [ ] **上云改造**：**等数科部完成申请阿里云的流程之后**再统一启动。现存 Linux 预研产物（`deploy/systemd`、`deploy/logrotate`、`scripts/deploy.sh`、`scripts/rollback.sh`）**暂时保留不动**，详见 `AGENTS.md` §9.6
 - [ ] 服务器 Flask 服务用 nssm 注册成 Windows 服务（现在是手动跑 start.bat，重启机器要人工介入）—— 邮件机器人已走 nssm，Flask 还没
 - [ ] 数据库结构变更（加字段、改表）目前没有迁移脚本，靠手工同步，有风险
+- [ ] **把仓库转为私有**（已定，尚未执行）：操作与转后注意事项见 **§12**；转完当天要跑一次 `deploy.ps1 -DryRun` 确认服务器仍能拉取
+- [ ] **服务器两个 clone 装 hook**：`E:\yxo_app_dev`（必装）与 `D:\YXO_DATA\yxo_app`（保险），步骤见 **§9.2**
 - [ ] 远端遗留分支 `feature/plan-b-processors-idle` 待清理
+- [ ] 本地 `feature/external-visitor-yuke` 是斜杠命名的遗留分支，用完即弃（不再新增斜杠分支，见 §3.1）
 - [ ] 本机 `C:\Users\Roke8x\Projects\yxo-app-broken-20260806` 是 8/6 修 git 时的备份目录，观察几天没问题就可以删

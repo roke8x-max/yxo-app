@@ -6,6 +6,9 @@
 #   GitHub 免费版的私有仓库开不了服务端分支保护，
 #   所以用本地 hook 达到同样效果：main 只能通过 Pull Request 合入。
 #
+#   2026-10-04 修正：本文件原先提示"改推 dev"，但 dev 已于 2026-09-18 废弃，
+#   属于误导性指引，已改为指向 WORKFLOW.md 的临时分支流程。
+#
 # 安装：在仓库根目录执行
 #   powershell -ExecutionPolicy Bypass -File scripts\install-hooks.ps1
 #
@@ -18,17 +21,17 @@ do
 		echo "   已拦截：不允许直接 push 到 main"
 		echo "  ======================================================"
 		echo ""
-		echo "  main 是生产分支，只接受来自 dev 的 Pull Request。"
+		echo "  main 是生产分支，只能经 Pull Request 合入（Squash and merge）。"
 		echo ""
 		echo "  正确做法："
-		echo "    git checkout dev"
-		echo "    git push origin dev"
-		echo "    gh pr create --base main --head dev --fill"
-		echo "    （然后等骁洋在 GitHub 上点合并）"
+		echo "    1) 从最新 main 拉一条扁平命名的临时分支（见 WORKFLOW.md §3）"
+		echo "    2) git push origin <你的临时分支名>"
+		echo "    3) 到 GitHub 网页开 PR：base=main ← compare=<你的临时分支名>"
+		echo "    4) Squash and merge 合并，合并后删除分支"
 		echo ""
 		echo "  只有生产事故抢修时才允许绕过："
 		echo "    git push --no-verify origin main"
-		echo "  绕过后必须立刻告诉骁洋，并把改动同步回 dev。"
+		echo "  绕过后必须立刻报备，并当天补记原因。"
 		echo ""
 		exit 1
 	fi
