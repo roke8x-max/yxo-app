@@ -188,10 +188,16 @@ git push origin fix-xxx-yyy
 # 网页：合并后 GitHub 会弹 "Delete branch" 按钮，点它（远端分支删除）
 git checkout main
 git pull --ff-only origin main      # 让本机 main 跟上刚合进去的提交
-git branch -d fix-xxx-yyy           # 删本地临时分支
+git branch -D fix-xxx-yyy           # 删本地临时分支 —— 必须用 -D，不是 -d！原因见下
 # 你会看到：Deleted branch fix-xxx-yyy (was xxxxxxx).
-# 卡住：-d 报 "not fully merged" → 还有提交没进 main，回到 ④ 推上去再合；
-#      别用 -D 强删 —— 那是"我不知道这些改动去哪了"的意思
+#
+# ⚠️ 为什么必须 -D：Squash 合并会在 main 上生成一个**全新提交**（见 §5.3），
+#    临时分支上的原始提交并不是 main 的祖先，所以 **-d 必然报 "not fully merged"**，
+#    那不代表没合上。用 -D 前先确认两件事，确认过 -D 就是安全的：
+#      ① PR 页面显示 Merged（或 git log --oneline main -3 能看到合并生成的那条提交）；
+#      ② git show --stat <合并提交SHA> 的文件清单与你的改动一致。
+#    📌 勘误记录（2026-10-05 实测）：本节初版写的「-d 失败 = 还有提交没进 main，回到 ④
+#       推上去再合；别用 -D」是**错的**——Squash 流程下 -d 必然失败，照做会死循环。
 ```
 
 **两条最容易踩的**：
@@ -445,8 +451,10 @@ gh pr merge --squash
 ```powershell
 git checkout main
 git pull --ff-only origin main      # 让本机 main 跟上
-git branch -d <你的临时分支名>        # 删掉本地临时分支（远端那条 GitHub 已删）
+git branch -D <你的临时分支名>        # 删掉本地临时分支。⚠️ 用 -D 不是 -d（远端那条 GitHub 已删）
 ```
+
+> 🔴 **为什么是 `-D` 不是 `-d`**：Squash 合并会在 `main` 上生成全新提交（§5.3），临时分支的原始提交**不是 main 的祖先**，`-d` 必报 `not fully merged`——那不代表没合上。用 `-D` 前确认 ① PR 页面显示 Merged；② `git show --stat <合并提交>` 与你的改动一致。确认过，`-D` 就是安全删除。（2026-10-05 实测勘误：本节与 §3.1 ⑦ 初版写的 `-d` 是错的，照做会卡死循环。）
 
 > 📌 **历史遗留说明**（2026-09-18 之前适用）：那时 `dev` 作集成分支，而 `main` 强制线性历史、PR 只能 Squash ⇒ 每次合并都让 `dev` 与 `main` 分叉 ⇒ 本节规定"合并后必须把 main 合回 dev"。
 > **现在不需要了**：`dev` 已废弃，落后多少都无所谓（只当历史参照留着）。
