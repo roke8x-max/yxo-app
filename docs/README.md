@@ -54,16 +54,21 @@
 
 ---
 
-## 四、`docs/superpowers/` 是什么（**特殊，不要动**）
+## 四、`docs/superpowers/` 已拆掉（2026-10-08）
 
-`docs/superpowers/` **不是本项目的模块目录**，是 **superpowers 工作流的产出区**（`plans/` + `specs/` 是它规定的目录约定，**不能拆散**）。
+这里原本放着 16 份「superpowers 工作流」产出的设计稿（`plans/` + `specs/`）。**现已全部按模块归位，该目录已删除**：
 
-> **技能本体**已装在本机 `~/.workbuddy/skills/`（`using-superpowers`、`brainstorming`、`writing-plans`、`executing-plans`、`test-driven-development` 等 15 个）。
-> `docs/superpowers/` 里放的是**这套流程产出的设计稿**（16 份：mailbots 重构设计、Plan A/B、统一错误处理、工单系统设计、RBAC 设计 + 9-29/9-30 一批任务书）。
+| 原在 `docs/superpowers/` 的文档 | 现在的位置 |
+|---|---|
+| mailbots 重构设计、Plan A、Plan B | `mailbots/archive/` |
+| 权限 RBAC 模块总体设计 | `auth/specs/` |
+| RBAC 加固 / 验收 / 任务书等 7 份（9-29 ~ 9-30） | `auth/archive/` |
+| 统一错误处理设计 | `mainsite/archive/` |
+| 工单系统设计 | `gongdan/specs/` |
+| 部署交接 / 部署清单 / D4 日志 3 份 | `ops/archive/` |
 
-**它的定位**：早期（8~9 月）的**设计阶段产物**，按当时的流程沉淀。**保持原样、不拆分、不搬迁。**
-
-**模块 README 里的"早期设计稿在哪"会指向它**（例如 auth 的 RBAC 设计、mailbots 的重构设计）。查历史设计时按模块 README 给的路径进去。
+> 📌 **以后新产出直接放进对应模块的 `specs/` / `drafts/`**，不要再另建工作流目录——否则各模块 README 又得维护一堆外部引用，每次产出都要回来改一遍。
+> 🛠️ **技能本体**仍在 `~/.workbuddy/skills/`（16 个，当前**全部是 `disable: true`**，所以 "/" 里叫不出来；要用需去掉该字段并重启）。
 
 ---
 

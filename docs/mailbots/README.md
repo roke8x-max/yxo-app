@@ -32,11 +32,11 @@
 
 > 这批**全部已完成并合并**（多数有配对验收报告）。逐份的完成性核实见 `meta/drafts/2026-10-08-国庆文档批次-*`。
 
-## 早期设计稿（在 `docs/superpowers/`，不搬迁）
+## 早期设计稿（2026-08，已归入本模块 archive）
 
-- [`../superpowers/specs/2026-08-26-mailbots-refactor-design.md`](../superpowers/specs/2026-08-26-mailbots-refactor-design.md) —— **新旧系统重构的总体设计**（mailbots_next 的由来）
-- [`../superpowers/plans/2026-08-26-mailbots-plan-a-core-foundation.md`](../superpowers/plans/2026-08-26-mailbots-plan-a-core-foundation.md) —— Plan A 核心地基
-- [`../superpowers/plans/2026-08-26-mailbots-plan-b-processors-idle.md`](../superpowers/plans/2026-08-26-mailbots-plan-b-processors-idle.md) —— Plan B 处理器（**已废弃**：IDLE 方案后来被轮询方案取代）
+- [2026-08-26-mailbots-refactor-design](archive/2026-08-26-mailbots-refactor-design.md) —— **新旧系统重构的总体设计**（`mailbots_next` 的由来）
+- [2026-08-26-mailbots-plan-a-core-foundation](archive/2026-08-26-mailbots-plan-a-core-foundation.md) —— Plan A 核心地基
+- [2026-08-26-mailbots-plan-b-processors-idle](archive/2026-08-26-mailbots-plan-b-processors-idle.md) —— Plan B 处理器（⚠️ **已废弃**：IDLE 方案后来被轮询方案取代）
 
 ## 相关代码
 

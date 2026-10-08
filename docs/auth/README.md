@@ -21,10 +21,10 @@
 
 > 权限模块的设计本意是**影子期先行**：先部署、开关保持 0（只记账不拦），观察够了再开闸。
 
-## 早期设计稿（在 `docs/superpowers/`，不搬迁）
+## 早期设计稿（已归入本模块）
 
-- [`../superpowers/specs/2026-09-21-permission-rbac-module-design.md`](../superpowers/specs/2026-09-21-permission-rbac-module-design.md) —— **RBAC 模块总体设计**（`auth/` 内联包的由来）
-- 同目录另有 9-29 / 9-30 一批：`2026-09-29-rbac-hardening-taskbook.md`、`2026-09-29-rbac-acceptance-verify.md`、`2026-09-29-taskbook-A-auth-switch.md`、`2026-09-29-taskbook-B-stamp-hardening.md`、`2026-09-30-rbac-A-acceptance.md`、`2026-09-29-defects-nonblocking.md`、`2026-09-29-deploy-checklist-B.md`、`2026-09-29-handoff-xiaoji-stamp-check.md`
+- **总体设计** → [`specs/2026-09-21-permission-rbac-module-design.md`](specs/2026-09-21-permission-rbac-module-design.md) —— `auth/` 内联包的由来，**仍是现行架构依据**
+- **9-29 / 9-30 加固与验收批次** → 在 `archive/`：[rbac-hardening-taskbook](archive/2026-09-29-rbac-hardening-taskbook.md)、[rbac-acceptance-verify](archive/2026-09-29-rbac-acceptance-verify.md)、[taskbook-A-auth-switch](archive/2026-09-29-taskbook-A-auth-switch.md)、[taskbook-B-stamp-hardening](archive/2026-09-29-taskbook-B-stamp-hardening.md)、[rbac-A-acceptance](archive/2026-09-30-rbac-A-acceptance.md)、[defects-nonblocking](archive/2026-09-29-defects-nonblocking.md)、[handoff-xiaoji-stamp-check](archive/2026-09-29-handoff-xiaoji-stamp-check.md)
 
 ## 相关代码与说明
 

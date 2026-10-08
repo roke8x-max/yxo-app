@@ -34,4 +34,4 @@
 ## 相关
 
 - 仓库根 `AGENTS.md`（AI 作业契约，最高优先级）、`WORKFLOW.md`（git / PR / 部署流程）
-- `docs/superpowers/`（superpowers 工作流产出区，特殊，见 `../README.md` §四）
+- 技能本体在 `~/.workbuddy/skills/`（16 个，当前均 `disable: true`）；早期设计稿已按模块归位（见 `../README.md` §四）

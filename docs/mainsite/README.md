@@ -18,11 +18,9 @@
 
 ## 已归档（Archive）
 
-暂无。主站的过程文档目前都在上两份 drafts 里（尚未执行）。
+- [2026-09-06-unified-error-handling](archive/2026-09-06-unified-error-handling.md) —— 统一错误处理设计（`errors.py` 的由来）
 
-## 早期设计稿（在 `docs/superpowers/`，不搬迁）
-
-- [`../superpowers/specs/2026-09-06-unified-error-handling.md`](../superpowers/specs/2026-09-06-unified-error-handling.md) —— 统一错误处理设计（`errors.py` 的由来）
+> 主站其余的过程文档目前都在上两份 drafts 里（尚未执行）。
 
 ## ⚠️ 三条最容易踩的
 

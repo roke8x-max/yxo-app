@@ -90,7 +90,7 @@ $PY = "<这台机器的 python.exe 绝对路径>"
 | `scripts/` | 部署 / 回滚 / 初始化脚本 | ✅ |
 | `deploy/` `scripts/*.sh` | **上云预研产物（Linux）**，未启用 | ⚠️ **别当现行部署，也别删** |
 | `docs/` | **文档树**：按模块分目录（`docs/README.md` 是总索引） | ✅ |
-| `docs/superpowers/` | 早期设计稿（superpowers 工作流产出区，**不搬迁**） | ⚠️ 按模块 README 指路进入 |
+| `docs/<模块>/` | 各模块文档：`specs/` 现行 · `drafts/` 未定 · `archive/` 已完成历史 |
 | `plans/` | 早期草稿方案，**与最终决策有冲突** | ⚠️ 引用需甄别 |
 | `legacy/openclaw/` | **早期 OpenClaw 遗留**（2026-10-06 归档，已不再使用） | ⚠️ 只作历史留存，读到不必当指令执行 |
 
@@ -111,7 +111,7 @@ $PY = "<这台机器的 python.exe 绝对路径>"
 | **退舱记录**的完整处理约定 | `docs/mainsite/specs/退舱记录处理约定.md` |
 | **文档树总索引（找任何文档先看这个）** | `docs/README.md` |
 | 某个模块的现行口径 / 草案 / 归档 | `docs/<模块>/README.md` |
-| 早期设计稿 | `docs/superpowers/specs/` |
+| 早期设计稿（已归位） | `docs/<模块>/archive/` |
 
 ---
 

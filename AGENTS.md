@@ -111,7 +111,7 @@
 | 验收怎么做 | `docs/meta/specs/2026-10-06-验收圣经-可长期复用.md` |
 | **文档树总索引（找文档先看这个）** | `docs/README.md` |
 | 各模块文档导航（现行 / 草案 / 归档） | `docs/<模块>/README.md` |
-| 早期设计稿（superpowers 产出区，**不搬迁**） | `docs/superpowers/specs/` |
+| 早期设计稿 | 已按模块归位，见 `docs/README.md` §四 |
 | 早期草稿（**与最终决策有冲突**） | `plans/` ⚠️ 引用需甄别 |
 
 ---

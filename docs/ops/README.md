@@ -13,13 +13,16 @@
 
 暂无。
 
-## 已归档（Archive，3 份）
+## 已归档（Archive，6 份）
 
 | 文档 | 讲什么 |
 |---|---|
-| 2026-09-11-VERP标签部署验证手册.md | VERP 标签的部署验证 |
-| 2026-09-14-上线前执行清单(给小叽).md | 邮件机器人上线前的服务器执行清单 |
-| 2026-09-14-提交方案与PR切分.md | 当时那批改动的提交与 PR 切分方案 |
+| [2026-09-11-VERP标签部署验证手册](archive/2026-09-11-VERP标签部署验证手册.md) | VERP 标签的部署验证 |
+| [2026-09-14-上线前执行清单(给小叽)](archive/2026-09-14-上线前执行清单(给小叽).md) | 邮件机器人上线前的服务器执行清单 |
+| [2026-09-14-提交方案与PR切分](archive/2026-09-14-提交方案与PR切分.md) | 当时那批改动的提交与 PR 切分方案 |
+| [2026-09-29-deploy-checklist-B](archive/2026-09-29-deploy-checklist-B.md) | 部署清单 B |
+| [2026-09-30-deploy-handoff-combined](archive/2026-09-30-deploy-handoff-combined.md) | 合并后的部署交接单（D-1 部署权限模块时按它执行） |
+| [2026-09-30-taskbook-D4-dryrun-logging](archive/2026-09-30-taskbook-D4-dryrun-logging.md) | D4：dry-run 日志丢失问题的任务书 |
 
 ## ⚠️ 两条必须记住的环境事实
 
