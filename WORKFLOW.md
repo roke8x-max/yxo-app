@@ -113,7 +113,25 @@ git branch -D fix-xxx-yyy           # 删本地临时分支 —— 必须用 -D�
 git checkout main
 git pull --ff-only origin main     # 标准拉取；等价于 fetch + ff-merge
 ```
-> ⚠️ **本机 git 引用损坏说明（历史，现已根治）**：之前本机 WorkBuddy 自带的 PortableGit 改写 `.git/packed-refs` 时**静默失败**，`origin/main` 会变成 `[gone]`。真因是**火绒(Huorong)实时防护**拦截了对 `packed-refs` 的删除/重命名（不是 Defender——Defender 当时已被火绒接管禁用，报 `0x800106ba`）。**已根治**：在火绒「信任区 / 排除项」加入仓库 `.git` 路径后，git 原生 `fetch`/`pull` 恢复，不再需要 `git sync` 兜底（`git sync` 别名与 `scripts/repair-refs.sh` 现已无实际操作，保留无害）。若你机器未加排除项又出现 `[gone]`，把仓库 `.git` 加进火绒排除项即可，无需改用其他命令。
+> ⚠️ **本地 `origin/*` 引用会停止更新 —— 但别急着怪杀软（2026-10-08 重新定性）**
+>
+> **现象**：`git fetch` / `git push` **打印成功**（例如 `987802d..88d0171  main -> origin/main`），但本地 `origin/*` 引用**根本没落盘** ⇒ 之后 `git status` 显示**虚假的 `[ahead N]` / `[gone]`**，`git rev-parse origin/main`、`git branch -vv` 也全拿到**过期值**。2026-09-14 因此误判过"严重分叉"，2026-09-18 与 **2026-10-08** 又各出现一次。
+>
+> **已确认的两类原因**（**不一定是杀软**）：
+> 1. **杀软"行为防护"拦截 git 进程写入 `.git`** —— ⚠️ 但**加「信任区」通常治不了**：信任区的语义是"**病毒扫描跳过**"，**不是"允许写入"**。要治得去加**「文件实时监控 / 行为防护」的排除项**。
+> 2. **AI agent 的执行沙箱**（2026-10-08 实测，本仓库最可能的原因）：agent 在沙箱内跑 `fetch` 时，写 `.git/packed-refs` 的操作**100% 不落盘**（打印成功、值不变，复现 4 次）；而**同一条命令在沙箱外跑则完全正常**。
+>
+> **📌 2026-10-08 复核结论**：在洋的本机**手动**跑 `git fetch origin` + `git rev-parse origin/main` → **返回正确值** ⇒ **本机当前不存在此问题**。此前把原因写成"火绒拦 packed-refs"**不成立**（那是 agent 侧沙箱造成的假象——洋为此反复检查火绒白名单，白查了）。
+>
+> 🔴 **硬规矩（唯一可靠做法）**：**判断远端状态一律用 `git ls-remote`**（直连服务器，不经本地 refs）。**不要**用 `git status` / `git branch -vv` / `git rev-parse origin/*` 做判断。
+>
+> 🔧 **需要修正陈旧引用时的临时手法**（2026-10-08 实测有效）：直接改打包引用文件，绕过 git 的写入路径 ——
+> ```bash
+> sed -i 's|^<旧SHA> refs/remotes/origin/main|<新SHA>|' .git/packed-refs
+> ```
+> （改前先 `cp .git/packed-refs /tmp/packed-refs.bak` 备份。）
+>
+> 📎 历史：`git sync` 别名与 `scripts/repair-refs.sh` 是当年为绕这个问题加的兜底，现已无实际作用，保留无害。
 
 ### 4.2 边改边存档
 ```powershell
@@ -154,7 +172,7 @@ git symbolic-ref HEAD       # 看 HEAD 指向哪个分支
 - ❌ 列表里出现 **`secrets.json` / `*.db` / `logs/` / `config_local.py` / 个人绝对路径** → **停下**：说明 `.gitignore` 漏了，先补忽略规则再提交。
 - ❌ **`git status --short` 里"整个仓库的文件都标成 `A`" → 立刻停下，绝不 add/commit**：这是 **HEAD 悬空**（最常见成因：拿带斜杠的分支名建过分支，见 §3）。按 §3 的救援步骤 `git symbolic-ref HEAD refs/heads/main` 修回来再继续；**在悬空状态下提交会造出 root commit，把历史关系砸掉**。
 - ❌ 出现**你根本没印象改过**的文件 → 逐个 `git diff <文件>` 看清楚；确认无关就 `git restore <文件>` 退回。**不要盲提交**（幽灵改动就是这么进库的）。
-- ⚠️ `git fetch` 后 `git branch -vv` 才准。本机火绒会拦 `.git/packed-refs` 改写，导致 fetch 前显示虚假的 "ahead N"。
+- ⚠️ `git fetch` 后 `git branch -vv` 才准。**本地 `origin/*` 引用可能根本写不进去**（fetch 会"报成功"，见 §4.1）⇒ 于是显示**虚假的 "ahead N"**。**核远端一律 `git ls-remote`。**
 **第 1 步 · 定向 add —— 明令禁止 `git add .` 和 `git add -A`**：`git add <明确列出的文件或目录>`（一个提交只装一个主题），再 `git status --short` 复查暂存区里刚好是这几个（左列出现 A/M）。
 **第 2 步 · 看"即将进去的内容"，而不是"改了哪些文件"**：`git diff --cached` —— 暂存区 vs HEAD，这才是这次真正要提交的东西。
 **第 3 步 · 测试必须先绿** —— 🔴 **用本机唯一解释器**（2026-09-18 定，洋批准）：
@@ -208,7 +226,10 @@ git checkout main
 git pull --ff-only origin main      # 让本机 main 跟上
 git branch -D <你的临时分支名>        # 删掉本地临时分支。⚠️ 用 -D 不是 -d（远端那条 GitHub 已删）
 ```
-> 🔴 **为什么是 `-D` 不是 `-d`**：Squash 合并会在 `main` 上生成全新提交（§5.3），临时分支的原始提交**不是 main 的祖先**，`-d` 必报 `not fully merged`——那不代表没合上。用 `-D` 前先确认 ① PR 页面显示 Merged；② `git show --stat <合并提交>` 与你的改动一致。确认过，`-D` 就是安全删除。（2026-10-05 实测勘误：本节与 §3.1 ⑦ 初版写的 `-d` 是错的，照做会卡死循环。）📌 **历史遗留说明**（2026-09-18 之前适用）：那时 `dev` 作集成分支，而 `main` 强制线性历史、PR 只能 Squash ⇒ 每次合并都让 `dev` 与 `main` 分叉 ⇒ 本节规定"合并后必须把 main 合回 dev"。**现在不需要了**：`dev` 已废弃，落后多少都无所谓（只当历史参照留着）。⚠️ **本机火绒会拦 `.git/packed-refs` 改写**：`git fetch` / `git push` 会"报告成功"，但本地 `origin/*` 引用**不更新** → `git rev-parse origin/main`、`git branch -vv` 都会拿到**过期值并导致误判**（2026-09-14 因此误判过"严重分叉"；2026-09-18 又出现 `git status -sb` 显示 `[gone]`，而远端分支其实好好的）。**判断远端状态一律用 `git ls-remote`（直接问服务器），或直接写完整 SHA。** 治本是给杀软信任区加仓库 `.git` 路径。
+> 🔴 **为什么是 `-D` 不是 `-d`**：Squash 合并会在 `main` 上生成全新提交（§5.3），临时分支的原始提交**不是 main 的祖先**，`-d` 必报 `not fully merged`——那不代表没合上。用 `-D` 前先确认 ① PR 页面显示 Merged；② `git show --stat <合并提交>` 与你的改动一致。确认过，`-D` 就是安全删除。（2026-10-05 实测勘误：本节与 §3.1 ⑦ 初版写的 `-d` 是错的，照做会卡死循环。）📌 **历史遗留说明**（2026-09-18 之前适用）：那时 `dev` 作集成分支，而 `main` 强制线性历史、PR 只能 Squash ⇒ 每次合并都让 `dev` 与 `main` 分叉 ⇒ 本节规定"合并后必须把 main 合回 dev"。**现在不需要了**：`dev` 已废弃，落后多少都无所谓（只当历史参照留着）。
+> ⚠️ **本地 `origin/*` 引用可能停止更新**：`git fetch` / `git push` 会"报告成功"，但本地引用**可能不落盘** ⇒ `git status -sb` 显示**虚假的 `[ahead N]` / `[gone]`**，`git rev-parse origin/main`、`git branch -vv` 都拿到**过期值**。
+> **原因与修法见 §4.1** —— ⚠️ 2026-10-08 复核结论：**不是杀软**（本机手动跑 `fetch` 正常，洋为此反复查过火绒白名单，白费功夫）；是 **agent 执行沙箱**写不进 `.git`。
+> 🔴 **判断远端状态一律用 `git ls-remote`（直接问服务器）**，别信本地缓存。
 
 ---
 ## 6. 部署到生产（只在 D 盘做）
