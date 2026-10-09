@@ -87,6 +87,12 @@
   .empty { color:var(--text-secondary); font-size:13px; padding:20px; text-align:center; }
   code { background:var(--bg); padding:1px 5px; border-radius:4px; font-size:12px; }
   .foot-note { font-size:12px; color:var(--text-secondary); margin-top:8px; line-height:1.6; }
+  /* 登录弹层（G9：HTML 与 admin.html loginModal 逐行一致；本页无 .row/.card 输入样式，在此补最小可用样式，不改业务） */
+  #loginModal input[type=text], #loginModal input[type=password] { width:100%; padding:7px 10px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:13px; box-sizing:border-box; margin:4px 0 8px; }
+  #loginModal label { display:block; font-size:13px; }
+  #loginModal .row { display:flex; gap:8px; align-items:center; margin-top:10px; }
+  #loginModal button { background:var(--primary); color:#fff; border:none; border-radius:var(--radius-sm); padding:8px 16px; cursor:pointer; font-size:13px; }
+  #loginModal button:hover { background:var(--primary-hover); }
 </style>
 </head>
 <body>
@@ -95,6 +101,20 @@
   <a href="javascript:history.back()">← 返回</a>
   <span class="who" id="who"></span>
 </header>
+
+<!-- 登录弹层（G9：与 admin.html loginModal 等价；未登录访问受保护接口 → 401 → 弹出本层） -->
+<div id="loginModal" class="hidden">
+  <div class="card" style="max-width:420px;margin:80px auto">
+    <h3>渝新欧 · 订舱数据管理 — 请登录</h3>
+    <p class="muted">服务端 session，关闭页面后需重新登录除非勾选记住我</p>
+    <label>用户名 <input id="loginUser" type="text" autocomplete="username"></label>
+    <label>密码 <input id="loginPass" type="password" autocomplete="current-password"></label>
+    <label><input id="loginRemember" type="checkbox" style="width:auto"> 记住我（30 天）</label>
+    <div id="loginErr" class="muted"></div>
+    <div class="row"><button id="loginGo">登录</button></div>
+  </div>
+</div>
+
 <main>
   <div id="forbidden" class="card hidden">
     <h3>⛔ 无权限</h3>
@@ -150,6 +170,58 @@
 </main>
 
 <script>
+// ---------- CSRF + 登录基座（G9：与 admin.html 同款三件套） ----------
+let CSRF_TOKEN = "";
+const _origFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  opts = opts || {};
+  opts.credentials = "same-origin";
+  const method = (opts.method || "GET").toUpperCase();
+  opts.headers = opts.headers || {};
+  const sameOrigin = typeof url === "string" && !/^https?:\/\//i.test(url);
+  if (sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
+    opts.headers["X-CSRF-Token"] = CSRF_TOKEN;
+  }
+  return _origFetch(url, opts);
+};
+
+// 未登录弹登录层（函数声明，可提升；api() 的 401 分支在解析期即可引用）
+let _loginBound = false;
+function showLoginModal(msg) {
+  const m = document.getElementById("loginModal");
+  if (!m) return;
+  m.classList.remove("hidden");
+  if (msg) document.getElementById("loginErr").textContent = msg;
+  if (!_loginBound) {
+    _loginBound = true;
+    const go = () => {
+      const u = document.getElementById("loginUser").value || "";
+      const p = document.getElementById("loginPass").value || "";
+      const rm = document.getElementById("loginRemember").checked || false;
+      fetch("api/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, password: p, remember_me: rm }),
+      }).then((r) => r.json().then((j) => ({ status: r.status, body: j }))).then(({ status, body }) => {
+        if (status === 200 && body.ok) { location.reload(); }
+        else { document.getElementById("loginErr").textContent = "登录失败: " + (body.msg || status); }
+      }).catch(() => { document.getElementById("loginErr").textContent = "登录失败(网络)"; });
+    };
+    document.getElementById("loginGo").onclick = go;
+    document.getElementById("loginPass").addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
+  }
+}
+// 全局 401 → 弹登录层（与 admin.html 同款）
+const _fetchWithLogin = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  return _fetchWithLogin(url, opts).then((r) => {
+    if (r.status === 401 && typeof url === "string"
+        && url.indexOf("api/login") < 0 && url.indexOf("api/auth_meta") < 0) {
+      showLoginModal();
+    }
+    return r;
+  });
+};
+
 const USER = new URLSearchParams(location.search).get("user") || "";
 let LAST_DIFF = null;
 let UPLOADED_FILE = "";
@@ -188,12 +260,15 @@ function tagClass(t) { return ["补","改","增","新"].includes(t) ? t : (t ===
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
+  if (r.status === 401) { showLoginModal(); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.ok === false) throw new Error(j.msg || ("请求失败 " + r.status));
   return j;
 }
 
 function init() {
+  _origFetch("api/csrf", { credentials: "same-origin" })
+    .then((r) => r.json()).then((j) => { CSRF_TOKEN = j.csrf_token || ""; });
   document.getElementById("who").textContent = USER ? ("身份：" + USER) : "";
   api("api/meta").then(m => {
     const admins = (m.manifest_admins || ["毛骁洋"]);
