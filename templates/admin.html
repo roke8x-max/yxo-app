@@ -84,6 +84,19 @@
   <p class="muted">该页面仅限管理员使用。</p>
 </div>
 
+<!-- 登录弹层（G3：与 index.html loginModal 等价；未登录访问受保护接口 → 401 → 弹出本层） -->
+<div id="loginModal" class="hidden">
+  <div class="card" style="max-width:420px;margin:80px auto">
+    <h3>渝新欧 · 订舱数据管理 — 请登录</h3>
+    <p class="muted">服务端 session，关闭页面后需重新登录除非勾选记住我</p>
+    <label>用户名 <input id="loginUser" type="text" autocomplete="username"></label>
+    <label>密码 <input id="loginPass" type="password" autocomplete="current-password"></label>
+    <label><input id="loginRemember" type="checkbox" style="width:auto"> 记住我（30 天）</label>
+    <div id="loginErr" class="muted"></div>
+    <div class="row"><button id="loginGo">登录</button></div>
+  </div>
+</div>
+
 <div id="app" class="hidden">
   <div class="tabs">
     <div class="tab active" data-tab="status">服务状态</div>
@@ -310,12 +323,47 @@ function enterAdmin(u, perms) {
   }
 }
 
-// 身份：服务端 session 判定（不再有身份卡 / ?user=）；未登录回首页登录
+// 身份：服务端 session 判定；未登录弹登录框（G3，不再直接跳回首页）
+let _loginBound = false;
+function showLoginModal(msg) {
+  const m = document.getElementById("loginModal");
+  if (!m) return;
+  m.classList.remove("hidden");
+  if (msg) document.getElementById("loginErr").textContent = msg;
+  if (!_loginBound) {
+    _loginBound = true;
+    const go = () => {
+      const u = document.getElementById("loginUser").value || "";
+      const p = document.getElementById("loginPass").value || "";
+      const rm = document.getElementById("loginRemember").checked || false;
+      fetch("api/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, password: p, remember_me: rm }),
+      }).then((r) => r.json().then((j) => ({ status: r.status, body: j }))).then(({ status, body }) => {
+        if (status === 200 && body.ok) { location.reload(); }
+        else { document.getElementById("loginErr").textContent = "登录失败: " + (body.msg || status); }
+      }).catch(() => { document.getElementById("loginErr").textContent = "登录失败(网络)"; });
+    };
+    document.getElementById("loginGo").onclick = go;
+    document.getElementById("loginPass").addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
+  }
+}
+// 全局 401 → 弹登录层（与主表 app.js 同款）
+const _fetchWithLogin = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  return _fetchWithLogin(url, opts).then((r) => {
+    if (r.status === 401 && typeof url === "string"
+        && url.indexOf("api/login") < 0 && url.indexOf("api/auth_meta") < 0) {
+      showLoginModal();
+    }
+    return r;
+  });
+};
 _origFetch("api/csrf", { credentials: "same-origin" }).then((r) => r.json()).then((j) => {
   CSRF_TOKEN = j.csrf_token || "";
   return _origFetch("api/auth_meta", { credentials: "same-origin" });
 }).then((r) => {
-  if (!r || r.status === 401) { location.href = "./"; return null; }
+  if (!r || r.status === 401) { showLoginModal(); return null; }
   return r.json();
 }).then((m) => {
   if (!m) return;
