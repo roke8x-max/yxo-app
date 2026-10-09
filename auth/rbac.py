@@ -16,15 +16,11 @@ rule 必须用 Flask 的 url_rule.rule 原串（含 <int:rid> 等占位符），
      + CSRF 豁免，函数内仍校验 token。
      B 加固：函数体白名单 127.0.0.1/::1 + 拒 X-Forwarded-For/X-Real-IP 代理头
      + hmac.compare_digest；config 弱默认已删，生产缺 token 由 init_auth 拒启。
- 4. `POST /api/train_status`：写入目标表 = train_meta（内部状态表），
-    按 §7.3 规则「有写库 → config:manage」定档。
- 5. `POST /api/import` / `/api/import_upload`：写入目标表 = records
-    （import_excel.run_import 直接写库），定 record:write。
+  4. `POST /api/train_status`：写入目标表 = train_meta（内部状态表），
+     确认版 2026-10-06 §2.1 已拆为独立 `train:manage`。
+  5. `POST /api/import` / `/api/import_upload`：写入目标表 = records
+     （import_excel.run_import 直接写库），确认版 2026-10-06 §2.1 已拆为独立 `data:import`。
 """
-from functools import wraps
-
-from flask import g, jsonify, request
-
 PUBLIC = "public"
 AUTHENTICATED = "authenticated"
 
@@ -32,30 +28,43 @@ PERMISSIONS = {
     "record:read": "订舱主数据读",
     "record:write": "订舱主数据写",
     "record:export": "订舱主数据导出",
+    "data:import": "Excel台账批量导入",
+    "options:manage": "选项/字段维护",
+    "trash:purge": "回收站彻底删除",
     "manifest:import": "舱单空跑/上传",
     "manifest:apply": "舱单应用/回退/还原",
     "tuoshu:generate": "托书生成",
     "price:manage": "价格维护与算价",
     "config:manage": "配置管理",
+    "train:manage": "班列状态维护",
     "admin:view": "管理页查看",
     "user:manage": "用户管理",
 }
 
 ROLES = {
     "admin": "运维负责人（毛骁洋）",
-    "manager": "同事（冯茜/杨雅雯/韩文豪）",
+    "hanwenhao": "韩文豪",
+    "yangyawen": "杨雅雯",
+    "fengqian": "冯茜",
     "visitor": "外部只读方",
 }
 
-# spec §3.1：admin 全部+user:manage；manager 除 user:manage 外全部；
-# visitor 仅 record:read + record:export（无写）。
+# 确认版 2026-10-06 §2：admin 全+user:manage；hanwenhao/yangyawen 按矩阵；
+# fengqian 只读为主+record:write+manifest:import+train:manage；visitor 仅 read+export。
 ROLE_PERMS = {
     "admin": ["record:read", "record:write", "record:export",
+              "data:import", "options:manage", "trash:purge",
               "manifest:import", "manifest:apply", "tuoshu:generate",
-              "price:manage", "config:manage", "admin:view", "user:manage"],
-    "manager": ["record:read", "record:write", "record:export",
-                "manifest:import", "manifest:apply", "tuoshu:generate",
-                "price:manage", "config:manage", "admin:view"],
+              "price:manage", "train:manage", "config:manage",
+              "admin:view", "user:manage"],
+    "hanwenhao": ["record:read", "record:write", "record:export",
+                  "manifest:import", "tuoshu:generate",
+                  "price:manage", "train:manage"],
+    "yangyawen": ["record:read", "record:write", "record:export",
+                  "manifest:import", "tuoshu:generate",
+                  "price:manage", "train:manage"],
+    "fengqian": ["record:read", "record:write", "record:export",
+                 "manifest:import", "train:manage"],
     "visitor": ["record:read", "record:export"],
 }
 
@@ -83,10 +92,10 @@ ROUTE_PERMISSIONS = {
     # 现存表格元数据接口（spec §7.1 漏登，此处补上；前端启动强依赖，保持 public）
     ("GET", "/api/meta"): PUBLIC,
     ("GET", "/api/field_options"): "record:read",
-    ("POST", "/api/field_options"): "record:write",
+    ("POST", "/api/field_options"): "options:manage",
     ("GET", "/api/version"): PUBLIC,
     ("GET", "/api/train_summary"): AUTHENTICATED,
-    ("POST", "/api/train_status"): "config:manage",  # 写入目标表 = train_meta
+    ("POST", "/api/train_status"): "train:manage",  # 写入目标表 = train_meta
     ("GET", "/api/service_status"): AUTHENTICATED,
     ("GET", "/api/rows"): "record:read",
     ("POST", "/api/row"): "record:write",
@@ -94,7 +103,7 @@ ROUTE_PERMISSIONS = {
     ("DELETE", "/api/row/<int:rid>"): "record:write",
     ("GET", "/api/trash"): "record:read",
     ("POST", "/api/trash/<int:rid>/restore"): "record:write",
-    ("DELETE", "/api/trash/<int:rid>"): "record:write",
+    ("DELETE", "/api/trash/<int:rid>"): "trash:purge",
     ("PATCH", "/api/row/<int:rid>"): "record:write",
     ("POST", "/api/cells"): "record:write",
     # 写入目标表 = records(dsk/ATB)；认证靠 X-Stamp-Token，门禁 public + CSRF 豁免
@@ -108,8 +117,8 @@ ROUTE_PERMISSIONS = {
     ("POST", "/api/tuoshu/generate"): "tuoshu:generate",
     ("GET", "/api/tuoshu/dest_map"): AUTHENTICATED,
     ("POST", "/api/tuoshu/dest_map"): "tuoshu:generate",
-    ("POST", "/api/import"): "record:write",  # 写入目标表 = records
-    ("POST", "/api/import_upload"): "record:write",  # 写入目标表 = records
+    ("POST", "/api/import"): "data:import",  # 写入目标表 = records
+    ("POST", "/api/import_upload"): "data:import",  # 写入目标表 = records
     ("POST", "/api/manifest/upload"): "manifest:import",
     ("POST", "/api/manifest/apply"): "manifest:apply",
     ("GET", "/api/manifest/batches"): "manifest:import",
@@ -146,20 +155,3 @@ ROUTE_PERMISSIONS = {
 
 # spec §6.1：模块加载时预构建，供「未登记 → 403」判定
 ROUTE_PERMISSIONS_SET = set(ROUTE_PERMISSIONS.keys())
-
-
-def require_permission(perm):
-    """显式声明装饰器（与路由表互补，路由表为兜底强制，spec §6.2）。"""
-    def deco(fn):
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            ident = getattr(g, "identity", None)
-            if ident is None:
-                return jsonify({"ok": False, "error": "HTTP_401",
-                                "msg": "未登录", "req_id": g.get("request_id", "-")}), 401
-            if perm not in (ident.permissions or []):
-                return jsonify({"ok": False, "error": "HTTP_403",
-                                "msg": "无权限", "req_id": g.get("request_id", "-")}), 403
-            return fn(*args, **kwargs)
-        return wrapper
-    return deco

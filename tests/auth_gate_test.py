@@ -75,9 +75,9 @@ def _make_client(tmp_path, monkeypatch, auth_enabled):
     monkeypatch.setattr(appmod, "DB", yxo_db)
     _seed_records(yxo_db)
     from auth import schema, service
-    schema.init_db()
+    schema.init_db(strict=False)
     service.create_user(ADMIN, PW[ADMIN], role="admin", scope_type="all")
-    service.create_user(MGR, PW[MGR], role="manager", scope_type="all")
+    service.create_user(MGR, PW[MGR], role="hanwenhao", scope_type="all")
     service.create_user(VIS, PW[VIS], role="visitor",
                         scope_type="companies", companies=["太平洋、港九港铁", "保时达"])
     service.create_user(NONEU, PW[NONEU], role="visitor", scope_type="none")
@@ -142,11 +142,18 @@ def test_non_admin_admin_api_forbidden(client):
 
 
 def test_manager_has_admin_view(client):
-    # spec §3.1/§7.2：manager 持有 admin:view，可看管理页数据接口
+    # 确认版 2026-10-06 §2：admin:view 仅 admin 持有
+    c, _ = client
+    _authed(c, ADMIN)
+    r = c.get("/api/admin/status")
+    assert r.status_code == 200
+
+
+def test_hanwenhao_no_admin_view(client):
     c, _ = client
     _authed(c, MGR)
     r = c.get("/api/admin/status")
-    assert r.status_code == 200
+    assert r.status_code == 403
 
 
 def test_lockout_after_5_fails(client):
@@ -462,3 +469,131 @@ def test_dry_run_log_lands_in_app_log(dclient):
     # 但加 ignore 防 Windows 编码读取异常导致解码崩溃）
     content = open(log_path, encoding="utf-8", errors="ignore").read()
     assert "AUTH_DRY_RUN" in content, "disabled 期观察日志未落到 logs/app.log"
+
+
+# ---------------- G1：strict 缺口令拒绝启动 ----------------
+
+def _clean_pw_env():
+    env = dict(os.environ)
+    for k in list(env):
+        if k.startswith("YXO_AUTH_PASSWORD_"):
+            del env[k]
+    env.pop("PYTEST_CURRENT_TEST", None)
+    return env
+
+
+def test_g1_strict_missing_pw_subprocess(tmp_path):
+    # 子进程无 PYTEST_CURRENT_TEST、无 app 上下文 → enforce=True；
+    # 清空全部口令 env 后 init_db(strict=True) 须非 0 退出且 stderr 含明确错误。
+    import subprocess
+    probe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_strict_probe.py")
+    env = _clean_pw_env()
+    env["YXO_AUTH_DB"] = str(tmp_path / "auth.db")
+    r = subprocess.run([sys.executable, probe], env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode != 0
+    assert "缺少必需口令环境变量" in (r.stderr + r.stdout)
+
+
+def test_g1_strict_all_pw_ok_same_process(tmp_path, monkeypatch):
+    # 同进程设齐 5 env 后 init_db(strict=True) 成功（PYTEST_CURRENT_TEST 下降级亦成功）。
+    monkeypatch.setattr(config, "AUTH_DB_PATH", str(tmp_path / "auth.db"))
+    for key in ("MAOXIAOYANG", "FENGQIAN", "YANGYAWEN", "HANWENHAO", "YOUKE"):
+        monkeypatch.setenv("YXO_AUTH_PASSWORD_" + key, "TestStrict123-" + key)
+    from auth import schema
+    schema.init_db(strict=True)
+
+
+def test_g1_init_auth_no_crash_under_pytest(client):
+    # pytest 运行期 init_auth(app) 不因口令 env 未设而崩（降级生效）。
+    c, appmod = client
+    r = c.get("/api/version")
+    assert r.status_code == 200
+
+
+# ---------------- G2：visitor_demo 种子禁用 ----------------
+
+def test_g2_visitor_demo_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "AUTH_DB_PATH", str(tmp_path / "auth.db"))
+    from auth import schema
+    schema.init_db(strict=False)
+    conn = sqlite3.connect(str(tmp_path / "auth.db"))
+    row = conn.execute("SELECT disabled FROM auth_users WHERE username='visitor_demo'").fetchone()
+    conn.close()
+    assert row is not None and row[0] == 1
+
+
+# ---------------- G7：角色重划 ----------------
+
+def test_g7_manager_gone_and_new_perms():
+    from auth import rbac
+    assert "manager" not in rbac.ROLES
+    assert "manager" not in rbac.ROLE_PERMS
+    for p in ("data:import", "options:manage", "trash:purge", "train:manage"):
+        assert p in rbac.PERMISSIONS
+    assert set(rbac.ROLE_PERMS) == {"admin", "hanwenhao", "yangyawen", "fengqian", "visitor"}
+    assert "user:manage" in rbac.ROLE_PERMS["admin"]
+    for r in ("hanwenhao", "yangyawen", "fengqian", "visitor"):
+        assert "user:manage" not in rbac.ROLE_PERMS[r]
+    for p in ("manifest:apply", "price:manage", "config:manage", "data:import"):
+        assert p in rbac.ROLE_PERMS["admin"]
+        assert p not in rbac.ROLE_PERMS["fengqian"]
+        assert p not in rbac.ROLE_PERMS["visitor"]
+    assert "tuoshu:generate" not in rbac.ROLE_PERMS["fengqian"]
+    assert "price:manage" not in rbac.ROLE_PERMS["fengqian"]
+
+
+def test_g7_route_perm_split():
+    from auth import rbac
+    assert rbac.ROUTE_PERMISSIONS[("POST", "/api/import")] == "data:import"
+    assert rbac.ROUTE_PERMISSIONS[("POST", "/api/import_upload")] == "data:import"
+    assert rbac.ROUTE_PERMISSIONS[("POST", "/api/field_options")] == "options:manage"
+    assert rbac.ROUTE_PERMISSIONS[("DELETE", "/api/trash/<int:rid>")] == "trash:purge"
+    assert rbac.ROUTE_PERMISSIONS[("POST", "/api/trash/<int:rid>/restore")] == "record:write"
+    assert rbac.ROUTE_PERMISSIONS[("POST", "/api/train_status")] == "train:manage"
+
+
+def test_g7_seed_roles(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "AUTH_DB_PATH", str(tmp_path / "auth.db"))
+    from auth import schema
+    schema.init_db(strict=False)
+    conn = sqlite3.connect(str(tmp_path / "auth.db"))
+    got = {r[0]: r[1] for r in
+           conn.execute("SELECT username, role FROM auth_users").fetchall()}
+    conn.close()
+    assert got["冯茜"] == "fengqian"
+    assert got["杨雅雯"] == "yangyawen"
+    assert got["韩文豪"] == "hanwenhao"
+    assert got["毛骁洋"] == "admin"
+
+
+def test_g7_trash_purge_admin_only(client):
+    # hanwenhao 有 record:write（可恢复）但无 trash:purge（彻底删除 403）；admin 可删。
+    c, appmod = client
+    tok = _authed(c, MGR)
+    conn = sqlite3.connect(appmod.DB)
+    rid = conn.execute("SELECT id FROM records LIMIT 1").fetchone()[0]
+    conn.close()
+    r = c.post(f"/api/trash/{rid}/restore", headers={"X-CSRF-Token": tok})
+    assert r.status_code == 200
+    r2 = c.delete(f"/api/trash/{rid}", headers={"X-CSRF-Token": tok})
+    assert r2.status_code == 403
+    _authed(c, ADMIN)
+    tok2 = _csrf(c)
+    r3 = c.delete(f"/api/trash/{rid}", headers={"X-CSRF-Token": tok2})
+    assert r3.status_code == 200
+
+
+# ---------------- G8：收敛散落名单 ----------------
+
+def test_g8_no_scattered_lists():
+    import config as cfg
+    assert not hasattr(cfg, "USERS")
+    assert not hasattr(cfg, "TUOSHU_ADMINS")
+    import admin_api
+    assert not hasattr(admin_api, "ADMIN_USER")
+    assert not hasattr(admin_api, "LIMITED_ADMINS")
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "templates", "tuoshu.html"),
+               encoding="utf-8").read()
+    assert "TUOSHU_ADMINS" not in src

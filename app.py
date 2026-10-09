@@ -23,7 +23,6 @@ import config
 from import_excel import run_import
 from admin_api import admin_bp
 from data import records_dao
-from auth.rbac import require_permission
 import uuid
 import traceback
 import logging
@@ -472,7 +471,6 @@ def api_meta():
                 "trainTypes": f.get("trainTypes"),
             } for f in config.FIELD_DEFS
         ],
-        "users": config.USERS,
         "company_field": config.COMPANY_FIELD,
         "groupable": config.GROUPABLE,
         "followup_fields": config.FOLLOWUP_FIELDS,
@@ -642,7 +640,6 @@ def api_service_status():
 
 
 @app.route("/api/rows")
-@require_permission("record:read")
 def api_rows():
     conn = get_db()
     rows = records_dao.list_records(conn, g.identity)
@@ -708,7 +705,6 @@ def api_insert_row():
 
 
 @app.route("/api/row/<int:rid>", methods=["DELETE"])
-@require_permission("record:write")
 def api_delete_row(rid):
     """软删除：只打标记进回收站，可在管理页恢复。"""
     user = g.identity.username  # spec §10：不再信任客户端自报 user
@@ -726,7 +722,6 @@ def api_delete_row(rid):
 
 # ====================== 回收站 ======================
 @app.route("/api/trash")
-@require_permission("record:read")
 def api_trash_list():
     conn = get_db()
     rows = records_dao.list_trash(conn, g.identity)
@@ -745,7 +740,6 @@ def api_trash_restore(rid):
 
 
 @app.route("/api/trash/<int:rid>", methods=["DELETE"])
-@require_permission("record:write")
 def api_trash_purge(rid):
     """彻底删除（仅回收站里的记录）。"""
     conn = get_db()
@@ -790,7 +784,6 @@ def sync_departure(conn, rid, field, value, now, user, old_year):
 
 
 @app.route("/api/row/<int:rid>", methods=["PATCH"])
-@require_permission("record:write")
 def api_update(rid):
     data = request.get_json(force=True, silent=True) or {}
     field = data.get("field")
@@ -817,7 +810,6 @@ def api_update(rid):
 
 
 @app.route("/api/cells", methods=["POST"])
-@require_permission("record:write")
 def api_cells():
     """批量保存（兜底用）：前端在页面关闭/刷新前用 sendBeacon 把未提交的单元格一次性发来。
     也支持普通调用。edits: [{id, field, value}]。"""
@@ -998,14 +990,7 @@ def api_export():
 
 # ====================== 托书自动生成 ======================
 # 引擎由芙蕾雅提供（tuoshu_engine.py，纯逻辑无 Flask 依赖），这里只做集成。
-def _check_tuoshu_user():
-    """托书权限：服务端基于角色判断（spec §10，不再信任客户端自报 user）。"""
-    ident = getattr(g, "identity", None)
-    return ident is not None and "tuoshu:generate" in (ident.permissions or [])
-
-
-def _tuoshu_forbid():
-    return jsonify({"ok": False, "msg": "无权限：托书生成仅限指定人员使用"}), 403
+# 权限统一走中央 ROUTE_PERMISSIONS 门禁（G6），视图层不再自定义判断。
 
 
 # 所有"日期"类型字段（config.FIELD_DEFS 里 type=="date"）：发班时间 / 入堆场 / 入站
@@ -1173,8 +1158,6 @@ def tuoshu_page():
 @app.route("/api/tuoshu/meta")
 def api_tuoshu_meta():
     """页面初始化：模板列表 + 可选班列号（近 6 个月）"""
-    if not _check_tuoshu_user():
-        return _tuoshu_forbid()
     conn = get_db()
     templates = []
     try:
@@ -1190,8 +1173,6 @@ def api_tuoshu_meta():
 @app.route("/api/tuoshu/preview", methods=["POST"])
 def api_tuoshu_preview():
     """生成前预检：列出将要生成的托书、箱量与目的站解析结果（未映射会明确告警）"""
-    if not _check_tuoshu_user():
-        return _tuoshu_forbid()
     data = request.get_json(force=True, silent=True) or {}
     conn = get_db()
     try:
@@ -1209,8 +1190,6 @@ def api_tuoshu_preview():
 @app.route("/api/tuoshu/generate", methods=["POST"])
 def api_tuoshu_generate():
     """按筛选条件批量生成托书 xlsx，多于一份时打 zip 返回"""
-    if not _check_tuoshu_user():
-        return _tuoshu_forbid()
     import shutil
     import zipfile
     import tuoshu_engine
@@ -1298,8 +1277,6 @@ def api_tuoshu_generate():
 @app.route("/api/tuoshu/dest_map", methods=["GET"])
 def api_tuoshu_dest_map_get():
     """列出目的站→英文映射，并提示 records 里已出现但未配置映射的目的站"""
-    if not _check_tuoshu_user():
-        return _tuoshu_forbid()
     conn = get_db()
     try:
         rows = []
@@ -1329,8 +1306,6 @@ def api_tuoshu_dest_map_get():
 @app.route("/api/tuoshu/dest_map", methods=["POST"])
 def api_tuoshu_dest_map_post():
     """新增 / 编辑 / 删除 目的站→英文映射（tuoshu_dest_map 表，主键 station_cn）"""
-    if not _check_tuoshu_user():
-        return _tuoshu_forbid()
     d = request.get_json(force=True, silent=True) or {}
     station = (d.get("station_cn") or "").strip()
     if not station:

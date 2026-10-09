@@ -26,11 +26,7 @@ IMPORT_FILE = r"D:\YXO_DATA\output\八月记录汇总.xlsx"
 # 价格配置（自动算价用，复用现有 price_config.json）
 PRICE_CONFIG = r"D:\YXO_DATA\MailBots\price_config.json"
 
-# 4 位同事（无登录；仅用于"个人筛选互不影响"的标识）。
-USERS = ["毛骁洋", "冯茜", "杨雅雯", "韩文豪"]
-
-# 托书生成权限：独立分组，与系统管理的受限管理员(LIMITED_ADMINS)不是一回事。
-TUOSHU_ADMINS = ["毛骁洋", "杨雅雯"]
+# G8：旧硬编码名单 USERS/TUOSHU_ADMINS 已删（权限唯一来源 = auth/rbac.py + 服务端 session）。
 
 # —— 字段定义（列顺序 = 飞书总表列顺序，同事零学习成本）——
 # kind: base=Excel 导入的元数据 / op=同事日常维护 / bot=机器人自动写入（也可手动补录）

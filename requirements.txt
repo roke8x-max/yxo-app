@@ -1,2 +1,3 @@
 flask
 openpyxl
+# 口令哈希使用标准库 pbkdf2_hmac（sha256，20 万轮，见 auth/service.py），有意不引入 argon2/bcrypt 额外依赖（G5）

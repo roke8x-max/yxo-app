@@ -24,6 +24,8 @@ _PBKDF2_ITER = 200_000
 
 
 # ---------------- 口令哈希 ----------------
+# 有意选择：优先 argon2/bcrypt（若已安装则用），否则退到标准库
+# pbkdf2_hmac（sha256, 20 万轮）—— 不在 requirements.txt 声明额外依赖（G5）。
 
 def hash_password(password):
     try:

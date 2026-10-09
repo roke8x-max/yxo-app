@@ -29,11 +29,7 @@ from flask import Blueprint, request, jsonify, render_template
 
 admin_bp = Blueprint("admin", __name__)
 
-ADMIN_USER = "毛骁洋"
-
-# 受限管理员：可进入系统管理页，但仅能使用「价格维护 / 选项维护 / 回收站」三项。
-# 服务状态 / 转发日志 / 配置管理（飞书表）仍仅 ADMIN_USER 可用。
-LIMITED_ADMINS = {"杨雅雯", "冯茜", "韩文豪"}
+# G8：旧硬编码 ADMIN_USER/LIMITED_ADMINS 已删（权限唯一来源 = auth/rbac.py 中央门禁）。
 
 # ---------- 加载外部模块（可配置路径 + 优雅降级，2026-08-04 dev 改造） ----------
 # 原实现硬编码 D:\YXO_DATA\{WeComBot,MailBots}\*.py，本机 dev 环境无法 import。

@@ -18,19 +18,19 @@ from datetime import datetime
 
 import config
 
-# username → (role, scope_type, companies, env_key)
+# username → (role, scope_type, companies, env_key, disabled)
 SEED_USERS = {
-    "毛骁洋": ("admin", "all", [], "MAOXIAOYANG"),
-    "冯茜": ("manager", "all", [], "FENGQIAN"),
-    "杨雅雯": ("manager", "all", [], "YANGYAWEN"),
-    "韩文豪": ("manager", "all", [], "HANWENHAO"),
+    "毛骁洋": ("admin", "all", [], "MAOXIAOYANG", False),
+    "冯茜": ("fengqian", "all", [], "FENGQIAN", False),
+    "杨雅雯": ("yangyawen", "all", [], "YANGYAWEN", False),
+    "韩文豪": ("hanwenhao", "all", [], "HANWENHAO", False),
     # 验收账号：scope 绑定 yxo.db 开票子公司名称实际取值（完整字符串，禁用简写）
-    "visitor_demo": ("visitor", "companies", ["太平洋、港九港铁", "保时达"], "VISITOR_DEMO"),
+    "visitor_demo": ("visitor", "companies", ["太平洋、港九港铁", "保时达"], "VISITOR_DEMO", True),
     # 真实外部只读方：集团下属数科公司同事，看集团全量数据。visitor 角色纯只读
     # (record:read + record:export)，无写无管理权限。口令经 YXO_AUTH_PASSWORD_YOUKE
     # 设置；不设则 init_db 用开发占位 + WARNING（生产必须设真实口令）。
     "游客": ("visitor", "companies",
-             ["太平洋、港九港铁", "保时达", "同程配、东盟", "沙坪坝、中欧木业", "联运"], "YOUKE"),
+             ["太平洋、港九港铁", "保时达", "同程配、东盟", "沙坪坝、中欧木业", "联运"], "YOUKE", False),
 }
 
 SCHEMA_SQL = """
@@ -98,9 +98,30 @@ def _seed_password(env_key, dev_key):
     return "yxo-dev-" + dev_key, "dev-placeholder"
 
 
-def init_db():
-    """建表 + 角色/权限种子 + 用户种子（幂等：用户已存在则跳过）。"""
+def _test_or_debug():
+    try:
+        from flask import current_app
+        return bool(current_app.testing or current_app.debug)
+    except Exception:
+        return False
+
+
+def init_db(strict: bool = False):
+    """建表 + 角色/权限种子 + 用户种子（幂等：用户已存在则跳过）。
+
+    strict=True 时遍历 SEED_USERS 中未标记 disabled 的账号，
+    任一 YXO_AUTH_PASSWORD_<ENVKEY> 缺失即 raise RuntimeError。
+    pytest 运行期（PYTEST_CURRENT_TEST）与 Flask testing/debug 自动降级为不严格。
+    """
     from auth import rbac, service
+    enforce = strict and not (os.environ.get("PYTEST_CURRENT_TEST") or _test_or_debug())
+    if enforce:
+        for _username, (_role, _scope, _companies, _env_key, *rest) in SEED_USERS.items():
+            _disabled = rest[0] if rest else False
+            if _disabled:
+                continue
+            if not os.environ.get("YXO_AUTH_PASSWORD_" + _env_key):
+                raise RuntimeError(f"缺少必需口令环境变量 YXO_AUTH_PASSWORD_{_env_key}")
     conn = connect()
     conn.executescript(SCHEMA_SQL)
     for role, desc in rbac.ROLES.items():
@@ -113,16 +134,17 @@ def init_db():
         for p in rbac.expand_perms(perms):
             conn.execute("INSERT OR IGNORE INTO auth_role_permissions(role, perm) VALUES(?,?)",
                          (role, p))
-    for username, (role, scope, companies, env_key) in SEED_USERS.items():
+    for username, (role, scope, companies, env_key, *rest) in SEED_USERS.items():
         row = conn.execute("SELECT id FROM auth_users WHERE username=?", (username,)).fetchone()
         if row:
             continue
         pw, _src = _seed_password(env_key, env_key.lower())
+        disabled = 1 if (rest[0] if rest else False) else 0
         conn.execute(
-            "INSERT INTO auth_users(username, pw_hash, role, scope_type, scope_companies, created_at)"
-            " VALUES(?,?,?,?,?,?)",
+            "INSERT INTO auth_users(username, pw_hash, role, scope_type, scope_companies, disabled, created_at)"
+            " VALUES(?,?,?,?,?,?,?)",
             (username, service.hash_password(pw), role, scope,
-             json.dumps(companies, ensure_ascii=False),
+             json.dumps(companies, ensure_ascii=False), disabled,
              datetime.now().isoformat(timespec="seconds")))
     conn.commit()
     conn.close()

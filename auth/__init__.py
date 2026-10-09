@@ -4,7 +4,7 @@
 
 init_auth(app)：设 secret_key、注册 auth_bp、挂 _auth_gate、建表+种子、启动自检。
 硬约束（spec §9）：本包内不得 import 任何业务模块（records/manifest/tuoshu/price…），
-只对外暴露 init_auth / g.identity / require_permission。
+只对外暴露 init_auth / g.identity（权限单一来源 = 中央 ROUTE_PERMISSIONS 门禁）。
 """
 from types import SimpleNamespace
 
@@ -48,7 +48,7 @@ def _load_identity():
 def _system_identity():
     """disabled 期兜底身份（A 工单）：与 _load_identity 同形状 5 字段。
     permissions 必须全权限（list(PERMISSIONS.keys())），否则视图层
-    @require_permission/内联 ident.permissions 判定会把整站 403 挡死。"""
+    内联 ident.permissions 判定会把整站 403 挡死。"""
     return SimpleNamespace(
         username="system",
         role="system",                              # 仅供形状对齐；disabled 期不参与任何 role 判定
@@ -156,5 +156,5 @@ def init_auth(app):
         app.secret_key = config.AUTH_SECRET_KEY or service._secret()
     app.register_blueprint(auth_bp)
     app.before_request(_auth_gate)
-    schema.init_db()
+    schema.init_db(strict=True)
     return _self_check(app)

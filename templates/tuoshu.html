@@ -63,6 +63,19 @@
 
 <div id="denied" class="hidden"></div>
 
+<!-- 登录弹层（G3：与 index.html loginModal 等价；未登录访问受保护接口 → 401 → 弹出本层） -->
+<div id="loginModal" class="hidden">
+  <div class="card" style="max-width:420px;margin:80px auto">
+    <h3>渝新欧 · 订舱数据管理 — 请登录</h3>
+    <p class="muted">服务端 session，关闭页面后需重新登录除非勾选记住我</p>
+    <div class="fld"><label>用户名</label><input id="loginUser" type="text" autocomplete="username"></div>
+    <div class="fld"><label>密码</label><input id="loginPass" type="password" autocomplete="current-password"></div>
+    <label><input id="loginRemember" type="checkbox" style="width:auto"> 记住我（30 天）</label>
+    <div id="loginErr" class="muted"></div>
+    <div class="actions"><button id="loginGo">登录</button></div>
+  </div>
+</div>
+
 <main id="app" class="hidden">
 
   <div class="card">
@@ -155,7 +168,7 @@
 </main>
 
 <script>
-const TUOSHU_ADMINS = ["毛骁洋", "杨雅雯"];  // 仅历史文案用，真闸门在服务端（tuoshu:generate）
+// 权限唯一来源 = 服务端 /api/auth_meta 返回的 permissions（G8：已删前端硬编码名单）。
 let USER = "";
 let GROUPS = [];
 let CSRF_TOKEN = "";
@@ -169,7 +182,14 @@ window.fetch = function (url, opts) {
   if (sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
     opts.headers["X-CSRF-Token"] = CSRF_TOKEN;
   }
-  return _origFetch(url, opts);
+  return _origFetch(url, opts).then((r) => {
+    if (r.status === 401 && sameOrigin && typeof url === "string"
+        && url.indexOf("api/login") < 0 && url.indexOf("api/auth_meta") < 0
+        && typeof showLoginModal === "function") {
+      try { showLoginModal(); } catch (e) { /* modal 未就绪时忽略 */ }
+    }
+    return r;
+  });
 };
 
 function esc(s){ const d=document.createElement("div"); d.textContent = s==null?"":String(s); return d.innerHTML; }
@@ -193,11 +213,36 @@ function showDenied(who) {
                 + '<p class="muted">需要 tuoshu:generate 权限（服务端判定）</p>'
                 + '<p><a href="./">← 返回订舱系统</a></p>';
 }
+// 身份：服务端 session 判定；未登录弹登录框（G3，不再直接跳回首页）
+let _loginBound = false;
+function showLoginModal(msg) {
+  const m = document.getElementById("loginModal");
+  if (!m) return;
+  m.classList.remove("hidden");
+  if (msg) document.getElementById("loginErr").textContent = msg;
+  if (!_loginBound) {
+    _loginBound = true;
+    const go = () => {
+      const u = document.getElementById("loginUser").value || "";
+      const p = document.getElementById("loginPass").value || "";
+      const rm = document.getElementById("loginRemember").checked || false;
+      _origFetch("api/login", {
+        method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, CSRF_TOKEN ? { "X-CSRF-Token": CSRF_TOKEN } : {}),
+        body: JSON.stringify({ username: u, password: p, remember_me: rm }),
+      }).then((r) => r.json().then((j) => ({ status: r.status, body: j }))).then(({ status, body }) => {
+        if (status === 200 && body.ok) { location.reload(); }
+        else { document.getElementById("loginErr").textContent = "登录失败: " + (body.msg || status); }
+      }).catch(() => { document.getElementById("loginErr").textContent = "登录失败(网络)"; });
+    };
+    document.getElementById("loginGo").onclick = go;
+    document.getElementById("loginPass").addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
+  }
+}
 _origFetch("api/csrf", { credentials: "same-origin" }).then((r) => r.json()).then((j) => {
   CSRF_TOKEN = j.csrf_token || "";
   return _origFetch("api/auth_meta", { credentials: "same-origin" });
 }).then((r) => {
-  if (!r || r.status === 401) { location.href = "./"; return null; }
+  if (!r || r.status === 401) { showLoginModal(); return null; }
   return r.json();
 }).then((m) => {
   if (!m) return;
