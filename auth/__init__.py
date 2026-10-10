@@ -45,15 +45,18 @@ def _load_identity():
         companies=companies if isinstance(companies, list) else [])
 
 
-def _system_identity():
-    """disabled 期兜底身份（A 工单）：与 _load_identity 同形状 5 字段。
-    permissions 必须全权限（list(PERMISSIONS.keys())），否则视图层
-    内联 ident.permissions 判定会把整站 403 挡死。"""
+def _shadow_identity():
+    """影子期身份（G10-A）：不校验、只取前端自报 `?user=`。
+    username 取 request.args.get("user", "") 原值——为空则保持空字符串，
+    禁止任何兜底（如 or "system"），严格等同旧版行为。
+    其余 4 字段与 _load_identity 对齐：role 占位不参与判定、
+    permissions 全量（影子期不拦截）、scope_type="all" 全量、
+    companies=[]（字段必须在，resolve_scope 等读它）。"""
     return SimpleNamespace(
-        username="system",
-        role="system",                              # 仅供形状对齐；disabled 期不参与任何 role 判定
+        username=request.args.get("user", ""),
+        role="shadow",                            # 占位；影子期不做任何 role 判定
         permissions=list(PERMISSIONS.keys()),
-        scope_type="all",                           # records_dao.resolve_scope 全量放行
+        scope_type="all",                         # records_dao.resolve_scope 全量放行
         companies=[])
 
 
@@ -77,9 +80,9 @@ def _auth_gate():
     if request.endpoint == "static":
         return None
 
-    # —— A 工单：灰度开关 ——
+    # —— 影子期（G10-A）：不是"没有身份"，而是"不校验身份" ——
     if not config.AUTH_ENABLED:
-        g.identity = _system_identity()   # username="system"，全权限 + scope=all
+        g.identity = _shadow_identity()  # username 取前端 ?user= 自报（空即空，不兜底）
         _dry_run_log(request)
         return None                        # 不拒任何请求
 

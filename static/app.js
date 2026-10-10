@@ -1,9 +1,11 @@
 /* YXO 订舱数据管理 · 前端逻辑 */
 "use strict";
 
-/* ---------- 登录认证基座（2026-09-28 RBAC，spec §13） ----------
-   身份来自服务端 session（/api/auth_meta），不再有「我是」下拉与 localStorage USER。
-   所有 fetch 自动带 credentials + X-CSRF-Token；401（非登录接口）→ 弹登录层。 */
+/* ---------- 登录认证基座（2026-09-28 RBAC，spec §13；G10-B 双模式） ----------
+   身份来自服务端 session（/api/auth_meta）或影子期自报（?user=）。
+   AUTH_MODE 由 init() 经 applyAuthMode(meta) 设置（static/auth_mode.js，需先引入）：
+   auth 模式：fetch 自动带 credentials + X-CSRF-Token；401（非登录接口）→ 弹登录层。
+   shadow 模式：不挂 CSRF 头、不弹登录窗；同源 api 请求补 ?user=（服务端影子身份即取此值）。 */
 let IDENTITY = { username: "", role: "", permissions: [], scope: { type: "none", companies: [] } };
 let CSRF_TOKEN = "";
 let _loginBound = false;
@@ -12,14 +14,15 @@ const _origFetch = window.fetch.bind(window);
 window.fetch = function (url, opts) {
   opts = opts || {};
   opts.credentials = "same-origin";
+  if (typeof url === "string") url = withShadowUser(url);
   const method = (opts.method || "GET").toUpperCase();
   const sameOrigin = typeof url === "string" && !/^https?:\/\//i.test(url);
   opts.headers = opts.headers || {};
-  if (sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
+  if (AUTH_MODE === "auth" && sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
     opts.headers["X-CSRF-Token"] = CSRF_TOKEN;
   }
   return _origFetch(url, opts).then((r) => {
-    if (r.status === 401 && sameOrigin && typeof url === "string"
+    if (AUTH_MODE === "auth" && r.status === 401 && sameOrigin && typeof url === "string"
         && url.indexOf("api/login") < 0 && url.indexOf("api/auth_meta") < 0) {
       showLoginModal();
     }
@@ -2469,9 +2472,52 @@ function enterApp() {
     setInterval(pollRemoteChanges, 4000);   // 每 4 秒检查他人改动（同 WPS 在线协同）
   });
 }
+/* ---------- 启动（G10-B 双模式：shadow 走自报身份 + 「我是」下拉，auth 走登录） ---------- */
+function showUserGate(users) {
+  const gate = document.getElementById("userGate");
+  const wrap = document.getElementById("gateCards");
+  if (!gate || !wrap) return;
+  wrap.innerHTML = "";
+  (users || []).forEach((u) => {
+    const card = el("div", { class: "gate-card" }, [
+      el("div", { class: "name", text: u }),
+      el("div", { class: "role", text: "影子期·免登录" }),
+    ]);
+    card.addEventListener("click", () => {
+      storeShadowUser(u);
+      location.reload();
+    });
+    wrap.appendChild(card);
+  });
+  gate.classList.remove("hidden");
+}
+function enterShadow(meta) {
+  IDENTITY = {
+    username: "", role: "",
+    permissions: meta.permissions || [],
+    scope: meta.scope || { type: "all", companies: [] },
+  };
+  const users = meta.users || [];
+  const u = resolveShadowUser();
+  const logoutBtn = document.getElementById("logoutBtn");
+  if (logoutBtn) logoutBtn.classList.add("hidden");  // 影子期无登出
+  if (!u) { showUserGate(users); return; }  // 无身份 → 身份选择页（等同旧版）
+  USER = u;
+  IDENTITY.username = u;
+  const userLabel = document.getElementById("userLabel");
+  if (userLabel) userLabel.textContent = u;
+  const whoSel = document.getElementById("whoSel");
+  if (whoSel) {
+    whoSel.classList.remove("hidden");
+    fillWhoSel();  // 切换后 location.reload（默认行为）
+  }
+  document.getElementById("userGate").classList.add("hidden");
+  loadRows().then(() => enterApp());
+}
 function init() {
   loadMeta().then(apiCSRF).then(apiAuthMeta).then((meta) => {
-    if (!meta || !meta.ok) { showLoginModal(); return; }  // 未登录 → 登录层
+    if (!meta || !meta.ok) { showLoginModal(); return; }  // 取不到身份 → 登录层（影子期 auth_meta 必 200，此处即网络故障）
+    if (applyAuthMode(meta) === "shadow") { enterShadow(meta); return; }
     IDENTITY = {
       username: meta.username || "", role: meta.role || "",
       permissions: meta.permissions || [], scope: meta.scope || { type: "none", companies: [] },
