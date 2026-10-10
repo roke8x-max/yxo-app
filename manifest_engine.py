@@ -37,6 +37,56 @@ FIELD_FIX_ALLOW = ("箱号", "封号")
 TRAIN_TYPE_ALLOW = ("专列", "散舱")
 
 
+# ==================== 终态重现 + 暂缓池（两改 spec §3）====================
+# 终态集合：仅「退舱」。「延期」不是终态，不得加入（spec §3.1，洋 2026-10-06 拍板）。
+TERMINAL_STATUSES = {"退舱"}
+
+# 暂缓池 DDL：新增独立轻量表 manifest_terminal_defer，不碰 yxo.db 既有表结构，
+# 不复用 alerts_applied（语义相反：字段覆盖 vs 本次暂缓备忘）。建表由 app.init_db 随启动执行。
+TERMINAL_DEFER_DDL = """CREATE TABLE IF NOT EXISTS manifest_terminal_defer (
+    id INTEGER PRIMARY KEY,
+    core TEXT NOT NULL,
+    train TEXT,
+    decision TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    decided_by TEXT,
+    UNIQUE(core)
+)"""
+
+# 暂缓池 decision 取值（build 判定 / apply 落盘 / 管理接口共用）。
+DEFER_DECISION_A = "A暂缓"
+DEFER_DECISION_B = "B改判"
+
+
+def ensure_terminal_defer_table(conn):
+    """幂等建暂缓池表。生产由 app.init_db 随启动执行；测试/直调前可调此函数自保。"""
+    conn.execute(TERMINAL_DEFER_DDL)
+
+
+def _load_defer(conn):
+    """读暂缓池 → {core: {"train": 班列号, "decision": 取值}}。
+    表不存在时视为空（老库/最小测试库兼容，build 不因此报错）。"""
+    try:
+        rows = conn.execute("SELECT core, train, decision FROM manifest_terminal_defer").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {r[0]: {"train": r[1] or "", "decision": r[2] or ""} for r in rows if r[0]}
+
+
+def revoke_terminal_defer(conn, core):
+    """撤销暂缓（重新激活）：删行。下次导入命中该客编时重弹 A/B/C，不直接放行不直接建行。"""
+    conn.execute("DELETE FROM manifest_terminal_defer WHERE core=?", (core,))
+
+
+def mark_terminal_defer_b(conn, core, operator=""):
+    """改判为「已退舱，新需要」（B）：UPDATE decision='B改判'。返回 True=行存在并改判。"""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute(
+        "UPDATE manifest_terminal_defer SET decision=?, decided_at=?, decided_by=? WHERE core=?",
+        (DEFER_DECISION_B, now, operator, core))
+    return cur.rowcount > 0
+
+
 # ==================== 归一化 ====================
 
 def code_core(code):
@@ -459,6 +509,23 @@ def normalize_row(raw, ftype):
 
 # ==================== 库内记录加载 ====================
 
+def _shape_record(r):
+    """sqlite3.Row → 引擎内统一记录形态（load_records / _load_terminal 共用，防两处漂移）。"""
+    code = r["客户编码"] or ""
+    return {
+        "id": r["id"], "code": code, "core": code_core(code),
+        "suffix": code_suffix(code),
+        "box": norm_box(r["箱号"]), "train": (r["班列号"] or "").strip(),
+        "port": (r["口岸"] or "").strip(), "dep": (r["发班时间"] or "").strip(),
+        "seal": (r["封号"] or "").strip(), "owner": (r["箱属"] or "").strip(),
+        "dest": (r["目的站"] or "").strip(),
+        "company": (r["开票子公司名称"] or "").strip(),
+        "ttype": (r["班列类型"] or "").strip(),
+        "status": (r["状态"] or "").strip(),
+        "deleted": r["del"],
+    }
+
+
 def load_records(conn):
     # 改动三（spec §3）：退舱与软删记录不参与任何比对。COALESCE(状态,'') 兼容状态为 NULL 的行。
     rows = conn.execute(
@@ -467,28 +534,39 @@ def load_records(conn):
         'COALESCE(is_deleted,0) AS del FROM records '
         "WHERE COALESCE(\"状态\",'')<>'退舱' AND COALESCE(is_deleted,0)=0"
     ).fetchall()
-    out = []
+    return [_shape_record(r) for r in rows]
+
+
+def _load_terminal(conn):
+    """终态记录（状态 ∈ TERMINAL_STATUSES，未软删）→ {core: [rec...]}，rec 与 load_records 同形。
+    load_records 把终态整条剔出匹配池，故终态需独立查询建索引（两改 spec §3.1）。"""
+    holders = ",".join("?" * len(TERMINAL_STATUSES))
+    try:
+        rows = conn.execute(
+            'SELECT id,"客户编码","箱号","班列号","口岸","发班时间","封号","箱属","目的站",'
+            '"开票子公司名称","班列类型","状态",'
+            'COALESCE(is_deleted,0) AS del FROM records '
+            f'WHERE "状态" IN ({holders}) AND COALESCE(is_deleted,0)=0',
+            tuple(TERMINAL_STATUSES)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    out = {}
     for r in rows:
-        code = r["客户编码"] or ""
-        out.append({
-            "id": r["id"], "code": code, "core": code_core(code),
-            "suffix": code_suffix(code),
-            "box": norm_box(r["箱号"]), "train": (r["班列号"] or "").strip(),
-            "port": (r["口岸"] or "").strip(), "dep": (r["发班时间"] or "").strip(),
-            "seal": (r["封号"] or "").strip(), "owner": (r["箱属"] or "").strip(),
-            "dest": (r["目的站"] or "").strip(),
-            "company": (r["开票子公司名称"] or "").strip(),
-            "ttype": (r["班列类型"] or "").strip(),
-            "status": (r["状态"] or "").strip(),
-            "deleted": r["del"],
-        })
+        rec = _shape_record(r)
+        if rec["core"]:
+            out.setdefault(rec["core"], []).append(rec)
     return out
 
 
 # ==================== 差异构建（空跑，不写库）====================
 
 def build_diff(conn, parsed_rows):
-    """parsed_rows: list[normalized dict]。返回 {updates, imports, alerts, warnings}。"""
+    """parsed_rows: list[normalized dict]。
+    返回 {updates, imports, alerts, warnings, defer_expired}。
+    纯 diff 计算：只产 alerts 和 pending_row（终态重现项内），绝不写暂缓池、不建行。
+    暂缓池的所有读写（A 落盘 / B 建行 / 自动失效删行）都在 apply_diff 侧。
+    """
     recs = load_records(conn)
     active = [r for r in recs if not r["deleted"]]
     by_core = {}
@@ -498,6 +576,9 @@ def build_diff(conn, parsed_rows):
     for r in active:
         if r["train"]:
             by_train.setdefault(r["train"], []).append(r)
+    # 两改 spec §3.1：终态索引（仅退舱）+ 暂缓池标记。判定命中只按 core（不区分班列）。
+    by_core_term = _load_terminal(conn)
+    defer = _load_defer(conn)
 
     updates, imports, alerts, warnings = [], [], [], []
     import_groups = {}   # train_no -> group dict
@@ -520,6 +601,32 @@ def build_diff(conn, parsed_rows):
         total = len(db_codes.get(train_no, set()) | batch_codes.get(train_no, set()))
         return total > DEDICATED_THRESHOLD
 
+    def _import_stranger_row(row, row_idx):
+        """陌生客编放行：按该班列客编总数判专列/散舱 → 进 imports；散舱补弱提示。
+        暂缓池 B改判通道复用同一套逻辑（当次源行直接落地）。"""
+        tn = row["班列号"]
+        if not tn:
+            # 改动一 §1.5：无班列号新行不再静默丢弃，给可见 alert。
+            alerts.append({
+                "type": "缺班列号", "key": str(row_idx),
+                "客户编码": row["客户编码"], "箱号": row["箱号"],
+                "说明": f"客编 {row['客户编码']} 缺班列号，未导入",
+            })
+            return
+        is_dedicated = _train_is_dedicated(tn)
+        _add_import(import_groups, seen_import_rows, row,
+                    "专列" if is_dedicated else "散舱")
+        if not is_dedicated:
+            weak_key = f"{tn}:{row['core']}"
+            if weak_key not in seen_weak_keys:
+                seen_weak_keys.add(weak_key)
+                alerts.append({
+                    "type": "弱提示", "key": weak_key,
+                    "客户编码": row["客户编码"], "箱号": row["箱号"],
+                    "说明": f"该班列客编未达阈值（≤{DEDICATED_THRESHOLD}），"
+                            f"按散舱导入，请核对（班列{tn}客编{row['core']}）",
+                })
+
     for row_idx, row in enumerate(parsed_rows):
         core = row["core"]
         if not core:
@@ -528,29 +635,54 @@ def build_diff(conn, parsed_rows):
         cands = by_core.get(core, [])
 
         if not cands:
-            # 改动一：陌生客编一律放行，按该班列客编总数判专列/散舱（不再看是否已有专列箱）。
-            tn = row["班列号"]
-            if not tn:
-                # 改动一 §1.5：无班列号新行不再静默丢弃，给可见 alert。
-                alerts.append({
-                    "type": "缺班列号", "key": str(row_idx),
-                    "客户编码": row["客户编码"], "箱号": row["箱号"],
-                    "说明": f"客编 {row['客户编码']} 缺班列号，未导入",
-                })
-                continue
-            is_dedicated = _train_is_dedicated(tn)
-            _add_import(import_groups, seen_import_rows, row,
-                        "专列" if is_dedicated else "散舱")
-            if not is_dedicated:
-                weak_key = f"{tn}:{core}"
-                if weak_key not in seen_weak_keys:
-                    seen_weak_keys.add(weak_key)
+            # 两改 spec §3.1：三步顺序不可改 —— ①暂缓池 ②终态索引 ③陌生放行。
+            # 顺序错会导致「改判 B 还被拦」或「暂缓了还弹」。
+            mark = defer.get(core)
+            if mark:
+                if mark["decision"] == DEFER_DECISION_A:
+                    continue  # A暂缓：不弹不建，跳过
+                if mark["decision"] == DEFER_DECISION_B:
+                    # B改判：直接走新增通道（当次源行落地，不写暂缓池；
+                    # 新行落库后下次 cands 非空、自然不再弹）。
+                    _import_stranger_row(row, row_idx)
+                    continue
+                logging.getLogger(__name__).warning(
+                    "暂缓池未知 decision=%r core=%s：视同无标记，继续终态判定", mark["decision"], core)
+            term_cands = by_core_term.get(core, [])
+            if term_cands:
+                # 命中终态：不直接丢弃，产「终态重现」待确认项（A/B/C 由人在确认页选，
+                # 回传 diff["terminal_decisions"]，落盘在 apply_diff）。
+                db_term = term_cands[0]
+                tn = row["班列号"]
+                if not tn:
+                    # 终态命中但无班列号：B 无法落地，先按缺班列号可见告警（不静默丢）。
                     alerts.append({
-                        "type": "弱提示", "key": weak_key,
+                        "type": "缺班列号", "key": f"terminal:{core}",
                         "客户编码": row["客户编码"], "箱号": row["箱号"],
-                        "说明": f"该班列客编未达阈值（≤{DEDICATED_THRESHOLD}），"
-                                f"按散舱导入，请核对（班列{tn}客编{core}）",
+                        "说明": f"客编 {row['客户编码']} 库内有退舱记录（id={db_term['id']}），"
+                                f"但本次行缺班列号，未导入，请补班列号后重导",
                     })
+                    continue
+                a = _alert("终态重现", row, db_term,
+                           f"客编 {row['客户编码']} 库内有退舱记录（id={db_term['id']}），"
+                           f"本次源清单重现——请选择 A（渝新欧还没操作，本次不新增）/"
+                           f"B（已退舱，新需要，走新增）/C（稍后处理，下次再问）")
+                a["key"] = f"terminal:{core}"
+                a["core"] = core
+                # pending_row：当次源行归一化数据，供 B 落地 & 前端展示。
+                # is_dedicated 必须在此填入（_train_is_dedicated 当前批次结论），B 建行直接用，不重算。
+                a["pending_row"] = {
+                    "客户编码": row["客户编码"], "箱号": row["箱号"],
+                    "封号": row["封号"], "箱属": row["箱属"],
+                    "口岸": row["口岸"], "发班时间": row["发班时间"],
+                    "班列号": row["班列号"], "suffix": row["suffix"], "core": core,
+                    "is_dedicated": _train_is_dedicated(tn),
+                    "目的站建议": SUFFIX_DEST_MAP.get(row["suffix"], ""),
+                }
+                alerts.append(a)
+                continue
+            # 既无暂缓标记、又无终态记录 → 原有陌生客编放行逻辑。
+            _import_stranger_row(row, row_idx)
             continue
 
         box_alerted = False
@@ -644,12 +776,64 @@ def build_diff(conn, parsed_rows):
                 "changes": changes,
             })
 
+    # 两改 spec §3.3.3：暂缓标记自动失效扫描（按 core + train 限定）。
+    # 「源清单不含某客编」≠ 真退了（可能本次只导入了别的班列），故仅当标记所属班列 ∈ 本批
+    # batch_codes、且该客编在本次源清单全局缺席时才处理；train ∉ batch_codes → 保留不误杀。
+    # 本函数只「算出」失效清单 defer_expired，真正删行在 apply_diff（build 不写暂缓池）。
+    # A暂缓 → 到期删行（此处只登记，不弹不建）；B改判 → 永不自动失效，保留标记 + 可见提示。
+    source_cores_all = set()
+    for _cores in batch_codes.values():
+        source_cores_all |= _cores
+    defer_expired = []
+    for _core, _mark in defer.items():
+        _dec = _mark["decision"]
+        if _core not in by_core_term:
+            # 本地退舱记录已不在（被手动改回正常/被删除）：标记失的，不永久压着 → 到期清除。
+            defer_expired.append({"core": _core, "reason": "终态记录已不在"})
+            continue
+        if _dec == DEFER_DECISION_B:
+            if _mark["train"] and _mark["train"] in batch_codes and _core not in source_cores_all:
+                _tcode = by_core_term[_core][0]["code"]
+                alerts.append({
+                    "type": "改判复核提示", "key": f"deferB:{_core}",
+                    "客户编码": _tcode, "箱号": "",
+                    "说明": f"客编 {_tcode} 此前已判为新增（B改判），源端现已不含"
+                            f"（班列 {_mark['train']}），请复核——标记保留，未自动失效，不静默覆盖。",
+                })
+            continue
+        if _dec == DEFER_DECISION_A:
+            if _mark["train"] and _mark["train"] in batch_codes and _core not in source_cores_all:
+                defer_expired.append(
+                    {"core": _core, "reason": f"班列 {_mark['train']} 本批未含该客编"})
+            continue
+        # 未知 decision：不动（判定分支已记 warning）。
+
+    # 方案 C（并入两改 spec §3.4，原 tmp 方案 C）：反向缺口。
+    # 库内 active 记录，其班列在本批导入范围内、但客编未出现在本次源清单 →
+    # 源端可能已操作退舱，建议人工确认置退舱。仅告警，不自动改。
+    # 仅限 train ∈ batch_codes 的班列（避免"只导入部分班列"误报其它班列的正常记录）。
+    for r in active:
+        tn = r["train"]
+        if not tn or tn not in batch_codes:
+            continue
+        if r["core"] in batch_codes[tn]:
+            continue  # 源端仍有该客编，正常
+        alerts.append({
+            "type": "源端缺失建议退舱",
+            "key": f"missing:{r['id']}",
+            "客户编码": r["code"], "箱号": r["box"],
+            "说明": f"库内记录（id={r['id']}，班列 {tn}）状态为「{r['status'] or '正常'}」，"
+                    f"但本次导入源清单未含该客编——请确认渝新欧是否已操作退舱，"
+                    f"若是则手动置退舱（本系统不自动改）。",
+        })
+
     # 收尾 import groups
     for train_no, g in import_groups.items():
         if g["rows"]:
             imports.append(g)
 
-    return {"updates": updates, "imports": imports, "alerts": alerts, "warnings": warnings}
+    return {"updates": updates, "imports": imports, "alerts": alerts, "warnings": warnings,
+            "defer_expired": defer_expired}
 
 
 def _alert(atype, row, db, msg, dest_suggest=""):
@@ -702,6 +886,8 @@ def _add_import(groups, seen, row, ttype="专列"):
         "箱属": row["箱属"],
         "口岸": row["口岸"] or g["口岸"],
         "发班时间": row["发班时间"] or g["发班时间"],
+        # 两改 spec §2：负责公司随行携带（确认页下拉值；未选留空，不写死默认公司）。
+        "负责公司": row.get("负责公司", "") or "",
     })
 
 
@@ -734,8 +920,12 @@ def _rec_meta(conn, rid):
 
 def apply_diff(conn, diff, operator, source_files):
     """diff: {updates:[{record_id, changes:[{field,new}]}], imports:[{train_no, 目的站, rows:[...]}],
-               alerts_applied:[{record_id, new_code?, 目的站?}]}
-    返回 batch_id；失败抛异常（调用方负责回滚/不提交）。"""
+               alerts_applied:[{record_id, new_code?, 目的站?}],
+               terminal_decisions:[{core, record_id, decision(A/B/C), company, train?, pending_row?}],
+               defer_expired:[{core, reason?}]}
+    返回 batch_id；失败抛异常（调用方负责回滚/不提交）。
+    暂缓池读写只在本函数：A 写池（UNIQUE(core) 覆盖）、B 走新增通道建行（不写池）、
+    defer_expired 删行。C 无动作。"""
     snap = _snapshot_path()
     # 1. 整库快照（失败 → 抛异常中止，不写任何东西）
     # 先 checkpoint，确保 WAL 已并入主库文件，快照完整一致。
@@ -756,6 +946,10 @@ def apply_diff(conn, diff, operator, source_files):
         rid = u["record_id"]
         for ch in u["changes"]:
             f = ch["field"]
+            # 两改 spec §2.2 边界：更新通道绝不写「开票子公司名称」——它只允许新增通道写入。
+            # MANIFEST_WRITABLE 不动；build_diff 永不产出该字段，此处是服务端强制兜底。
+            if f == "开票子公司名称":
+                raise ValueError("更新通道禁止覆盖负责公司（开票子公司名称）")
             new_val = ch["new"]
             old = conn.execute(f'SELECT "{f}" FROM records WHERE id=?', (rid,)).fetchone()
             old_val = old[f] if old else ""
@@ -775,8 +969,69 @@ def apply_diff(conn, diff, operator, source_files):
                  ",".join(source_files), operator, now))
             n_update += 1
 
-    # 3. 新专列/散舱导入通道（改动一：按 diff 携带的判定写班列类型，不再写死专列）
+    # 2.5 终态重现决策 + 暂缓自动失效（两改 spec §3.3.0/§3.3.3）。
+    # defer_expired：build 算出的到期 A 标记（+ 失的标记），此处删行，无副作用不弹不建。
+    for e in diff.get("defer_expired", []):
+        _core = (e.get("core") or "") if isinstance(e, dict) else str(e or "")
+        _core = _core.strip().upper()
+        if _core:
+            conn.execute("DELETE FROM manifest_terminal_defer WHERE core=?", (_core,))
+    # terminal_decisions：A 写暂缓池（后触发 ON CONFLICT(core) DO UPDATE 覆盖，不报错中断）；
+    # B 由 pending_row（含 is_dedicated）组装成 imports 同形行，走新增通道（不写暂缓池）；C 无动作。
+    terminal_groups, seen_terminal_rows = {}, set()
+    for t in diff.get("terminal_decisions", []):
+        dec = t.get("decision")
+        if dec not in ("A", "B", "C"):
+            raise ValueError(f"非法终态决策: {dec}")
+        if dec == "C":
+            continue
+        core = str(t.get("core") or "").strip().upper()
+        if not core:
+            raise ValueError("终态决策缺客编 core")
+        if dec == "A":
+            train = str(t.get("train") or "").strip()
+            if not train and t.get("record_id"):
+                r0 = conn.execute(
+                    'SELECT "班列号" FROM records WHERE id=?', (t["record_id"],)).fetchone()
+                train = (r0[0] or "").strip() if r0 else ""
+            conn.execute(
+                "INSERT INTO manifest_terminal_defer(core, train, decision, decided_at, decided_by) "
+                "VALUES(?,?,?,?,?) "
+                "ON CONFLICT(core) DO UPDATE SET train=excluded.train, decision=excluded.decision, "
+                "decided_at=excluded.decided_at, decided_by=excluded.decided_by",
+                (core, train, DEFER_DECISION_A, now, operator))
+            continue
+        # B：当次选 B 只建新行（靠新行自然实现下次不弹），不写暂缓池；原退舱记录逐字段不动。
+        prow = t.get("pending_row") or {}
+        company = str(t.get("company") or "").strip()
+        tn = str(prow.get("班列号") or "").strip()
+        if not tn:
+            raise ValueError(f"终态 B 决策缺班列号，无法建行: {core}")
+        ttype = "专列" if prow.get("is_dedicated") else "散舱"
+        _add_import(terminal_groups, seen_terminal_rows, {
+            "客户编码": prow.get("客户编码", ""), "箱号": prow.get("箱号", ""),
+            "封号": prow.get("封号", ""), "箱属": prow.get("箱属", ""),
+            "口岸": prow.get("口岸", ""), "发班时间": prow.get("发班时间", ""),
+            "班列号": tn, "suffix": prow.get("suffix", ""),
+            "负责公司": company,
+        }, ttype)
+    # B 组并入 imports：同班列且班列类型一致则合行（seq 连续）；类型冲突则 loud fail（正常前端不可能出现）。
+    combined_imports = []
     for g in diff.get("imports", []):
+        g2 = dict(g)
+        g2["rows"] = list(g.get("rows", []))
+        combined_imports.append(g2)
+    by_tn = {g["train_no"]: g for g in combined_imports}
+    for tn, tg in terminal_groups.items():
+        if tn in by_tn:
+            if (by_tn[tn].get("班列类型") or "专列") != tg["班列类型"]:
+                raise ValueError(f"班列类型不一致，拒绝合并: {tn}")
+            by_tn[tn]["rows"].extend(tg["rows"])
+        else:
+            combined_imports.append(tg)
+
+    # 3. 新专列/散舱导入通道（改动一：按 diff 携带的判定写班列类型，不再写死专列）
+    for g in combined_imports:
         tn = g["train_no"]
         ttype = g.get("班列类型") or "专列"
         if ttype not in TRAIN_TYPE_ALLOW:
@@ -790,12 +1045,15 @@ def apply_diff(conn, diff, operator, source_files):
         max_seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM records").fetchone()[0]
         for i, r in enumerate(g["rows"]):
             seq = max_seq + i
+            # 两改 spec §2.2：新增通道 INSERT 列加入「开票子公司名称」（值为确认页所选，未选留空）。
+            # 边界：只允许新增行写入；更新通道写该列会被 §2 的服务端守卫拒绝。
             cols = ["seq", "order_idx", "客户编码", "箱号", "封号", "箱属", "班列号",
-                    "口岸", "发班时间", "目的站", "班列类型", "状态", "台账月份",
+                    "口岸", "发班时间", "目的站", "开票子公司名称", "班列类型", "状态", "台账月份",
                     "is_deleted", "updated_by", "updated_at"]
             vals = [seq, float(seq), r.get("客户编码", ""), r.get("箱号", ""), r.get("封号", ""),
                     r.get("箱属", ""), tn, r.get("口岸", "") or g.get("口岸", ""),
-                    r.get("发班时间", "") or g.get("发班时间", ""), dest, ttype, "正常",
+                    r.get("发班时间", "") or g.get("发班时间", ""), dest,
+                    r.get("负责公司", "") or "", ttype, "正常",
                     month, 0, operator, now]
             ph = ",".join("?" * len(cols))
             csql = ",".join(f'"{c}"' for c in cols)

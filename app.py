@@ -347,6 +347,9 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ul_batch ON update_log(batch_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ul_rec ON update_log(record_id)")
     _ensure_update_log_extra_cols(conn)
+    # 两改 spec §3.3.1：终态重现暂缓池（新增独立轻量表，不改既有表结构，不复用 alerts_applied）。
+    from manifest_engine import ensure_terminal_defer_table
+    ensure_terminal_defer_table(conn)
     # import_batch：一次导入操作的批次元信息 + 整库快照路径（核弹级还原用）。
     conn.execute("""CREATE TABLE IF NOT EXISTS import_batch (
         batch_id TEXT PRIMARY KEY,
@@ -1541,6 +1544,54 @@ def api_manifest_batch_detail(batch_id):
     ).fetchall()
     conn.close()
     return jsonify({"ok": True, "logs": [dict(r) for r in logs]})
+
+
+@app.route("/api/manifest/defer", methods=["GET", "POST"])
+def api_manifest_defer():
+    """暂缓池管理（两改 spec §3.3.1 必须可见 + §3.3.2 两操作：撤销暂缓 / 改判为B）。
+    范围说明：spec 要求舱单页有入口翻到已暂缓/已改判客编并可操作，仅 init_db 建表无法满足，
+    故在此补最小管理接口（查看走 manifest:import，变更走 manifest:apply）。"""
+    from manifest_engine import ensure_terminal_defer_table
+    if request.method == "GET":
+        if not _check_manifest_user():
+            return _manifest_forbid()
+        conn = get_db()
+        try:
+            ensure_terminal_defer_table(conn)
+            rows = conn.execute(
+                "SELECT core, train, decision, decided_at, decided_by "
+                "FROM manifest_terminal_defer ORDER BY decided_at DESC").fetchall()
+            return jsonify({"ok": True, "rows": [dict(r) for r in rows]})
+        finally:
+            conn.close()
+    if not _check_manifest_apply():
+        return _manifest_forbid()
+    body = request.get_json(silent=True) or {}
+    action = body.get("action")
+    core = str(body.get("core") or "").strip().upper()
+    if not core:
+        return jsonify({"ok": False, "msg": "缺少 core"}), 400
+    from manifest_engine import revoke_terminal_defer, mark_terminal_defer_b
+    conn = get_db()
+    try:
+        ensure_terminal_defer_table(conn)
+        if action == "revoke":
+            revoke_terminal_defer(conn, core)
+        elif action == "mark_b":
+            if not mark_terminal_defer_b(conn, core, g.identity.username):
+                return jsonify({"ok": False, "msg": "暂缓记录不存在: " + core}), 400
+        else:
+            return jsonify({"ok": False, "msg": "非法 action"}), 400
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return jsonify({"ok": False, "msg": "操作失败: " + str(e)}), 500
+    finally:
+        conn.close()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/manifest/revert", methods=["POST"])

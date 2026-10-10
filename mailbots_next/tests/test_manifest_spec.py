@@ -44,6 +44,8 @@ def conn():
         batch_id TEXT PRIMARY KEY, batch_type TEXT, source_files TEXT, snapshot TEXT,
         n_update INTEGER DEFAULT 0, n_insert INTEGER DEFAULT 0, n_alert INTEGER DEFAULT 0,
         operator TEXT, reverted INTEGER DEFAULT 0, created_at TEXT)""")
+    # 两改：暂缓池（独立轻量表，与 app.init_db 同 DDL）。
+    me.ensure_terminal_defer_table(c)
     c.commit()
     yield c
     c.close()
@@ -73,13 +75,21 @@ def codes(n, prefix="C"):
 
 # ---------- 改动三：退舱剔除 ----------
 
-def test_t3_retired_code_treated_as_new(conn):
-    """验收11：状态=退舱的客编视同不存在 → 走陌生客编放行进 imports，不报陌生客编。"""
-    seed(conn, **{"客户编码": "RT001-DMZ", "箱号": "BOX1", "班列号": "WB1",
-                  "状态": "退舱", "开票子公司名称": "太平洋"})
+# 两改改写（原断言「退舱客编视同不存在 → 进 imports」已作废）：
+# 退舱客编重现 → 不再直接进 imports，而是产一条「终态重现」待确认项，按 A/B 两支分别断言（见下）。
+def test_t3_retired_code_prompts_terminal_not_imports(conn):
+    """两改：状态=退舱的客编重现 → 不进 imports，产一条终态重现待确认项（含 pending_row.is_dedicated）。"""
+    rid = seed(conn, **{"客户编码": "RT001-DMZ", "箱号": "BOX1", "班列号": "WB1",
+                        "状态": "退舱", "开票子公司名称": "太平洋"})
     diff = me.build_diff(conn, [nrow("RT001-DMZ", train="WB1", box="BOX2")])
     assert not [a for a in diff["alerts"] if a["type"] == "陌生客编"]
-    assert sum(len(g["rows"]) for g in diff["imports"]) == 1
+    assert sum(len(g["rows"]) for g in diff["imports"]) == 0
+    terms = [a for a in diff["alerts"] if a["type"] == "终态重现"]
+    assert len(terms) == 1
+    assert terms[0]["record_id"] == rid
+    assert terms[0]["core"] == "RT001"
+    assert terms[0]["pending_row"]["班列号"] == "WB1"
+    assert isinstance(terms[0]["pending_row"]["is_dedicated"], bool)
 
 
 def test_t3_retired_not_counted_in_threshold(conn):
@@ -489,3 +499,262 @@ def test_update_log_migration_idempotent():
     finally:
         c.close()
         os.unlink(path)
+
+
+# ---------- 两改：负责公司下拉 + 终态重现出口 ----------
+
+def _apply2(conn, diff, monkeypatch, tmp_path, operator="毛骁洋"):
+    monkeypatch.setattr(me, "BACKUP_DIR", str(tmp_path))
+    bid = me.apply_diff(conn, diff, operator, ["t.xlsx"])
+    conn.commit()
+    return bid
+
+
+def _seed_retired(conn, code="RT100-DMZ", train="WB1", box="BOX1", company="太平洋"):
+    return seed(conn, **{"客户编码": code, "箱号": box, "班列号": train,
+                         "状态": "退舱", "开票子公司名称": company,
+                         "口岸": "山口", "发班时间": "2026-09-01",
+                         "封号": "S1", "箱属": "SOC"})
+
+
+def _full_row(conn, rid):
+    return dict(conn.execute("SELECT * FROM records WHERE id=?", (rid,)).fetchone())
+
+
+def _terminal_of(diff):
+    terms = [a for a in diff["alerts"] if a["type"] == "终态重现"]
+    assert len(terms) == 1
+    return terms[0]
+
+
+def test_terminal_choice_A_defers_and_asks_once(conn, tmp_path, monkeypatch):
+    """验收6+7：选 A → imports 无 X、无新增行、原退舱记录逐字段未动；再跑一次 build 不再弹。"""
+    rid = _seed_retired(conn)
+    before = _full_row(conn, rid)
+    term = _terminal_of(me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")]))
+    n_before = conn.execute("SELECT COUNT(*) c FROM records").fetchone()["c"]
+    _apply2(conn, {"updates": [], "imports": [], "alerts_applied": [],
+                   "terminal_decisions": [{"core": term["core"], "record_id": term["record_id"],
+                                           "decision": "A", "company": ""}],
+                   "defer_expired": []}, monkeypatch, tmp_path)
+    assert conn.execute("SELECT COUNT(*) c FROM records").fetchone()["c"] == n_before
+    assert _full_row(conn, rid) == before
+    mark = conn.execute(
+        "SELECT decision FROM manifest_terminal_defer WHERE core=?", (term["core"],)).fetchone()
+    assert mark["decision"] == "A暂缓"
+    diff2 = me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")])
+    assert not [a for a in diff2["alerts"] if a["type"] == "终态重现"]
+    assert sum(len(g["rows"]) for g in diff2["imports"]) == 0
+
+
+def test_terminal_choice_B_creates_with_company(conn, tmp_path, monkeypatch):
+    """验收5：选 B → 新增 1 条状态=正常、负责公司按所选写入、班列类型按 pending is_dedicated；
+    原退舱记录逐字段未动；B 不写暂缓池。"""
+    rid = _seed_retired(conn)
+    before = _full_row(conn, rid)
+    term = _terminal_of(me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")]))
+    assert term["pending_row"]["is_dedicated"] is False  # 小班列 → 散舱
+    _apply2(conn, {"updates": [], "imports": [], "alerts_applied": [],
+                   "terminal_decisions": [{"core": term["core"], "record_id": term["record_id"],
+                                           "decision": "B", "company": "太平洋",
+                                           "train": "WB1", "pending_row": term["pending_row"]}],
+                   "defer_expired": []}, monkeypatch, tmp_path)
+    assert _full_row(conn, rid) == before
+    rows = conn.execute(
+        'SELECT "状态","开票子公司名称","班列类型","班列号","客户编码" FROM records '
+        'WHERE "状态"<>? AND "客户编码"=?', ("退舱", "RT100-DMZ")).fetchall()
+    assert len(rows) == 1
+    assert (rows[0]["状态"], rows[0]["开票子公司名称"], rows[0]["班列类型"]) == ("正常", "太平洋", "散舱")
+    assert conn.execute("SELECT COUNT(*) c FROM manifest_terminal_defer").fetchone()["c"] == 0
+
+
+def test_terminal_choice_B_uses_pending_dedicated_flag(conn, tmp_path, monkeypatch):
+    """B 建行 ttype 用 pending_row['is_dedicated']，不重算阈值：专列 pending → 专列行。"""
+    rid = _seed_retired(conn)
+    term = _terminal_of(me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")]))
+    prow = dict(term["pending_row"], is_dedicated=True)
+    _apply2(conn, {"updates": [], "imports": [], "alerts_applied": [],
+                   "terminal_decisions": [{"core": term["core"], "record_id": term["record_id"],
+                                           "decision": "B", "company": "",
+                                           "train": "WB1", "pending_row": prow}],
+                   "defer_expired": []}, monkeypatch, tmp_path)
+    rows = conn.execute(
+        'SELECT "班列类型","开票子公司名称" FROM records WHERE id<>? AND "客户编码"=?',
+        (rid, "RT100-DMZ")).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["班列类型"] == "专列"
+    assert rows[0]["开票子公司名称"] == ""  # 未选留空，不写死默认公司
+
+
+def test_terminal_choice_C_asks_again(conn, tmp_path, monkeypatch):
+    """选 C → 不写库不建行不记忆；再跑 build 照常再问。"""
+    _seed_retired(conn)
+    term = _terminal_of(me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")]))
+    n_before = conn.execute("SELECT COUNT(*) c FROM records").fetchone()["c"]
+    _apply2(conn, {"updates": [], "imports": [], "alerts_applied": [],
+                   "terminal_decisions": [{"core": term["core"], "record_id": term["record_id"],
+                                           "decision": "C", "company": ""}],
+                   "defer_expired": []}, monkeypatch, tmp_path)
+    assert conn.execute("SELECT COUNT(*) c FROM records").fetchone()["c"] == n_before
+    assert conn.execute("SELECT COUNT(*) c FROM manifest_terminal_defer").fetchone()["c"] == 0
+    diff2 = me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")])
+    assert len([a for a in diff2["alerts"] if a["type"] == "终态重现"]) == 1
+
+
+def test_defer_revoke_reasks(conn, tmp_path, monkeypatch):
+    """验收11：A 暂缓后撤销 → 再跑 build 重新产生终态重现项，不直接放行不直接建行。"""
+    _seed_retired(conn)
+    term = _terminal_of(me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")]))
+    _apply2(conn, {"updates": [], "imports": [], "alerts_applied": [],
+                   "terminal_decisions": [{"core": term["core"], "record_id": term["record_id"],
+                                           "decision": "A", "company": ""}],
+                   "defer_expired": []}, monkeypatch, tmp_path)
+    me.revoke_terminal_defer(conn, term["core"])
+    conn.commit()
+    diff2 = me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")])
+    assert len([a for a in diff2["alerts"] if a["type"] == "终态重现"]) == 1
+    assert sum(len(g["rows"]) for g in diff2["imports"]) == 0
+
+
+def test_defer_mark_b_goes_imports(conn, tmp_path, monkeypatch):
+    """验收12：A 暂缓后改判 B → 再跑 build 不再弹，X 进 imports；应用后新行正常、负责公司按所选写入。"""
+    rid = _seed_retired(conn)
+    before = _full_row(conn, rid)
+    term = _terminal_of(me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")]))
+    _apply2(conn, {"updates": [], "imports": [], "alerts_applied": [],
+                   "terminal_decisions": [{"core": term["core"], "record_id": term["record_id"],
+                                           "decision": "A", "company": ""}],
+                   "defer_expired": []}, monkeypatch, tmp_path)
+    assert me.mark_terminal_defer_b(conn, term["core"], "毛骁洋") is True
+    conn.commit()
+    diff2 = me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")])
+    assert not [a for a in diff2["alerts"] if a["type"] == "终态重现"]
+    assert sum(len(g["rows"]) for g in diff2["imports"]) == 1
+    # 模拟确认页：负责公司下拉选「东盟」。
+    for g in diff2["imports"]:
+        for r in g["rows"]:
+            r["负责公司"] = "东盟"
+    diff2["alerts_applied"] = []
+    diff2["terminal_decisions"] = []
+    _apply2(conn, diff2, monkeypatch, tmp_path)
+    assert _full_row(conn, rid) == before
+    rows = conn.execute(
+        'SELECT "状态","开票子公司名称" FROM records WHERE id<>? AND "客户编码"=?',
+        (rid, "RT100-DMZ")).fetchall()
+    assert len(rows) == 1
+    assert (rows[0]["状态"], rows[0]["开票子公司名称"]) == ("正常", "东盟")
+
+
+def test_defer_A_auto_expires_only_for_covered_train(conn, tmp_path, monkeypatch):
+    """验收13：同班列源清单不再含 X → A 自动失效（删行），不弹不建；
+    不同班列导入（未覆盖 X 所属班列）→ 标记保留。"""
+    _seed_retired(conn)
+    term = _terminal_of(me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")]))
+    _apply2(conn, {"updates": [], "imports": [], "alerts_applied": [],
+                   "terminal_decisions": [{"core": term["core"], "record_id": term["record_id"],
+                                           "decision": "A", "company": ""}],
+                   "defer_expired": []}, monkeypatch, tmp_path)
+    # 不同班列导入：标记保留、不失效。
+    diff_other = me.build_diff(conn, [nrow("ZZ001-DMZ", train="WB2", box="ZB")])
+    assert diff_other["defer_expired"] == []
+    assert conn.execute("SELECT COUNT(*) c FROM manifest_terminal_defer").fetchone()["c"] == 1
+    # 同班列、源清单不再含 X：到期。
+    diff_same = me.build_diff(conn, [nrow("YY001-DMZ", train="WB1", box="YB")])
+    assert [e["core"] for e in diff_same["defer_expired"]] == [term["core"]]
+    assert not [a for a in diff_same["alerts"] if a["type"] == "终态重现"]
+    diff_same["alerts_applied"] = []
+    diff_same["terminal_decisions"] = []
+    _apply2(conn, diff_same, monkeypatch, tmp_path)
+    assert conn.execute("SELECT COUNT(*) c FROM manifest_terminal_defer").fetchone()["c"] == 0
+
+
+def test_defer_B_never_auto_expires(conn, tmp_path, monkeypatch):
+    """验收14：B 改判后源端消失 → 不自动失效，保留标记 + 可见复核提示。"""
+    _seed_retired(conn)
+    term = _terminal_of(me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")]))
+    _apply2(conn, {"updates": [], "imports": [], "alerts_applied": [],
+                   "terminal_decisions": [{"core": term["core"], "record_id": term["record_id"],
+                                           "decision": "A", "company": ""}],
+                   "defer_expired": []}, monkeypatch, tmp_path)
+    assert me.mark_terminal_defer_b(conn, term["core"], "毛骁洋") is True
+    conn.commit()
+    diff2 = me.build_diff(conn, [nrow("YY001-DMZ", train="WB1", box="YB")])
+    assert diff2["defer_expired"] == []
+    tips = [a for a in diff2["alerts"] if a["type"] == "改判复核提示"]
+    assert len(tips) == 1
+    assert "请复核" in tips[0]["说明"]
+    diff2["alerts_applied"] = []
+    diff2["terminal_decisions"] = []
+    _apply2(conn, diff2, monkeypatch, tmp_path)
+    mark = conn.execute(
+        "SELECT decision FROM manifest_terminal_defer WHERE core=?", (term["core"],)).fetchone()
+    assert mark["decision"] == "B改判"
+
+
+def test_company_written_on_import_but_never_on_update(conn, tmp_path, monkeypatch):
+    """验收1-4（后端部分）：两陌生客编分别带太平洋/东盟 → 各行写入对应值；
+    未选留空；既有行（保时达）走更新通道不得被覆盖；更新通道写公司直接拒绝。"""
+    rid = seed(conn, **{"客户编码": "H009-DMZ", "箱号": "HB9", "班列号": "WB9",
+                        "封号": "S-OLD", "开票子公司名称": "保时达"})
+    monkeypatch.setattr(me, "BACKUP_DIR", str(tmp_path))
+    diff = {"updates": [{"record_id": rid, "客户编码": "H009-DMZ", "箱号": "HB9",
+                         "changes": [{"field": "封号", "old": "S-OLD", "new": "S-NEW", "action": "改"}]}],
+            "imports": [{"train_no": "WB9", "口岸": "山口", "发班时间": "2026-09-01",
+                         "目的站建议": "", "班列类型": "散舱",
+                         "rows": [{"客户编码": "N1-DMZ", "箱号": "NB1", "封号": "",
+                                   "箱属": "SOC", "口岸": "山口", "发班时间": "2026-09-01",
+                                   "负责公司": "太平洋"},
+                                  {"客户编码": "N2-DMZ", "箱号": "NB2", "封号": "",
+                                   "箱属": "SOC", "口岸": "山口", "发班时间": "2026-09-01",
+                                   "负责公司": ""}]}],
+            "alerts_applied": [], "terminal_decisions": [], "defer_expired": []}
+    me.apply_diff(conn, diff, "毛骁洋", ["t.xlsx"])
+    conn.commit()
+    got = {r["客户编码"]: r["开票子公司名称"] for r in
+           conn.execute('SELECT "客户编码","开票子公司名称" FROM records WHERE "客户编码" IN (?,?,?)',
+                        ("N1-DMZ", "N2-DMZ", "H009-DMZ")).fetchall()}
+    assert got == {"N1-DMZ": "太平洋", "N2-DMZ": "", "H009-DMZ": "保时达"}
+    bad = {"updates": [{"record_id": rid, "客户编码": "H009-DMZ", "箱号": "HB9",
+                        "changes": [{"field": "开票子公司名称", "old": "保时达",
+                                     "new": "太平洋", "action": "改"}]}],
+           "imports": [], "alerts_applied": []}
+    with pytest.raises(ValueError):
+        me.apply_diff(conn, bad, "毛骁洋", ["t.xlsx"])
+
+
+def test_postponed_status_not_terminal(conn):
+    """验收9：延期不是终态 → 不产终态重现项，走正常匹配路径。"""
+    seed(conn, **{"客户编码": "PD001-DMZ", "箱号": "PB1", "班列号": "WB6",
+                  "箱属": "SOC", "口岸": "山口", "发班时间": "2026-09-01", "状态": "延期"})
+    diff = me.build_diff(conn, [nrow("PD001-DMZ", train="WB6", box="PB1")])
+    assert not [a for a in diff["alerts"] if a["type"] == "终态重现"]
+    assert sum(len(g["rows"]) for g in diff["imports"]) == 0
+    assert diff["updates"] == []
+
+
+def test_scheme_C_missing_suggests_retire_only_for_covered_train(conn):
+    """方案 C：本批覆盖班列内、源清单缺席的 active 记录 → 建议退舱告警；
+    未覆盖班列的记录不告警；不自动改库。"""
+    rid_p = seed(conn, **{"客户编码": "PC001-DMZ", "箱号": "PB1", "班列号": "WB5", "状态": "正常"})
+    seed(conn, **{"客户编码": "PC002-DMZ", "箱号": "PB2", "班列号": "WB6", "状态": "正常"})
+    n_before = conn.execute("SELECT COUNT(*) c FROM records").fetchone()["c"]
+    diff = me.build_diff(conn, [nrow("QQ001-DMZ", train="WB5", box="QB")])
+    missing = [a for a in diff["alerts"] if a["type"] == "源端缺失建议退舱"]
+    assert {a["key"] for a in missing} == {f"missing:{rid_p}"}
+    assert conn.execute("SELECT COUNT(*) c FROM records").fetchone()["c"] == n_before
+    st = conn.execute('SELECT "状态" FROM records WHERE id=?', (rid_p,)).fetchone()["状态"]
+    assert st == "正常"
+
+
+def test_stale_defer_cleared_when_terminal_record_gone(conn):
+    """本地退舱记录被改回正常 → 暂缓标记失的，build 计入 defer_expired（apply 后清除，不永久压着）。"""
+    rid = _seed_retired(conn)
+    term = _terminal_of(me.build_diff(conn, [nrow("RT100-DMZ", train="WB1", box="BOX2")]))
+    conn.execute(
+        "INSERT INTO manifest_terminal_defer(core, train, decision, decided_at, decided_by) "
+        "VALUES(?,?,?,?,?)", (term["core"], "WB1", "A暂缓", "2026-10-09 00:00:00", "毛骁洋"))
+    conn.commit()
+    conn.execute('UPDATE records SET "状态"=? WHERE id=?', ("正常", rid))
+    conn.commit()
+    diff2 = me.build_diff(conn, [nrow("YY001-DMZ", train="WB1", box="YB")])
+    assert [e["core"] for e in diff2["defer_expired"]] == [term["core"]]
