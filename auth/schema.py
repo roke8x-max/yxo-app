@@ -24,13 +24,13 @@ SEED_USERS = {
     "冯茜": ("fengqian", "all", [], "FENGQIAN", False),
     "杨雅雯": ("yangyawen", "all", [], "YANGYAWEN", False),
     "韩文豪": ("hanwenhao", "all", [], "HANWENHAO", False),
-    # 验收账号：scope 绑定 yxo.db 开票子公司名称实际取值（完整字符串，禁用简写）
-    "visitor_demo": ("visitor", "companies", ["太平洋、港九港铁", "保时达"], "VISITOR_DEMO", True),
-    # 真实外部只读方：集团下属数科公司同事，看集团全量数据。visitor 角色纯只读
+    # 真实外部只读方：集团下属数科公司同事。visitor 角色纯只读
     # (record:read + record:export)，无写无管理权限。口令经 YXO_AUTH_PASSWORD_YOUKE
     # 设置；不设则 init_db 用开发占位 + WARNING（生产必须设真实口令）。
+    # companies 必须与 yxo.db「开票子公司名称」实际取值逐一精确对应（独立字符串，
+    # 禁止顿号连写），2026-10-10 生产库查得 8 家全量（G10-C）。
     "游客": ("visitor", "companies",
-             ["太平洋、港九港铁", "保时达", "同程配、东盟", "沙坪坝、中欧木业", "联运"], "YOUKE", False),
+             ["太平洋", "港九港铁", "保时达", "同程配", "东盟", "沙坪坝", "中欧木业", "联运"], "YOUKE", False),
 }
 
 SCHEMA_SQL = """

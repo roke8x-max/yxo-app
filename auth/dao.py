@@ -148,6 +148,19 @@ def write_audit(ts, username, ip, req_id, event, target, detail):
         conn.close()
 
 
+def list_shadow_users():
+    """影子期「我是」下拉候选（G10-B）：未禁用 + scope 全量的内部账号名（按 id 排序）。
+    数据驱动，不硬编码名单；游客（scope=companies）与禁用账号不在内。"""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT username FROM auth_users WHERE disabled=0 AND scope_type='all'"
+            " ORDER BY id").fetchall()
+        return [r["username"] for r in rows]
+    finally:
+        conn.close()
+
+
 def user_companies_scope(username):
     """取某用户的 scope（供 records_dao 用）。返回 (scope_type, [companies])。"""
     row = get_user(username)

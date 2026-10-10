@@ -8,7 +8,6 @@
 初始口令仅从环境变量读（4 人各自独立）：
     YXO_AUTH_PASSWORD_MAOXIAOYANG / _FENGQIAN / _YANGYAWEN / _HANWENHAO / _YOUKE
 未设置则 seed 用开发占位口令并 WARNING（生产必须设置）。
-注：VISITOR_DEMO 为禁用演示账号，不进必需口令清单。
 
 回滚：删 auth.db + git 切回（`del data\\auth.db`，再 git checkout  pre-auth 状态）。
 yxo.db 本脚本只备份不修改；数据库本身不会自动回滚，恢复前先问毛骁洋。

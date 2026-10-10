@@ -58,7 +58,9 @@
 <header>
   <h1>📄 托书生成</h1>
   <a href="./">← 返回订舱系统</a>
-  <span style="margin-left:auto;font-size:13px">当前身份：<b id="who">—</b></span>
+  <span style="margin-left:auto;font-size:13px">当前身份：<b id="who">—</b>
+    <select id="whoSel" class="hidden"></select>
+  </span>
 </header>
 
 <div id="denied" class="hidden"></div>
@@ -167,6 +169,7 @@
 
 </main>
 
+<script src="static/auth_mode.js"></script>
 <script>
 // 权限唯一来源 = 服务端 /api/auth_meta 返回的 permissions（G8：已删前端硬编码名单）。
 let USER = "";
@@ -176,14 +179,15 @@ const _origFetch = window.fetch.bind(window);
 window.fetch = function (url, opts) {
   opts = opts || {};
   opts.credentials = "same-origin";
+  if (typeof url === "string") url = withShadowUser(url);
   const method = (opts.method || "GET").toUpperCase();
   opts.headers = opts.headers || {};
   const sameOrigin = typeof url === "string" && !/^https?:\/\//i.test(url);
-  if (sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
+  if (AUTH_MODE === "auth" && sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
     opts.headers["X-CSRF-Token"] = CSRF_TOKEN;
   }
   return _origFetch(url, opts).then((r) => {
-    if (r.status === 401 && sameOrigin && typeof url === "string"
+    if (AUTH_MODE === "auth" && r.status === 401 && sameOrigin && typeof url === "string"
         && url.indexOf("api/login") < 0 && url.indexOf("api/auth_meta") < 0
         && typeof showLoginModal === "function") {
       try { showLoginModal(); } catch (e) { /* modal 未就绪时忽略 */ }
@@ -246,9 +250,24 @@ _origFetch("api/csrf", { credentials: "same-origin" }).then((r) => r.json()).the
   return r.json();
 }).then((m) => {
   if (!m) return;
+  if (applyAuthMode(m) === "shadow") { enterShadowTuoshu(m); return; }
   if (!(m.permissions || []).includes("tuoshu:generate")) { showDenied(m.username); return; }
   enterPage(m.username);
 });
+
+// 影子期入口（G10-B）：「我是」下拉 + 自报身份，不过登录窗
+function enterShadowTuoshu(m) {
+  document.getElementById("whoSel").classList.remove("hidden");
+  const cur = fillWhoSel();
+  if (!cur) {
+    const box = $("denied");
+    box.classList.remove("hidden");
+    box.innerHTML = '<p style="font-size:15px">影子期请先在右上角下拉中选择身份。</p>'
+                  + '<p><a href="./">← 返回订舱系统</a></p>';
+    return;
+  }
+  enterPage(cur);
+}
 
 function payload(){
   const nos = $("trainNos").value.split(/[,，\s]+/).map(s=>s.trim()).filter(Boolean);

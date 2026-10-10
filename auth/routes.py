@@ -9,6 +9,7 @@ import secrets
 
 from flask import Blueprint, g, jsonify, request
 
+import config
 from auth import audit, dao, service
 from auth.rbac import role_permissions
 
@@ -85,6 +86,8 @@ def api_auth_meta():
         seed = secrets.token_hex(16)
     resp = jsonify({
         "ok": True,
+        "mode": "auth" if config.AUTH_ENABLED else "shadow",
+        "users": dao.list_shadow_users(),
         "username": ident.username,
         "role": ident.role,
         "permissions": ident.permissions,

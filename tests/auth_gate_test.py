@@ -349,20 +349,24 @@ def test_init_auth_refuses_without_token(client, monkeypatch):
         init_auth(prod)
 
 
-# ---------------- A 工单：AUTH_ENABLED 灰度开关 + system 兜底 + dry-run ----------------
+# ---------------- A 工单/G10-A：AUTH_ENABLED 灰度开关 + 影子身份 ----------------
 
-def test_system_identity_shape():
-    # 与 _load_identity 同形状 5 字段；权限必须全量（§1.3 修正），scope 全量
-    from auth import _system_identity
+def test_shadow_identity_shape():
+    # 与 _load_identity 同形状 5 字段；username 取 ?user= 自报（空即空，不兜底）；
+    # 权限必须全量，scope 全量（影子期不拦截）。
+    import app as appmod
+    from auth import _shadow_identity
     from auth.rbac import PERMISSIONS
     from data.records_dao import resolve_scope
-    ident = _system_identity()
-    assert ident.username == "system"
-    assert ident.role == "system"
-    assert sorted(ident.permissions) == sorted(PERMISSIONS.keys())
-    assert ident.scope_type == "all"
-    assert ident.companies == []
-    assert resolve_scope(ident) == ("all", [])  # companies=[] 不挡全量
+    with appmod.app.test_request_context("/?user=韩文豪"):
+        ident = _shadow_identity()
+        assert ident.username == "韩文豪"
+        assert sorted(ident.permissions) == sorted(PERMISSIONS.keys())
+        assert ident.scope_type == "all"
+        assert ident.companies == []
+        assert resolve_scope(ident) == ("all", [])
+    with appmod.app.test_request_context("/"):
+        assert _shadow_identity().username == ""  # 空 ?user= 不兜底，尤其禁止 or "system"
 
 
 def test_disabled_row_200(dclient):
@@ -389,19 +393,26 @@ def test_disabled_tuoshu_manifest_not_blocked(dclient):
     assert r2.status_code not in (401, 403)
 
 
-def test_disabled_delete_marks_system(dclient):
-    # 13 处裸 g.identity.username 不崩，且 updated_by 署 system（灰度通知口径）
+def test_disabled_delete_marks_shadow_user(dclient):
+    # G10-A：影子期署名取 ?user= 自报（13 处裸 g.identity.username 不崩）；
+    # 不带 ?user= 则署空字符串（不兜底 system）。
     import sqlite3
     c, appmod = dclient
     conn = sqlite3.connect(appmod.DB)
-    rid = conn.execute("SELECT id FROM records LIMIT 1").fetchone()[0]
+    ids = [r[0] for r in conn.execute("SELECT id FROM records LIMIT 2").fetchall()]
     conn.close()
-    r = c.delete(f"/api/row/{rid}")
+    r = c.delete(f"/api/row/{ids[0]}?user=韩文豪")
     assert r.status_code == 200
     conn = sqlite3.connect(appmod.DB)
-    by = conn.execute("SELECT deleted_by FROM records WHERE id=?", (rid,)).fetchone()[0]
+    by = conn.execute("SELECT deleted_by FROM records WHERE id=?", (ids[0],)).fetchone()[0]
     conn.close()
-    assert by == "system"
+    assert by == "韩文豪"
+    r2 = c.delete(f"/api/row/{ids[1]}")
+    assert r2.status_code == 200
+    conn = sqlite3.connect(appmod.DB)
+    by2 = conn.execute("SELECT deleted_by FROM records WHERE id=?", (ids[1],)).fetchone()[0]
+    conn.close()
+    assert by2 == ""
 
 
 def test_dry_run_log_fields(dclient, caplog):
@@ -511,16 +522,18 @@ def test_g1_init_auth_no_crash_under_pytest(client):
     assert r.status_code == 200
 
 
-# ---------------- G2：visitor_demo 种子禁用 ----------------
+# ---------------- G10-C：visitor_demo 已移除 ----------------
 
-def test_g2_visitor_demo_disabled(tmp_path, monkeypatch):
+def test_g10_visitor_demo_removed(tmp_path, monkeypatch):
+    # 洋拍板直接删：全新库 init 后 visitor_demo 行不存在；SEED_USERS 无此 key
     monkeypatch.setattr(config, "AUTH_DB_PATH", str(tmp_path / "auth.db"))
     from auth import schema
+    assert "visitor_demo" not in schema.SEED_USERS
     schema.init_db(strict=False)
     conn = sqlite3.connect(str(tmp_path / "auth.db"))
-    row = conn.execute("SELECT disabled FROM auth_users WHERE username='visitor_demo'").fetchone()
+    row = conn.execute("SELECT id FROM auth_users WHERE username='visitor_demo'").fetchone()
     conn.close()
-    assert row is not None and row[0] == 1
+    assert row is None
 
 
 # ---------------- G7：角色重划 ----------------
@@ -597,3 +610,129 @@ def test_g8_no_scattered_lists():
                             "templates", "tuoshu.html"),
                encoding="utf-8").read()
     assert "TUOSHU_ADMINS" not in src
+
+
+# ---------------- G10-A：影子期署名 = 自报身份 ----------------
+
+def test_g10_shadow_patch_marks_real_name(dclient):
+    # 影子期 PATCH 一行 → updated_by = ?user= 真实姓名（非 system）
+    import sqlite3
+    c, appmod = dclient
+    conn = sqlite3.connect(appmod.DB)
+    rid = conn.execute("SELECT id FROM records LIMIT 1").fetchone()[0]
+    conn.close()
+    r = c.patch(f"/api/row/{rid}?user=杨雅雯",
+                json={"field": "备注", "value": "g10"})
+    assert r.status_code == 200
+    conn = sqlite3.connect(appmod.DB)
+    by = conn.execute("SELECT updated_by FROM records WHERE id=?", (rid,)).fetchone()[0]
+    conn.close()
+    assert by == "杨雅雯"
+
+
+def test_g10_shadow_state_isolated_per_user(dclient):
+    # 四人各 GET /api/state 读到各自行，互不覆盖
+    c, _ = dclient
+    r = c.post("/api/state?user=毛骁洋", json={"state": {"month": "2026-01"}})
+    assert r.status_code == 200
+    r = c.post("/api/state?user=冯茜", json={"state": {"month": "2026-02"}})
+    assert r.status_code == 200
+    got_mao = c.get("/api/state?user=毛骁洋").get_json()["state"]
+    got_feng = c.get("/api/state?user=冯茜").get_json()["state"]
+    assert got_mao.get("month") == "2026-01"
+    assert got_feng.get("month") == "2026-02"
+
+
+# ---------------- G10-B：auth_meta 双模式 ----------------
+
+def test_g10_auth_meta_shadow_mode(dclient):
+    c, _ = dclient
+    m = c.get("/api/auth_meta?user=韩文豪").get_json()
+    assert m["mode"] == "shadow"
+    assert m["username"] == "韩文豪"
+    # fixture 另建 t_* 测试账号（同为全量 scope），此处断言 4 位同事在列即可
+    assert {"毛骁洋", "冯茜", "杨雅雯", "韩文豪"} <= set(m["users"])
+    assert "游客" not in m["users"]
+
+
+def test_g10_auth_meta_auth_mode(client):
+    c, _ = client
+    _authed(c, ADMIN)
+    m = c.get("/api/auth_meta").get_json()
+    assert m["mode"] == "auth"
+    assert m["username"] == ADMIN
+
+
+def test_g10_frontend_dual_mode_static():
+    # 四页引入公共判断 + 身份下拉；CSRF 与 401 弹窗只在 auth 模式生效
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    shared = open(os.path.join(root, "static", "auth_mode.js"), encoding="utf-8").read()
+    assert "function applyAuthMode" in shared
+    assert "function withShadowUser" in shared
+    assert "function fillWhoSel" in shared
+    for page in ("templates/index.html", "templates/admin.html",
+                 "templates/tuoshu.html", "templates/manifest.html"):
+        src = open(os.path.join(root, page), encoding="utf-8").read()
+        assert 'id="whoSel"' in src, page
+    appjs = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    assert "AUTH_MODE === \"auth\"" in appjs
+    for page in ("templates/admin.html", "templates/tuoshu.html", "templates/manifest.html"):
+        src = open(os.path.join(root, page), encoding="utf-8").read()
+        assert "AUTH_MODE === \"auth\"" in src, page
+        assert "auth_mode.js" in src, page
+
+
+# ---------------- G10-C：游客 8 独立公司 ----------------
+
+def test_g10_youke_companies(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "AUTH_DB_PATH", str(tmp_path / "auth.db"))
+    from auth import schema
+    schema.init_db(strict=False)
+    import json as _json
+    conn = sqlite3.connect(str(tmp_path / "auth.db"))
+    row = conn.execute("SELECT scope_companies FROM auth_users WHERE username='游客'").fetchone()
+    conn.close()
+    assert _json.loads(row[0]) == ["太平洋", "港九港铁", "保时达", "同程配",
+                                   "东盟", "沙坪坝", "中欧木业", "联运"]
+
+
+def test_g10_youke_rows_match_all_companies(tmp_path, monkeypatch):
+    # 游客登录后 /api/rows 覆盖全部有公司归属的行（独立取值精确匹配）
+    monkeypatch.setattr(config, "AUTH_DB_PATH", str(tmp_path / "auth.db"))
+    monkeypatch.setattr(config, "AUTH_ENABLED", True, raising=False)
+    import app as appmod
+    yxo_db = str(tmp_path / "yxo.db")
+    monkeypatch.setattr(appmod, "DB", yxo_db)
+    conn = sqlite3.connect(yxo_db)
+    cols = ", ".join([f'"{f}"' for f in config.ALL_FIELDS])
+    conn.execute(
+        f'CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY AUTOINCREMENT, '
+        f'seq INTEGER, {cols}, updated_at TEXT, updated_by TEXT, order_idx REAL, '
+        f'is_deleted INTEGER DEFAULT 0, deleted_at TEXT, deleted_by TEXT)')
+    for comp in ("同程配", "保时达", "港九港铁", "中欧木业", "沙坪坝", "太平洋", "东盟", "联运"):
+        vals = ["" for _ in config.ALL_FIELDS]
+        vals[config.ALL_FIELDS.index("客户编码")] = "T" + comp[:1]
+        vals[config.ALL_FIELDS.index("开票子公司名称")] = comp
+        ph = ", ".join(["?"] * len(vals))
+        conn.execute(f"INSERT INTO records (seq, order_idx, {cols}) VALUES (?, ?, {ph})",
+                     [1, 1.0] + vals)
+    conn.commit()
+    conn.close()
+    from auth import schema, service
+    schema.init_db(strict=False)
+    service.create_user("t_youke", "TestEe123456", role="visitor",
+                        scope_type="companies",
+                        companies=["太平洋", "港九港铁", "保时达", "同程配",
+                                   "东盟", "沙坪坝", "中欧木业", "联运"])
+    appmod.app.config["TESTING"] = True
+    c = appmod.app.test_client()
+    tok = _csrf(c)
+    r = c.post("/api/login",
+               data=json.dumps({"username": "t_youke", "password": "TestEe123456"}),
+               content_type="application/json",
+               headers={"X-CSRF-Token": tok})
+    assert r.status_code == 200
+    rows = c.get("/api/rows").get_json()
+    assert {row["开票子公司名称"] for row in rows} == {"同程配", "保时达", "港九港铁",
+                                                      "中欧木业", "沙坪坝", "太平洋",
+                                                      "东盟", "联运"}

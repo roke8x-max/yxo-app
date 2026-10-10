@@ -107,6 +107,7 @@
   <h1>🚢 舱单 / 箱号 统一导入</h1>
   <a href="javascript:history.back()">← 返回</a>
   <span class="who" id="who"></span>
+  <select id="whoSel" class="hidden"></select>
 </header>
 
 <!-- 登录弹层（G9：与 admin.html loginModal 等价；未登录访问受保护接口 → 401 → 弹出本层） -->
@@ -193,17 +194,19 @@
   </div>
 </main>
 
+<script src="static/auth_mode.js"></script>
 <script>
-// ---------- CSRF + 登录基座（G9：与 admin.html 同款三件套） ----------
+// ---------- CSRF + 登录基座（G9：与 admin.html 同款三件套；G10-B 加双模式门） ----------
 let CSRF_TOKEN = "";
 const _origFetch = window.fetch.bind(window);
 window.fetch = function (url, opts) {
   opts = opts || {};
   opts.credentials = "same-origin";
+  if (typeof url === "string") url = withShadowUser(url);
   const method = (opts.method || "GET").toUpperCase();
   opts.headers = opts.headers || {};
   const sameOrigin = typeof url === "string" && !/^https?:\/\//i.test(url);
-  if (sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
+  if (AUTH_MODE === "auth" && sameOrigin && method !== "GET" && CSRF_TOKEN && !opts.headers["X-CSRF-Token"]) {
     opts.headers["X-CSRF-Token"] = CSRF_TOKEN;
   }
   return _origFetch(url, opts);
@@ -234,11 +237,11 @@ function showLoginModal(msg) {
     document.getElementById("loginPass").addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
   }
 }
-// 全局 401 → 弹登录层（与 admin.html 同款）
+// 全局 401 → 弹登录层（仅 auth 模式；影子期永不弹窗）
 const _fetchWithLogin = window.fetch.bind(window);
 window.fetch = function (url, opts) {
   return _fetchWithLogin(url, opts).then((r) => {
-    if (r.status === 401 && typeof url === "string"
+    if (AUTH_MODE === "auth" && r.status === 401 && typeof url === "string"
         && url.indexOf("api/login") < 0 && url.indexOf("api/auth_meta") < 0) {
       showLoginModal();
     }
@@ -246,7 +249,7 @@ window.fetch = function (url, opts) {
   });
 };
 
-const USER = new URLSearchParams(location.search).get("user") || "";
+let USER = resolveShadowUser();  // G10-B：?user= 优先，其次上次选择；都没有则 ""（服务端同样不兜底）
 let LAST_DIFF = null;
 let UPLOADED_FILE = "";
 const destInputs = {};      // train_no -> 目的站 input 值
@@ -290,7 +293,7 @@ function tagClass(t) { return ["补","改","增","新"].includes(t) ? t : (t ===
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
-  if (r.status === 401) { showLoginModal(); }
+  if (AUTH_MODE === "auth" && r.status === 401) { showLoginModal(); }
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.ok === false) throw new Error(j.msg || ("请求失败 " + r.status));
   return j;
@@ -299,6 +302,16 @@ async function api(path, opts) {
 function init() {
   _origFetch("api/csrf", { credentials: "same-origin" })
     .then((r) => r.json()).then((j) => { CSRF_TOKEN = j.csrf_token || ""; });
+  _origFetch("api/auth_meta", { credentials: "same-origin" })
+    .then((r) => r.json()).then((m) => {
+      if (applyAuthMode(m || {}) === "shadow") {
+        document.getElementById("whoSel").classList.remove("hidden");
+        fillWhoSel();
+        if (!resolveShadowUser()) {
+          document.getElementById("who").textContent = "影子期请先在右上角下拉中选择身份";
+        }
+      }
+    }).catch(() => {});
   document.getElementById("who").textContent = USER ? ("身份：" + USER) : "";
   api("api/meta").then(m => {
     const admins = (m.manifest_admins || ["毛骁洋"]);
