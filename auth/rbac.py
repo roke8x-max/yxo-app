@@ -125,6 +125,10 @@ ROUTE_PERMISSIONS = {
     ("GET", "/api/manifest/batch/<batch_id>"): "manifest:import",
     ("POST", "/api/manifest/revert"): "manifest:apply",
     ("POST", "/api/manifest/restore"): "manifest:apply",
+    # 两改：暂缓池管理。GET 查看走 manifest:import，POST 变更（撤销/改判）走 manifest:apply，
+    # 与 api_manifest_defer 函数体内 _check_manifest_user/_check_manifest_apply 一致。
+    ("GET", "/api/manifest/defer"): "manifest:import",
+    ("POST", "/api/manifest/defer"): "manifest:apply",
     ("GET", "/api/state"): AUTHENTICATED,
     ("POST", "/api/state"): AUTHENTICATED,
     # admin_api（无 url_prefix，规则即全路径）

@@ -66,6 +66,13 @@
   .alert-box.后缀变更, .alert-box.弱提示 { border-left:4px solid var(--warn); background:var(--warn-soft); }
   .alert-box.缺班列号 { border-left:4px solid var(--danger); background:var(--danger-soft); }
   .alert-box.陌生客编, .alert-box.客编重复无法定位, .alert-box.箱号冲突, .alert-box.字段冲突, .alert-box.客编缺失 { border-left:4px solid var(--danger); background:var(--danger-soft); }
+  /* 两改：终态重现（紫）/ 源端缺失建议退舱与改判复核提示（黄，仅提示不写库） */
+  .alert-box.终态重现 { border-left:4px solid #7e22ce; background:#faf5ff; }
+  .alert-box.源端缺失建议退舱, .alert-box.改判复核提示 { border-left:4px solid var(--warn); background:var(--warn-soft); }
+  .term-opts { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; font-size:13px; }
+  .term-opts label { display:flex; align-items:center; gap:6px; cursor:pointer; }
+  .companybar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:12px; padding:10px 12px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius-sm); }
+  .companybar select, td select.compsel { padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px; }
   .kv { display:flex; gap:18px; flex-wrap:wrap; font-size:12px; color:var(--text-secondary); margin-top:6px; }
   .kv b { color:var(--text); font-weight:600; }
   .import-group { border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px; }
@@ -136,6 +143,13 @@
     <!-- 2. 差异 -->
     <div class="card hidden" id="diffCard">
       <h3>② 差异清单（空跑，未写库）</h3>
+      <!-- 两改：批量默认负责公司。选择后应用于本批所有尚未单独指定的新增行；
+           终态重现选 B 建行时同样取该值（终态区不另设下拉）。未选留空，不写死默认公司。 -->
+      <div id="companyBar" class="companybar hidden">
+        <b>批量默认负责公司</b>
+        <select id="companyBatch"><option value="">（未选，留空）</option></select>
+        <span class="muted">选项复用「开票子公司名称」字段选项（选项维护里可增删），此处不另建清单。</span>
+      </div>
       <div class="tabs">
         <div class="tab active" data-tab="updates">更新 <span id="cUpdates">0</span></div>
         <div class="tab" data-tab="imports">待导入专列 <span id="cImports">0</span></div>
@@ -148,6 +162,8 @@
         说明：发班时间按系统现行标准 <code>YYYY-MM-DD</code> 归一（与库一致）；
         引擎只写白名单字段（班列号 / 口岸 / 发班时间 / 箱号 / 封号 / 箱属 / 目的站），
         品名、放箱地、还箱、前后端运输、atb、运输条款等字段永不触碰。
+        新增行可在本页指定「负责公司」（批量默认 + 单行覆盖，未选留空）；既有行的负责公司永不覆盖。
+        退舱客编重现时走 A/B/C 三选一：A 本次不新增并记住不再问（暂缓池，可撤销/改判），B 走新增通道建行，C 下次再问。
       </div>
     </div>
 
@@ -159,12 +175,20 @@
       <button class="btn btn-primary" id="applyUpdatesBtn" style="display:none;">✔ 确认更新</button>
       <button class="btn btn-primary" id="applyImportsBtn" style="display:none;">✔ 确认导入所选</button>
       <button class="btn btn-primary" id="applyAlertsBtn" style="display:none;">✔ 确认报警</button>
+      <button class="btn btn-primary" id="applyTerminalBtn" style="display:none;">✔ 确认终态选择</button>
     </div>
 
     <!-- 4. 历史 -->
     <div class="card">
       <h3>③ 导入历史 / 回退</h3>
       <div id="batches"><div class="empty">暂无导入批次</div></div>
+    </div>
+
+    <!-- 两改：暂缓池（终态重现 · 只问一次）。A暂缓默认下次不再弹；可撤销（重弹 A/B/C）或改判为 B（下次直接走新增）。 -->
+    <div class="card">
+      <h3>④ 暂缓池（终态重现 · 只问一次） <button class="btn btn-sm" id="reloadDeferBtn">刷新</button></h3>
+      <div class="muted">A暂缓 = 渝新欧还没操作（本次不新增，默认下次不再问）；B改判 = 已退舱新需要（下次直接走新增，不自动失效）。撤销后回到未决定状态，下次重弹。</div>
+      <div id="deferList" style="margin-top:8px;"><div class="empty">加载中…</div></div>
     </div>
   </div>
 </main>
@@ -232,6 +256,12 @@ const destInputs = {};      // train_no -> 目的站 input 值
 const confirmedSuffix = {}; // record_id -> true 已勾选的后缀变更
 const confirmedFieldFix = {}; // record_id + ":" + field -> {field, new_value} 已勾选的字段冲突
 const confirmedWeak = {};   // key(班列号:code_core) -> true 已知悉的弱提示（不写库）
+// 两改：负责公司选项（复用 api/meta 里「开票子公司名称」列的 options，不另建清单）；
+let COMPANIES = [];
+// 批量默认负责公司（新增清单上方下拉值；未选=""留空）。终态重现选 B 建行时同样取该值。
+let COMPANY_BATCH = "";
+// 终态重现选择：core -> {core, record_id, decision(A/B/C), train, pending_row}。默认不预选，必须显式点选。
+const terminalDecisions = {};
 
 // 内部字段名 → 中文显示名（用于报警区域"库内值"/"文件值"展示）
 const FIELD_LABELS = {
@@ -277,11 +307,43 @@ function init() {
       document.getElementById("main").classList.add("hidden");
       return;
     }
+    // 两改：负责公司下拉选项复用「开票子公司名称」列 options。
+    const compCol = (m.columns || []).find(c => c.name === "开票子公司名称");
+    COMPANIES = (compCol && compCol.options) || [];
+    buildCompanyBatchOptions();
     bindUpload();
     loadBatches();
+    loadDefer();
   }).catch(err => {
     document.getElementById("uploadInfo").textContent = "加载失败：" + err.message;
   });
+}
+
+// 两改：批量默认下拉。变更后应用于本批所有尚未单独指定的新增行。
+function buildCompanyBatchOptions() {
+  const sel = document.getElementById("companyBatch");
+  sel.innerHTML = "";
+  sel.appendChild(el("option", { value:"", text:"（未选，留空）" }));
+  COMPANIES.forEach(c => sel.appendChild(el("option", { value:c, text:c })));
+  sel.value = COMPANY_BATCH;
+  sel.onchange = () => {
+    COMPANY_BATCH = sel.value || "";
+    // 仅覆盖尚未单独指定的行（单行覆盖优先于批量默认）。
+    const d = (LAST_DIFF && LAST_DIFF.diff) || {};
+    (d.imports || []).forEach(g => (g.rows || []).forEach(r => {
+      if (!r._ctouched) r["负责公司"] = COMPANY_BATCH;
+    }));
+    if (LAST_DIFF) renderDiff(LAST_DIFF);
+  };
+}
+
+function makeCompanySelect(value, onchange) {
+  const sel = el("select", { class:"compsel" });
+  sel.appendChild(el("option", { value:"", text:"（空）" }));
+  COMPANIES.forEach(c => sel.appendChild(el("option", { value:c, text:c })));
+  sel.value = value || "";
+  sel.onchange = () => onchange(sel.value || "");
+  return sel;
 }
 
 /* ---------- 上传 ---------- */
@@ -343,6 +405,9 @@ function renderDiff(d) {
   renderUpdates(updates);
   renderImports(imports);
   renderAlerts(alerts);
+  // 两改：新增清单或终态重现任一存在时，展示批量默认负责公司栏。
+  const hasTerminal = alerts.some(a => a.type === "终态重现");
+  document.getElementById("companyBar").classList.toggle("hidden", !(imports.length || hasTerminal));
   updateApplySum();
 }
 
@@ -526,6 +591,10 @@ function renderImports(imports) {
   if (!imports.length) { p.appendChild(el("div", { class:"empty", text:"无待导入（陌生客编按班列客编总数判专列/散舱后放行进此清单）" })); return; }
   imports.forEach(g => {
     destInputs[g.train_no] = g["目的站建议"] || "";
+    // 两改：新到行继承当前批量默认（尚未单独指定且为空时）；单行改过的不动。
+    (g.rows || []).forEach(r => {
+      if (!r._ctouched && !r["负责公司"]) r["负责公司"] = COMPANY_BATCH;
+    });
     const destInp = el("input", { class:"dest", placeholder:"目的站", value:g["目的站建议"] || "",
       oninput: e => { destInputs[g.train_no] = e.target.value; } });
     const gh = el("div", { class:"gh" }, [
@@ -539,14 +608,21 @@ function renderImports(imports) {
     const t = el("table");
     t.appendChild(el("thead", null, el("tr", null, [
       el("th", { text:"客户编码" }), el("th", { text:"箱号" }), el("th", { text:"封号" }),
-      el("th", { text:"箱属" }), el("th", { text:"口岸" }), el("th", { text:"发班时间" })
+      el("th", { text:"箱属" }), el("th", { text:"口岸" }), el("th", { text:"发班时间" }),
+      el("th", { text:"负责公司" })
     ])));
     const tb = el("tbody");
     (g.rows || []).forEach(r => {
+      // 两改：每行可单独改负责公司（单行覆盖批量默认；未选留空）。
+      const compSel = makeCompanySelect(r["负责公司"] || "", v => {
+        r["负责公司"] = v;
+        r._ctouched = true;
+      });
       tb.appendChild(el("tr", null, [
         el("td", { text:r["客户编码"] || "" }), el("td", { text:r["箱号"] || "" }),
         el("td", { text:r["封号"] || "" }), el("td", { text:r["箱属"] || "" }),
         el("td", { text:r["口岸"] || "" }), el("td", { text:r["发班时间"] || "" }),
+        el("td", null, compSel),
       ]));
     });
     t.appendChild(tb);
@@ -609,6 +685,35 @@ function renderAlerts(alerts) {
         chk, el("span", { text:"确认应用（用文件值覆盖：" + a.field + " → " + (a.new_value || "（空）") + "）" })
       ]));
     }
+    // 两改：终态重现 → A/B/C 三选一（单选，默认不预选，必须显式点选；终态区不另设负责公司下拉，
+    // 选 B 建行时取批量默认当前值，未选留空）。提交走 terminal_decisions，与 alerts_applied 并列不混淆。
+    if (a.type === "终态重现" && a.core) {
+      const pr = a.pending_row || {};
+      const summary = "班列 " + (pr["班列号"] || "—") + " · 口岸 " + (pr["口岸"] || "—") +
+        " · 发班 " + (pr["发班时间"] || "—") + " · 箱属 " + (pr["箱属"] || "—") +
+        " · 按当前批次判 " + (pr.is_dedicated ? "专列" : "散舱");
+      box.appendChild(el("div", { class:"muted", style:"margin-top:4px;",
+        text:"原退舱记录 id=" + (a.record_id != null ? a.record_id : "—") + "（逐字段不动，只新增）；当次源行：" + summary }));
+      box.appendChild(el("div", { class:"muted", style:"margin-top:4px;",
+        text:"选 B 建行时负责公司取「批量默认」当前值" +
+          (COMPANY_BATCH ? "（当前：" + COMPANY_BATCH + "）" : "（当前未选，留空）") + "。" }));
+      const opts = el("div", { class:"term-opts" });
+      [["A", "A · 渝新欧还没操作（本次不新增，记住不再问）"],
+       ["B", "B · 已退舱，新需要（走新增通道建行）"],
+       ["C", "C · 稍后处理（下次再问）"]].forEach(([val, label]) => {
+        const radio = el("input", { type:"radio", name:"term_" + a.core, value:val });
+        if (terminalDecisions[a.core] && terminalDecisions[a.core].decision === val) radio.checked = true;
+        radio.onchange = () => {
+          terminalDecisions[a.core] = {
+            core: a.core, record_id: a.record_id,
+            decision: val, train: pr["班列号"] || "", pending_row: pr,
+          };
+          updateApplySum();
+        };
+        opts.appendChild(el("label", null, [radio, el("span", { text:label })]));
+      });
+      box.appendChild(opts);
+    }
     // 改动一/四：弱提示 → 已知悉（不写库，仅从列表消失）；键 = 班列号:code_core。
     if (a.type === "弱提示" && a.key) {
       const chk = el("input", { type:"checkbox", id:"weak_" + a.key,
@@ -635,11 +740,15 @@ function updateApplySum() {
   const fieldFix = Object.keys(confirmedFieldFix).length;
   const weak = Object.keys(confirmedWeak).length;
   const nAlerts = suffix + fieldFix + weak;
+  // 两改：终态重现已选数（默认不预选，只计显式点选的）。
+  const nTerminal = Object.keys(terminalDecisions).length;
+  const hasTerminal = (d.alerts || []).some(a => a.type === "终态重现");
 
-  // 控制三类按钮显隐
+  // 控制四类按钮显隐
   document.getElementById("applyUpdatesBtn").style.display = u > 0 ? "" : "none";
   document.getElementById("applyImportsBtn").style.display = im > 0 ? "" : "none";
   document.getElementById("applyAlertsBtn").style.display = nAlerts > 0 ? "" : "none";
+  document.getElementById("applyTerminalBtn").style.display = hasTerminal ? "" : "none";
 
   const parts = [];
   if (u) parts.push("<b>" + u + "</b> 项更新");
@@ -647,6 +756,7 @@ function updateApplySum() {
   if (suffix) parts.push("<b>" + suffix + "</b> 个后缀变更");
   if (fieldFix) parts.push("<b>" + fieldFix + "</b> 个字段冲突");
   if (weak) parts.push("<b>" + weak + "</b> 个弱提示（已知悉）");
+  if (nTerminal) parts.push("<b>" + nTerminal + "</b> 项终态选择（A/B/C）");
   document.getElementById("applySum").innerHTML =
     parts.length ? "待写：" + parts.join(" · ") : "无可应用内容";
 }
@@ -669,7 +779,9 @@ function _doApply(category) {
     const u = d.updates || [];
     if (!u.length) { alert("没有可更新的项。"); return; }
     if (!confirm("确认应用 " + u.length + " 项更新？系统会先整库快照，可回退。")) return;
-    payload = { user: USER, files: [UPLOADED_FILE], diff: { updates: u, imports: [], alerts_applied: [] } };
+    payload = { user: USER, files: [UPLOADED_FILE],
+      diff: { updates: u, imports: [], alerts_applied: [], terminal_decisions: [],
+              defer_expired: d.defer_expired || [] } };
   } else if (category === "imports") {
     const im = d.imports || [];
     if (!im.length) { alert("没有待导入的专列。"); return; }
@@ -677,9 +789,35 @@ function _doApply(category) {
     if (!confirm("确认导入 " + im.length + " 趟专列（" + nInsert + " 箱）？系统会先整库快照，可回退。")) return;
     const imports = im.map(g => ({
       train_no: g.train_no, 班列类型: g["班列类型"] || "专列",
-      目的站: destInputs[g.train_no] || g["目的站建议"] || "", rows: g.rows
+      目的站: destInputs[g.train_no] || g["目的站建议"] || "",
+      rows: (g.rows || []).map(r => ({
+        客户编码: r["客户编码"] || "", 箱号: r["箱号"] || "", 封号: r["封号"] || "",
+        箱属: r["箱属"] || "", 口岸: r["口岸"] || "", 发班时间: r["发班时间"] || "",
+        负责公司: r["负责公司"] || "",
+      }))
     }));
-    payload = { user: USER, files: [UPLOADED_FILE], diff: { updates: [], imports, alerts_applied: [] } };
+    payload = { user: USER, files: [UPLOADED_FILE],
+      diff: { updates: [], imports, alerts_applied: [], terminal_decisions: [],
+              defer_expired: d.defer_expired || [] } };
+  } else if (category === "terminal") {
+    // 两改：终态重现 A/B/C（与 alerts_applied 并列不混淆，走 terminal_decisions）。
+    // 只提交显式点选的项；未选的不提交（无标记，下次命中照常再问，即 C 语义）。
+    const decided = Object.values(terminalDecisions);
+    if (!decided.length) { alert("没有已选的终态项（请先点选 A / B / C）。"); return; }
+    const nA = decided.filter(x => x.decision === "A").length;
+    const nB = decided.filter(x => x.decision === "B").length;
+    const nC = decided.filter(x => x.decision === "C").length;
+    if (!confirm("确认应用终态选择：A " + nA + " 项（本次不新增，记住不再问）+ B " + nB +
+        " 项（走新增通道建行，负责公司取批量默认" + (COMPANY_BATCH || "未选，留空") + "）+ C " + nC +
+        " 项（不记忆）？系统会先整库快照，可回退。")) return;
+    const terminal_decisions = decided.map(x => ({
+      core: x.core, record_id: x.record_id, decision: x.decision,
+      company: COMPANY_BATCH || "", train: x.train || "", pending_row: x.pending_row || {},
+    }));
+    payload = { user: USER, files: [UPLOADED_FILE],
+      diff: { updates: [], imports: [], alerts_applied: [], terminal_decisions,
+              defer_expired: d.defer_expired || [] } };
+    var _confirmCores = decided.map(x => x.core);
   } else if (category === "alerts") {
     // 改动四（spec §4.3）：后缀变更 + 字段冲突合并进 alerts_applied（带 source），弱提示仅标记已知悉。
     // suffix_change 的 new_code/目的站从原始 alert 读取，confirmedSuffix 只做勾选标记。
@@ -712,12 +850,16 @@ function _doApply(category) {
         (weakKeys.length ? " + " + weakKeys.length + " 项弱提示（已知悉，不写库）" : "") +
         "？系统会先整库快照，可回退。")) return;
     payload = { user: USER, files: [UPLOADED_FILE], diff: { updates: [], imports: [], alerts_applied } };
+    // 两改：暂缓自动失效清单随本次确认一并提交（各确认通道都带，后端删行）。
+    payload.diff.terminal_decisions = [];
+    payload.diff.defer_expired = d.defer_expired || [];
     // 暂存本批确认键（仅前端使用，不发服务端），供成功后从列表移除
     var _confirmKeys = { suffixKeys, fixKeys, weakKeys };
   } else { return; }
 
   const btnId = category === "updates" ? "applyUpdatesBtn"
-    : category === "imports" ? "applyImportsBtn" : "applyAlertsBtn";
+    : category === "imports" ? "applyImportsBtn"
+    : category === "terminal" ? "applyTerminalBtn" : "applyAlertsBtn";
   const btn = document.getElementById(btnId);
   btn.disabled = true;
   api("api/manifest/apply", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) })
@@ -726,6 +868,12 @@ function _doApply(category) {
       // 从 LAST_DIFF 中移除已应用的类别数据，保留未应用的
       if (category === "updates") { d.updates = []; }
       else if (category === "imports") { d.imports = []; }
+      else if (category === "terminal") {
+        // 两改：已决策的终态项从报警列表消失；未选的不动（下次照常再问）。
+        const done = new Set(typeof _confirmCores !== "undefined" ? _confirmCores : []);
+        d.alerts = (d.alerts || []).filter(a => !(a.type === "终态重现" && a.core && done.has(a.core)));
+        for (const k in terminalDecisions) delete terminalDecisions[k];
+      }
       else if (category === "alerts") {
         // 改动四：已处理/已确认的报警从列表消失（按 record_id；弱提示按唯一键 key）。
         const ck = (typeof _confirmKeys !== "undefined" ? _confirmKeys : {});
@@ -744,8 +892,10 @@ function _doApply(category) {
         for (const k in confirmedWeak) delete confirmedWeak[k];
       }
       // 重新渲染差异面板 + 更新按钮状态
+      d.defer_expired = [];
       renderDiff(LAST_DIFF);
       loadBatches();
+      loadDefer();
     })
     .catch(err => {
       // 改动四失败处理：条目不移除（可重试），但清空确认映射重置勾选态；库端已整体回滚。
@@ -763,6 +913,7 @@ function _doApply(category) {
 document.getElementById("applyUpdatesBtn").addEventListener("click", () => _doApply("updates"));
 document.getElementById("applyImportsBtn").addEventListener("click", () => _doApply("imports"));
 document.getElementById("applyAlertsBtn").addEventListener("click", () => _doApply("alerts"));
+document.getElementById("applyTerminalBtn").addEventListener("click", () => _doApply("terminal"));
 
 document.getElementById("discardBtn").addEventListener("click", () => {
   LAST_DIFF = null;
@@ -770,10 +921,61 @@ document.getElementById("discardBtn").addEventListener("click", () => {
   for (const k in confirmedSuffix) delete confirmedSuffix[k];
   for (const k in confirmedFieldFix) delete confirmedFieldFix[k];
   for (const k in confirmedWeak) delete confirmedWeak[k];
+  for (const k in terminalDecisions) delete terminalDecisions[k];
   document.getElementById("diffCard").classList.add("hidden");
   document.getElementById("applyBar").classList.add("hidden");
   document.getElementById("file").value = "";
 });
+
+/* ---------- 暂缓池（两改 §3.3.1/§3.3.2：可见 + 撤销暂缓 / 改判为B） ---------- */
+async function loadDefer() {
+  const box = document.getElementById("deferList");
+  try {
+    const d = await api("api/manifest/defer?user=" + encodeURIComponent(USER));
+    const list = d.rows || [];
+    box.innerHTML = "";
+    if (!list.length) { box.appendChild(el("div", { class:"empty", text:"暂无暂缓 / 改判记录" })); return; }
+    const t = el("table");
+    t.appendChild(el("thead", null, el("tr", null, [
+      el("th", { text:"客编core" }), el("th", { text:"班列号" }), el("th", { text:"决策" }),
+      el("th", { text:"决定时间" }), el("th", { text:"决定人" }), el("th", { text:"操作" })
+    ])));
+    const tb = el("tbody");
+    list.forEach(r => {
+      const tag = r.decision === "B改判" ? "tag-改" : "tag-警";
+      const ops = el("td");
+      ops.appendChild(el("button", { class:"btn btn-sm", text:"撤销暂缓",
+        onclick: () => deferAction("revoke", r.core) }));
+      if (r.decision !== "B改判") {
+        ops.appendChild(el("button", { class:"btn btn-sm", text:"改判为B",
+          style:"margin-left:4px;", onclick: () => deferAction("mark_b", r.core) }));
+      }
+      tb.appendChild(el("tr", null, [
+        el("td", { text:r.core || "" }), el("td", { text:r.train || "" }),
+        el("td", null, el("span", { class:"tag " + tag, text:r.decision || "" })),
+        el("td", { text:r.decided_at || "" }), el("td", { text:r.decided_by || "" }),
+        ops,
+      ]));
+    });
+    t.appendChild(tb);
+    box.appendChild(t);
+  } catch (e) { box.innerHTML = '<div class="empty">加载失败：' + e.message + "</div>"; }
+}
+
+async function deferAction(action, core) {
+  const tip = action === "revoke"
+    ? "确认撤销暂缓「" + core + "」？下次导入命中该客编时重新弹 A/B/C。"
+    : "确认将「" + core + "」改判为 B（已退舱，新需要）？下次导入不再弹，直接走新增通道。";
+  if (!confirm(tip)) return;
+  try {
+    await api("api/manifest/defer", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ user:USER, action, core }) });
+    alert("已处理");
+    loadDefer();
+  } catch (e) { alert("操作失败：" + e.message); }
+}
+
+document.getElementById("reloadDeferBtn").addEventListener("click", loadDefer);
 
 /* ---------- 历史 ---------- */
 async function loadBatches() {
