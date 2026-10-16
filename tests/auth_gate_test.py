@@ -542,13 +542,13 @@ def test_g7_manager_gone_and_new_perms():
     from auth import rbac
     assert "manager" not in rbac.ROLES
     assert "manager" not in rbac.ROLE_PERMS
-    for p in ("data:import", "options:manage", "trash:purge", "train:manage"):
+    for p in ("options:manage", "trash:purge", "train:manage"):
         assert p in rbac.PERMISSIONS
     assert set(rbac.ROLE_PERMS) == {"admin", "hanwenhao", "yangyawen", "fengqian", "visitor"}
     assert "user:manage" in rbac.ROLE_PERMS["admin"]
     for r in ("hanwenhao", "yangyawen", "fengqian", "visitor"):
         assert "user:manage" not in rbac.ROLE_PERMS[r]
-    for p in ("manifest:apply", "price:manage", "config:manage", "data:import"):
+    for p in ("manifest:apply", "price:manage", "config:manage"):
         assert p in rbac.ROLE_PERMS["admin"]
         assert p not in rbac.ROLE_PERMS["fengqian"]
         assert p not in rbac.ROLE_PERMS["visitor"]
@@ -558,8 +558,6 @@ def test_g7_manager_gone_and_new_perms():
 
 def test_g7_route_perm_split():
     from auth import rbac
-    assert rbac.ROUTE_PERMISSIONS[("POST", "/api/import")] == "data:import"
-    assert rbac.ROUTE_PERMISSIONS[("POST", "/api/import_upload")] == "data:import"
     assert rbac.ROUTE_PERMISSIONS[("POST", "/api/field_options")] == "options:manage"
     assert rbac.ROUTE_PERMISSIONS[("DELETE", "/api/trash/<int:rid>")] == "trash:purge"
     assert rbac.ROUTE_PERMISSIONS[("POST", "/api/trash/<int:rid>/restore")] == "record:write"

@@ -20,7 +20,7 @@ PORT = 5011
 # 无弱默认：缺 env 即 None，生产缺失由 init_auth 拒启（B 工单），函数体 not 短路返 403。
 STAMP_TOKEN = os.environ.get("YXSTAMP_TOKEN")
 
-# Excel 数据源（首次启动 / 点"导入"时读取）
+# Excel 数据源：仅为保留参考实现（import_excel.py）而保留；/api/import 已停用，无业务入口读取。
 IMPORT_FILE = r"D:\YXO_DATA\output\八月记录汇总.xlsx"
 
 # 价格配置（自动算价用，复用现有 price_config.json）

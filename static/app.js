@@ -2566,44 +2566,6 @@ function init() {
   document.getElementById("addRowBtn").addEventListener("click", () => {
     insertRow("end", null);   // 与右键“末尾新增”一致：写入后加入 _newRowIds，暂不受筛选约束，可一口气加多行逐格编辑
   });
-  const importFile = document.getElementById("importFile");
-  document.getElementById("importBtn").addEventListener("click", () => importFile.click());
-  importFile.addEventListener("change", () => {
-    const f = importFile.files[0];
-    if (!f) return;
-    // 选择散舱 / 专列（确定=散舱，取消=专列，再确认一次防误触）
-    let trainType;
-    if (confirm("从「" + f.name + "」导入。\n\n本表是【散舱】吗？\n\n【确定】= 散舱     【取消】= 专列\n（已存在的行只刷新基础字段，保留你填的操作字段）")) {
-      trainType = "散舱";
-    } else {
-      if (!confirm("按【专列】导入「" + f.name + "」，确认吗？\n（点取消则放弃本次导入）")) {
-        importFile.value = ""; return;
-      }
-      trainType = "专列";
-    }
-    const doUpload = (force) => {
-      const fd = new FormData();
-      fd.append("file", f);
-      fd.append("train_type", trainType);
-      if (force) fd.append("force", "1");
-      toast("导入中…");
-      fetch("api/import_upload", { method: "POST", body: fd })
-        .then((r) => r.json()).then((j) => {
-          if (j.ok) {
-            importFile.value = "";
-            loadRows().then(() => { buildStatic(); renderAll(); toast("按【" + (j.train_type || trainType) + "】导入 " + j.imported + " 行"); });
-          } else if (j.need_confirm) {
-            if (confirm("⚠ " + j.msg)) { doUpload(true); }
-            else { importFile.value = ""; toast("已取消导入，请重新点导入并选对类型"); }
-          } else {
-            importFile.value = "";
-            toast("导入失败: " + (j.msg || ""));
-          }
-        })
-        .catch(() => { importFile.value = ""; toast("导入失败(网络)"); });
-    };
-    doUpload(false);
-  });
   document.getElementById("helpBtn").addEventListener("click", () => {
     alert(
       "使用说明\n" +

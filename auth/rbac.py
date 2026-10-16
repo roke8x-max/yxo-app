@@ -18,8 +18,6 @@ rule 必须用 Flask 的 url_rule.rule 原串（含 <int:rid> 等占位符），
      + hmac.compare_digest；config 弱默认已删，生产缺 token 由 init_auth 拒启。
   4. `POST /api/train_status`：写入目标表 = train_meta（内部状态表），
      确认版 2026-10-06 §2.1 已拆为独立 `train:manage`。
-  5. `POST /api/import` / `/api/import_upload`：写入目标表 = records
-     （import_excel.run_import 直接写库），确认版 2026-10-06 §2.1 已拆为独立 `data:import`。
 """
 PUBLIC = "public"
 AUTHENTICATED = "authenticated"
@@ -28,7 +26,6 @@ PERMISSIONS = {
     "record:read": "订舱主数据读",
     "record:write": "订舱主数据写",
     "record:export": "订舱主数据导出",
-    "data:import": "Excel台账批量导入",
     "options:manage": "选项/字段维护",
     "trash:purge": "回收站彻底删除",
     "manifest:import": "舱单空跑/上传",
@@ -53,7 +50,7 @@ ROLES = {
 # fengqian 只读为主+record:write+manifest:import+train:manage；visitor 仅 read+export。
 ROLE_PERMS = {
     "admin": ["record:read", "record:write", "record:export",
-              "data:import", "options:manage", "trash:purge",
+              "options:manage", "trash:purge",
               "manifest:import", "manifest:apply", "tuoshu:generate",
               "price:manage", "train:manage", "config:manage",
               "admin:view", "user:manage"],
@@ -117,8 +114,6 @@ ROUTE_PERMISSIONS = {
     ("POST", "/api/tuoshu/generate"): "tuoshu:generate",
     ("GET", "/api/tuoshu/dest_map"): AUTHENTICATED,
     ("POST", "/api/tuoshu/dest_map"): "tuoshu:generate",
-    ("POST", "/api/import"): "data:import",  # 写入目标表 = records
-    ("POST", "/api/import_upload"): "data:import",  # 写入目标表 = records
     ("POST", "/api/manifest/upload"): "manifest:import",
     ("POST", "/api/manifest/apply"): "manifest:apply",
     ("GET", "/api/manifest/batches"): "manifest:import",
