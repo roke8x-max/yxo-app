@@ -149,6 +149,8 @@ ROUTE_PERMISSIONS = {
     ("POST", "/api/admin/price/import"): "price:manage",
     ("POST", "/api/admin/price/import/confirm"): "price:manage",
     ("POST", "/api/admin/price/recalc"): "price:manage",
+    ("GET", "/api/admin/price/backups"): "price:manage",
+    ("POST", "/api/admin/price/restore"): "price:manage",
     # 认证模块自身路由（spec §7.4；/api/meta 重名 → 身份接口用 /api/auth_meta）
     ("POST", "/api/login"): PUBLIC,  # 需 CSRF（spec §5.3/§6.1，不豁免）
     ("POST", "/api/logout"): AUTHENTICATED,
