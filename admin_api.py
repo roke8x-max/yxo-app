@@ -1201,16 +1201,24 @@ def api_price_recalc():
     conn = sqlite3.connect(YXO_DB)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        'SELECT id, "口岸", "目的站", "箱属", "发班时间", "单箱价格", updated_by '
+        'SELECT id, "口岸", "目的站", "箱属", "发班时间", "单箱价格", "状态", updated_by '
         'FROM records WHERE COALESCE(is_deleted,0)=0').fetchall()
     MACHINE = ("算价", "批量算价", "重算")
     scanned = updated = filled = failed = 0
+    # deleted_skipped 恒为 0：WHERE 已过滤软删行，取不回是正常值（不是 bug）
+    cancelled_skipped = 0
+    deleted_skipped = 0
+    total = len(rows)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     for r in rows:
         mk = _mk_of_depart(r["发班时间"])
         if mk != month:
             continue
         scanned += 1
+        # PR-E 退舱守卫：放在 scanned 之后（scanned 语义不变），MACHINE 判定之前
+        if str(r["状态"] or "").strip() == "退舱":
+            cancelled_skipped += 1
+            continue
         old_raw = r["单箱价格"]
         is_empty = old_raw is None or str(old_raw).strip() == ""
         is_machine = (r["updated_by"] or "") in MACHINE
@@ -1238,4 +1246,6 @@ def api_price_recalc():
     from auth import audit as _audit
     _audit.log_event("重算价格", g.identity.username, detail=f"{month} priced={updated + filled}")
     return jsonify({"ok": True, "scanned": scanned, "updated": updated,
-                    "filled": filled, "failed": failed})
+                    "filled": filled, "failed": failed, "total": total,
+                    "priced": updated + filled, "cancelled_skipped": cancelled_skipped,
+                    "deleted_skipped": deleted_skipped})

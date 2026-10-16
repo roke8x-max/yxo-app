@@ -942,9 +942,19 @@ def api_price_batch():
         conn.close()
         return jsonify({"ok": False, "msg": f"价格配置读取失败，未改动数据（{e}）"}), 500
     rows = conn.execute(
-        f'SELECT id, {", ".join(["\""+f+"\"" for f in config.ALL_FIELDS])} FROM records').fetchall()
+        f'SELECT id, is_deleted, {", ".join(["\""+f+"\"" for f in config.ALL_FIELDS])} FROM records').fetchall()
     priced = 0
+    total = len(rows)
+    cancelled_skipped = 0
+    deleted_skipped = 0
     for r in rows:
+        # PR-E 守卫（循环内 continue，不进 WHERE，保证计数）：退舱优先，互斥计数
+        if str(r["状态"] or "").strip() == "退舱":
+            cancelled_skipped += 1
+            continue
+        if (r["is_deleted"] or 0):
+            deleted_skipped += 1
+            continue
         raw = r["单箱价格"]
         if raw is not None and str(raw).strip() not in ("", "0", "0.0", "0.00"):
             continue
@@ -959,7 +969,9 @@ def api_price_batch():
     conn.close()
     from auth import audit as _audit
     _audit.log_event("改价", g.identity.username, detail=f"批量算价 priced={priced}")
-    return jsonify({"ok": True, "priced": priced})
+    return jsonify({"ok": True, "priced": priced, "total": total,
+                    "cancelled_skipped": cancelled_skipped,
+                    "deleted_skipped": deleted_skipped})
 
 
 @app.route("/api/export", methods=["POST"])
