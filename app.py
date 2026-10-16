@@ -6,7 +6,7 @@ YXO 订舱数据管理（方案 A 正式版）
 - 后端: Flask + SQLite（单数据源，脚本可读写）
 - 前端: 浏览器表格（Excel/飞书式多条件筛选、下拉选项、看板标签、统计、序号、个人筛选隔离）
 - 访问: 本机 http://localhost:5011  （经 nginx 反代 http://公网IP:5000/yxo/）
-- 数据: 首次启动从 config.IMPORT_FILE 导入
+- 数据: 首次启动自动补导入参考台账
 启动: 双击 start.bat
 """
 import os
@@ -1384,67 +1384,6 @@ def _purge_old_tuoshu(root_out, keep_days=7):
                     os.remove(p)
     except Exception:
         pass
-
-
-@app.route("/api/import", methods=["POST"])
-def api_import():
-    conn = get_db()
-    n = run_import(conn)
-    bump_version(conn)
-    conn.commit()
-    conn.close()
-    from auth import audit as _audit
-    _audit.log_event("导入", g.identity.username, detail=f"imported={n}")
-    return jsonify({"ok": True, "imported": n})
-
-
-@app.route("/api/import_upload", methods=["POST"])
-def api_import_upload():
-    """接收用户上传的 Excel 文件并导入。
-    参数：train_type=散舱|专列（必带）；force=1 跳过预判确认。
-    预判：同班列票数 >=30 视作疑似专列、<15 视作疑似散舱，与所选类型矛盾时
-    返回 need_confirm 让前端二次确认，避免整表标错难以修正。"""
-    from import_excel import analyze_import
-    f = request.files.get("file")
-    if not f:
-        return jsonify({"ok": False, "msg": "未收到文件"}), 400
-    train_type = (request.form.get("train_type") or "散舱").strip()
-    if train_type not in ("散舱", "专列"):
-        train_type = "散舱"
-    force = request.form.get("force") == "1"
-    suffix = os.path.splitext(f.filename or "x.xlsx")[1] or ".xlsx"
-    tmp = os.path.join(config.DATA_DIR, "_upload_" + datetime.now().strftime("%Y%m%d%H%M%S") + suffix)
-    try:
-        f.save(tmp)
-        # —— 散舱/专列预判 ——
-        if not force:
-            counts = analyze_import(tmp)
-            if counts:
-                big = {t: n for t, n in counts.items() if n >= 30}
-                small_max = max(counts.values())
-                warn = None
-                if train_type == "散舱" and big:
-                    desc = "、".join(f"{t}（{n} 票）" for t, n in big.items())
-                    warn = f"检测到 {desc} 同班列票数很多，更像【专列】。确定按【散舱】导入吗？"
-                elif train_type == "专列" and small_max < 15:
-                    warn = f"本表最大同班列票数只有 {small_max} 票，更像【散舱】。确定按【专列】导入吗？"
-                if warn:
-                    return jsonify({"ok": False, "need_confirm": True, "msg": warn})
-        conn = get_db()
-        n = run_import(conn, tmp, train_type=train_type)
-        bump_version(conn)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        return jsonify({"ok": False, "msg": "导入失败: " + str(e)}), 500
-    finally:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
-    from auth import audit as _audit
-    _audit.log_event("导入", g.identity.username, detail=f"imported={n} train_type={train_type}")
-    return jsonify({"ok": True, "imported": n, "train_type": train_type})
 
 
 # ====================== 舱单 / 箱号 统一导入（#199）======================
