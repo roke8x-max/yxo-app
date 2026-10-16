@@ -17,6 +17,7 @@ import os
 import json
 import glob
 import socket
+import shutil
 import importlib.util
 import urllib.request
 import urllib.parse
@@ -25,7 +26,7 @@ import sqlite3
 import re
 import config  # 同目录 yxo_app 配置，提供本地库路径 DB_PATH
 
-from flask import Blueprint, request, jsonify, render_template
+from flask import Blueprint, g, request, jsonify, render_template
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -807,23 +808,52 @@ _MINSK_FB = {"科里亚季奇"}
 _MONTH_RE_STR = r"^\d{4}-\d{2}$"
 
 
+class PriceConfigError(RuntimeError):
+    """价格配置读取失败（B①）：绝不能再渲染成"空价格表"，否则用户一保存就覆盖整份配置。"""
+
+
 def _load_price_cfg():
     try:
         # utf-8-sig：兼容记事本另存为带来的 BOM（体检报告 3.6）
         with open(PRICE_CONFIG, "r", encoding="utf-8-sig") as f:
             return json.load(f)
-    except Exception:
-        return {"prices": {}, "exrates": {}}
+    except Exception as e:
+        raise PriceConfigError(f"价格配置读取失败: {e}")
+
+
+@admin_bp.errorhandler(PriceConfigError)
+def _price_config_error(e):
+    # B① 统一出口：读失败 → 5xx 明确报错，本次未改动任何数据（各端点无需逐个 try）。
+    # 只捕获 PriceConfigError，不碰其他 RuntimeError（如飞书凭证类）。
+    return jsonify({"ok": False, "msg": f"{e}（本次未改动任何数据）"}), 500
 
 
 def _save_price_cfg(cfg):
-    """写前自动备份到 price_backups/，再原子替换。"""
-    import shutil
+    """写前自动备份到 price_backups/，再原子替换；随后按保留上限清理旧备份。"""
     os.makedirs(PRICE_BACKUP_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     if os.path.exists(PRICE_CONFIG):
         shutil.copy2(PRICE_CONFIG, os.path.join(PRICE_BACKUP_DIR, f"price_config_{ts}.json"))
     atomic_write_json(PRICE_CONFIG, cfg)
+    _prune_price_backups(keep=30)
+
+
+def _prune_price_backups(keep=30, backup_dir=None):
+    """备份保留上限（B④，N=30）：按文件名时间戳倒序保留最新 keep 份，多余删除。
+    纯函数（便于单测）；只认 price_config_YYYYMMDD_HHMMSS.json，其余文件不动。"""
+    d = backup_dir or PRICE_BACKUP_DIR
+    if not os.path.isdir(d):
+        return 0
+    names = sorted((n for n in os.listdir(d)
+                    if re.match(r"^price_config_\d{8}_\d{6}\.json$", n)), reverse=True)
+    removed = 0
+    for n in names[keep:]:
+        try:
+            os.remove(os.path.join(d, n))
+            removed += 1
+        except Exception:
+            pass
+    return removed
 
 
 def _num_or_none(v):
@@ -851,8 +881,7 @@ def _compute_price_local(port, dest, cntr_type, mk, cfg):
     if pi is None:
         return None
     rp = pi.get(ct)
-    if rp is None and ct == "COC":
-        rp = pi.get("SOC")
+    # B②：COC 无价时不再回落 SOC（留空），与 app.py compute_price 保持一致
     if rp is None:
         return None
     cur = pi.get("currency", "USD")
@@ -910,8 +939,11 @@ def api_price_exrate():
     if rate is None or rate <= 0:
         return jsonify({"ok": False, "msg": "汇率必须是正数"})
     cfg = _load_price_cfg()
+    old_rate = cfg.get("exrates", {}).get(month, {}).get(cur)
     cfg.setdefault("exrates", {}).setdefault(month, {})[cur] = rate
     _save_price_cfg(cfg)
+    from auth import audit as _audit
+    _audit.log_event("改价·汇率", g.identity.username, detail=f"{month} {cur} {old_rate}→{rate}")
     return jsonify({"ok": True})
 
 
@@ -934,14 +966,19 @@ def api_price_entry_save():
     if cur not in ("USD", "RMB"):
         return jsonify({"ok": False, "msg": "币种只能是 USD 或 RMB"})
     cfg = _load_price_cfg()
+    key = f"{port}|{dest}"
+    old_pi = (cfg.get("prices", {}).get(month) or {}).get(key)
     pi = {}
     if soc is not None:
         pi["SOC"] = soc
     if coc is not None:
         pi["COC"] = coc
     pi["currency"] = cur
-    cfg.setdefault("prices", {}).setdefault(month, {})[f"{port}|{dest}"] = pi
+    cfg.setdefault("prices", {}).setdefault(month, {})[key] = pi
     _save_price_cfg(cfg)
+    from auth import audit as _audit
+    _audit.log_event("改价·条目", g.identity.username,
+                     detail=f"{month} {key} {old_pi}→{pi}")
     return jsonify({"ok": True})
 
 
@@ -954,12 +991,67 @@ def api_price_entry_delete():
     key = f"{str(d.get('port','')).strip()}|{str(d.get('dest','')).strip()}"
     cfg = _load_price_cfg()
     if key in (cfg.get("prices", {}).get(month) or {}):
+        old_pi = cfg["prices"][month][key]
         del cfg["prices"][month][key]
         if not cfg["prices"][month]:
             del cfg["prices"][month]
         _save_price_cfg(cfg)
+        from auth import audit as _audit
+        _audit.log_event("删价·条目", g.identity.username, detail=f"{month} {key} {old_pi}")
         return jsonify({"ok": True})
     return jsonify({"ok": False, "msg": "未找到该条价格"})
+
+
+@admin_bp.route("/api/admin/price/backups")
+def api_price_backups():
+    """备份列表（B④）：倒序返回 items[{file,mtime,size}]，供恢复下拉用。"""
+    if not _check_user(allow_limited=True):
+        return _forbid()
+    items = []
+    if os.path.isdir(PRICE_BACKUP_DIR):
+        for n in sorted((x for x in os.listdir(PRICE_BACKUP_DIR)
+                         if re.match(r"^price_config_\d{8}_\d{6}\.json$", x)),
+                        reverse=True):
+            p = os.path.join(PRICE_BACKUP_DIR, n)
+            try:
+                st = os.stat(p)
+            except Exception:
+                continue
+            items.append({"file": n,
+                          "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                          "size": st.st_size})
+    return jsonify({"ok": True, "items": items})
+
+
+@admin_bp.route("/api/admin/price/restore", methods=["POST"])
+def api_price_restore():
+    """从备份恢复（B④）：权限 price:manage；二次确认由前端 confirm；恢复前先备份当前；写审计。"""
+    if not _check_user(allow_limited=True):
+        return _forbid()
+    d = request.get_json(force=True, silent=True) or {}
+    name = str(d.get("file", "")).strip()
+    # 文件名白名单：只允许本目录下 price_config_*.json，禁止路径穿越
+    if not re.match(r"^price_config_\d{8}_\d{6}\.json$", name) or os.path.basename(name) != name:
+        return jsonify({"ok": False, "msg": "备份文件名非法"}), 400
+    src = os.path.join(PRICE_BACKUP_DIR, name)
+    if not os.path.isfile(src):
+        return jsonify({"ok": False, "msg": "备份文件不存在"}), 404
+    try:
+        with open(src, "r", encoding="utf-8-sig") as f:
+            restored = json.load(f)
+    except Exception as e:
+        return jsonify({"ok": False, "msg": f"备份文件损坏，未恢复：{e}"}), 500
+    # 恢复前先备份当前（留一份）：用原始拷贝、不经解析 ——
+    # 当前配置读不出来时（正是要恢复的场景）也必须能备份。
+    if os.path.exists(PRICE_CONFIG):
+        os.makedirs(PRICE_BACKUP_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        shutil.copy2(PRICE_CONFIG, os.path.join(PRICE_BACKUP_DIR, f"price_config_{ts}.json"))
+    _prune_price_backups(keep=30)
+    atomic_write_json(PRICE_CONFIG, restored)
+    from auth import audit as _audit
+    _audit.log_event("恢复价格", g.identity.username, detail=f"file={name}")
+    return jsonify({"ok": True})
 
 
 def _parse_price_workbook(stream):
@@ -1089,6 +1181,8 @@ def api_price_import_confirm():
         os.remove(PRICE_PENDING)
     except Exception:
         pass
+    from auth import audit as _audit
+    _audit.log_event("导入价格", g.identity.username, detail=f"months={','.join(sorted(months))}")
     return jsonify({"ok": True, "months": sorted(months)})
 
 
@@ -1141,5 +1235,7 @@ def api_price_recalc():
             "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)")
     conn.commit()
     conn.close()
+    from auth import audit as _audit
+    _audit.log_event("重算价格", g.identity.username, detail=f"{month} priced={updated + filled}")
     return jsonify({"ok": True, "scanned": scanned, "updated": updated,
                     "filled": filled, "failed": failed})

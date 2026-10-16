@@ -380,8 +380,9 @@ def load_price_config():
         # utf-8-sig：兼容记事本另存为带来的 BOM（体检报告 3.6）
         with open(config.PRICE_CONFIG, "r", encoding="utf-8-sig") as f:
             return json.load(f)
-    except Exception:
-        return {"prices": {}, "exrates": {}}
+    except Exception as e:
+        # B①：读失败必须抛出来由调用方转 5xx，绝不能再当成"空价格表"（否则误导保存覆盖）。
+        raise RuntimeError(f"价格配置读取失败: {e}")
 
 
 def compute_price(port, dest, cntr_type, depart_str, cfg):
@@ -412,8 +413,7 @@ def compute_price(port, dest, cntr_type, depart_str, cfg):
     if pi is None:
         return None
     rp = pi.get(ct)
-    if rp is None and ct == "COC":
-        rp = pi.get("SOC")
+    # B②：COC 无价时不再回落 SOC（留空），与 admin_api._compute_price_local 保持一致
     if rp is None:
         return None
     cur = pi.get("currency", "USD")
@@ -906,9 +906,20 @@ def api_price(rid):
     conn.close()
     if not r:
         return jsonify({"ok": False}), 404
-    price = compute_price(r["口岸"], r["目的站"], r["箱属"], r["发班时间"], load_price_config())
+    try:
+        cfg = load_price_config()
+    except RuntimeError as e:
+        # B①：读价失败 → 就地报错，不写库
+        return jsonify({"ok": False, "msg": f"价格配置读取失败，未改动数据（{e}）"}), 500
+    price = compute_price(r["口岸"], r["目的站"], r["箱属"], r["发班时间"], cfg)
     if price is None:
-        return jsonify({"ok": False, "msg": "无匹配价格（检查 口岸/目的站/发班时间）"})
+        # B③：配置正常但算不出价 → 与"读取失败"明显不同的提示；COC 无价带 reason
+        resp = {"ok": False, "msg": "无匹配价格（检查 口岸/目的站/发班时间）"}
+        ct = "COC" if r["箱属"] and "COC" in str(r["箱属"]).upper() else "SOC"
+        if ct == "COC" and compute_price(r["口岸"], r["目的站"], "SOC",
+                                         r["发班时间"], cfg) is not None:
+            resp["reason"] = "COC 无价（未用 SOC 价回落）"
+        return jsonify(resp)
     conn = get_db()
     conn.execute('UPDATE records SET "单箱价格"=?, updated_at=?, updated_by=? WHERE id=?',
                  (price, datetime.now().strftime("%Y-%m-%d %H:%M"), "算价", rid))
@@ -924,7 +935,12 @@ def api_price(rid):
 def api_price_batch():
     """对所有“单箱价格为空”的记录批量算价（已填价格的不覆盖）。"""
     conn = get_db()
-    cfg = load_price_config()
+    try:
+        cfg = load_price_config()
+    except RuntimeError as e:
+        # B①：读价失败 → 就地报错、跳过写库；查询语义不动（R3 只登记不修）
+        conn.close()
+        return jsonify({"ok": False, "msg": f"价格配置读取失败，未改动数据（{e}）"}), 500
     rows = conn.execute(
         f'SELECT id, {", ".join(["\""+f+"\"" for f in config.ALL_FIELDS])} FROM records').fetchall()
     priced = 0

@@ -216,6 +216,13 @@
           <select id="prCur" style="width:80px"><option>USD</option><option>RMB</option></select>
           <button onclick="prSaveEntry()">＋ 添加 / 覆盖</button>
         </div>
+        <div class="row" style="margin-top:10px">
+          <span>备份恢复：</span>
+          <select id="prBackup" style="min-width:260px"></select>
+          <button class="ghost" onclick="prLoadBackups()">刷新备份</button>
+          <button class="danger" onclick="prRestore()">从备份恢复</button>
+          <span id="prBackupInfo" class="muted"></span>
+        </div>
       </div>
       <div class="card">
         <h3>模板导入（识别 PDF 后照填 → 上传）</h3>
@@ -659,6 +666,7 @@ function loadPrice(month) {
     document.getElementById("prRate").value = (j.exrates && j.exrates.USD != null) ? j.exrates.USD : "";
     document.getElementById("prInfo").textContent = `共 ${j.entries.length} 条价格` + ((j.exrates && j.exrates.USD) ? "" : "（⚠ 该月未设 USD 汇率，USD 报价无法算价）");
     renderPriceTable();
+    prLoadBackups();
     document.getElementById("prUnmatched").innerHTML = (j.unmatched && j.unmatched.length)
       ? j.unmatched.map(u => `<div>· ${esc(typeof u === "string" ? u : JSON.stringify(u))}</div>`).join("")
       : "✅ 无遗留站点";
@@ -723,6 +731,23 @@ function prRecalc() {
     .then(j => j.ok
       ? alert(`重算完成：扫描 ${j.scanned} 行，覆盖 ${j.updated} 行，补算 ${j.filled} 行，无匹配价 ${j.failed} 行`)
       : alert("重算失败：" + j.msg));
+}
+function prLoadBackups() {
+  api("api/admin/price/backups").then(j => {
+    if (!j.ok) return;
+    const sel = document.getElementById("prBackup");
+    sel.innerHTML = (j.items || []).map(it =>
+      `<option value="${esc(it.file)}">${esc(it.file)}（${esc(it.mtime)}，${it.size}字节）</option>`).join("");
+    document.getElementById("prBackupInfo").textContent = `共 ${(j.items || []).length} 份备份（保留最新 30 份）`;
+  });
+}
+function prRestore() {
+  const f = document.getElementById("prBackup").value;
+  if (!f) return alert("没有可选备份");
+  if (!confirm(`从备份恢复价格配置？\n${f}\n恢复前会自动备份当前配置。`)) return;
+  api("api/admin/price/restore", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ file: f }) })
+    .then(j => j.ok ? (alert("已从备份恢复"), loadPrice(), prLoadBackups()) : alert("恢复失败：" + j.msg));
 }
 function prUpload() {
   const f = document.getElementById("prFile").files[0];
