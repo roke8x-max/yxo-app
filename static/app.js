@@ -1275,6 +1275,7 @@ function syncDepartureLocal(srcId, oldVal, newVal) {
   const oldYear = (oldVal || "").slice(0, 4) || (newVal || "").slice(0, 4);
   DATA.forEach((r) => {
     if (r.id === srcId) return;
+    if (String(r["状态"] || "").trim() === "退舱") return;
     if ((r["班列号"] || "").trim() !== train) return;
     const cur = r["发班时间"] || "";
     if (cur === newVal) return;
