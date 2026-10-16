@@ -780,6 +780,7 @@ def sync_departure(conn, rid, field, value, now, user, old_year):
     cur = conn.execute(
         'UPDATE records SET "发班时间"=?, updated_at=?, updated_by=? '
         'WHERE "班列号"=? AND id<>? AND COALESCE(is_deleted,0)=0 '
+        'AND COALESCE("状态",\'\')<>\'退舱\' '
         'AND "发班时间"<>? '
         'AND (substr("发班时间",1,4)=? OR "发班时间" IS NULL OR "发班时间"=\'\')',
         (value, now, user, train, rid, value, year))
