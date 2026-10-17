@@ -1200,11 +1200,12 @@ function renderActive() {
 /* let _diagEl = null;
 function _renderFilterDiag() { ... 已移除 ... } */
 function renderAll() {
-  if (STATE.view === "dash") { renderDashboard(); return; }
-  renderBody(); renderBoard(); renderTabs(); renderStats(); renderMonthTabs();
-  document.getElementById("filterRow") && updateCompanyBtn();
-  updateCompanyBtn();
-  refreshSortBadges();
+  renderActive();                       // 只渲染当前视图 —— 本次的性能目标
+  if (STATE.view === "dash") return;    // 与原 renderAll 一致：dash 下不执行下面三样
+  renderTabs();                         // 原 renderAll 一直在做，不能丢
+  document.getElementById("filterRow") && updateCompanyBtn();   // 逐句保留原样
+  updateCompanyBtn();                                           // 逐句保留原样（重复调用见 R5）
+  refreshSortBadges();                  // 原 renderAll 一直在做，不能丢
 }
 
 /* ---------- 保存单元格 / 算价 ---------- */
