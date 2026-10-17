@@ -1111,9 +1111,9 @@ def _tuoshu_groups(conn, data):
         tno = (r["班列号"] or "").strip()
         st = (r["目的站"] or "").strip()
         key = (tno, dep, st) if group_by == "train_dest" else (tno, dep)
-        g = groups.get(key)
-        if not g:
-            g = groups[key] = {
+        grp = groups.get(key)
+        if not grp:
+            grp = groups[key] = {
                 "train_no": tno,
                 "departure_date": dep,
                 "station_cn": st,
@@ -1121,33 +1121,33 @@ def _tuoshu_groups(conn, data):
                 "boxes": 0,
                 "_stations": set(),
             }
-        g["boxes"] += 1
+        grp["boxes"] += 1
         if st:
-            g["_stations"].add(st)
-            if not g["station_cn"]:
-                g["station_cn"] = st
+            grp["_stations"].add(st)
+            if not grp["station_cn"]:
+                grp["station_cn"] = st
 
     out = []
-    for g in groups.values():
-        stations = sorted(g.pop("_stations"))
+    for grp in groups.values():
+        stations = sorted(grp.pop("_stations"))
         # 目的站可选项 + 各自解析结果（前端下拉用）
         dest_options = {}
         for s in stations:
             n = dest_norm.get(s, s)
             dest_options[s] = dest_map.get(n, "") or ("未知目的站(%s)" % s if s else "未知目的站")
-        s = g["station_cn"]
+        s = grp["station_cn"]
         resolved = bool(dest_options.get(s)) and not str(dest_options.get(s, "")).startswith("未知目的站")
-        g["station_options"] = stations
-        g["dest_options"] = dest_options
-        g["destination"] = dest_options.get(s, "未知目的站")
-        g["resolved"] = resolved
+        grp["station_options"] = stations
+        grp["dest_options"] = dest_options
+        grp["destination"] = dest_options.get(s, "未知目的站")
+        grp["resolved"] = resolved
         warns = []
         if not resolved:
             warns.append("目的站「%s」未配置英文映射" % (s or "(空)"))
         if len(stations) > 1:
             warns.append("同班列同日期存在多个目的站：%s，请在列表中选定" % "/".join(stations))
-        g["warn"] = "；".join(warns)
-        out.append(g)
+        grp["warn"] = "；".join(warns)
+        out.append(grp)
     out.sort(key=lambda x: (x["departure_date"], x["train_no"]))
     return out, dest_map, dest_norm
 
@@ -1250,13 +1250,13 @@ def api_tuoshu_generate():
                 sel[(str(p.get("train_no") or ""), str(p.get("departure_date") or ""))] = \
                     str(p.get("station_cn") or "")
             new_groups = []
-            for g in groups:
-                st = sel.get((g["train_no"], g["departure_date"]))
+            for grp in groups:
+                st = sel.get((grp["train_no"], grp["departure_date"]))
                 if st is None:
                     continue
-                g = dict(g)
-                g["station_cn"] = st   # 用用户选定的目的站生成
-                new_groups.append(g)
+                grp2 = dict(grp)
+                grp2["station_cn"] = st   # 用用户选定的目的站生成
+                new_groups.append(grp2)
             groups = new_groups
         else:
             keys = {(str(p.get("train_no") or ""), str(p.get("departure_date") or ""),
@@ -1269,6 +1269,10 @@ def api_tuoshu_generate():
     if not os.path.exists(tpl_path):
         return jsonify({"ok": False, "msg": "模板文件不存在: " + tpl_path}), 500
 
+    # 操作者取自服务端 session（g.identity）。不要在循环内或循环后再取——
+    # 若局部变量与 Flask 的 g 同名会遮蔽身份对象（本次 bug 的根因）。
+    operator = g.identity.username
+
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     root_out = os.path.join(config.DATA_DIR, "tuoshu_out")
     out_dir = os.path.join(root_out, stamp)
@@ -1280,16 +1284,16 @@ def api_tuoshu_generate():
             tpl_path, field_map=field_map, name_pattern=name_pattern,
             dest_map=dest_map, dest_normalize=dest_norm)
         files = []
-        for g in groups:
+        for grp in groups:
             files.append(eng.generate_one(
-                {"train_no": g["train_no"], "departure_date": g["departure_date"],
-                 "station_cn": g["station_cn"], "boxes": g["boxes"]},
+                {"train_no": grp["train_no"], "departure_date": grp["departure_date"],
+                 "station_cn": grp["station_cn"], "boxes": grp["boxes"]},
                 booking_date, out_dir))
 
         # 注意：send_file 是惰性发送，这里不能删除正在返回的文件所在目录。
         if len(files) == 1:
             from auth import audit as _audit
-            _audit.log_event("生成托书", g.identity.username, detail=f"train={groups[0]['train_no']}")
+            _audit.log_event("生成托书", operator, detail=f"train={groups[0]['train_no']}")
             return send_file(files[0], as_attachment=True,
                              download_name=os.path.basename(files[0]))
         zip_path = os.path.join(config.DATA_DIR, "托书_%s.zip" % stamp)
@@ -1298,7 +1302,7 @@ def api_tuoshu_generate():
                 zf.write(f, os.path.basename(f))
         shutil.rmtree(out_dir, ignore_errors=True)   # zip 已含全部内容，可安全删源目录
         from auth import audit as _audit
-        _audit.log_event("生成托书", g.identity.username, detail=f"groups={len(groups)} zip")
+        _audit.log_event("生成托书", operator, detail=f"groups={len(groups)} zip")
         return send_file(zip_path, as_attachment=True,
                          download_name="渝新欧订舱委托书_%s.zip" % stamp)
     except Exception as e:

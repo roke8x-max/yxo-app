@@ -66,7 +66,12 @@ def _dry_run_log(req):
         matched = "未登记"
     else:
         key = (req.method, req.url_rule.rule)
-        matched = "未登记" if key not in ROUTE_PERMISSIONS_SET else ROUTE_PERMISSIONS[key]
+        if key not in ROUTE_PERMISSIONS_SET:
+            matched = "未登记"
+        else:
+            v = ROUTE_PERMISSIONS[key]
+            # 多权限（元组/列表）用 | 连接便于阅读；str（含 PUBLIC/AUTHENTICATED 哨兵）原样。
+            matched = v if isinstance(v, str) else "|".join(v)
     current_app.logger.info("AUTH_DRY_RUN path=%s method=%s ip=%s matched=%s has_session=False",
                             req.path, req.method, req.remote_addr, matched)
 
@@ -97,7 +102,10 @@ def _auth_gate():
     if key not in ROUTE_PERMISSIONS_SET:
         return _deny("HTTP_403", "无权限", 403)
     perm = ROUTE_PERMISSIONS[key]
-    if perm == PUBLIC:
+    # 值可为 str 哨兵/权限串，或元组/列表「任一满足即放行」。
+    # PUBLIC / AUTHENTICATED 是字符串哨兵，元组值不可能是它们，比较逻辑不受影响。
+    perms = perm if isinstance(perm, (tuple, list)) else (perm,)
+    if any(p == PUBLIC for p in perms):
         g.identity = _load_identity()  # 公开路由也尽力挂身份（供审计），无则不挡
         return None
     ident = _load_identity()
@@ -109,19 +117,19 @@ def _auth_gate():
         return jsonify({"ok": False, "error": "HTTP_401",
                         "msg": "未登录", "req_id": req_id}), 401
     g.identity = ident
-    if perm == AUTHENTICATED:
+    if any(p == AUTHENTICATED for p in perms):
         return None
-    if perm not in (ident.permissions or []):
+    if not any(p in (ident.permissions or []) for p in perms):
         return _deny("HTTP_403", "无权限", 403)
     return None
 
 
-def _self_check(app):
+def _self_check(flask_app):
     """启动自检（spec §6.3）：url_map 与 ROUTE_PERMISSIONS 双向比对。
     未登记路由：DEBUG 下直接抛错退出；生产 warning（仍按默认拒绝 403）。
     反向残留：warning。static endpoint 跳过。"""
     missing, stale = [], []
-    for rule in app.url_map.iter_rules():
+    for rule in flask_app.url_map.iter_rules():
         if rule.endpoint == "static":
             continue
         for m in (rule.methods or set()) - {"HEAD", "OPTIONS"}:
@@ -129,7 +137,7 @@ def _self_check(app):
                 missing.append(f"{m} {rule.rule}")
     registered = {(m, r) for (m, r) in ROUTE_PERMISSIONS_SET}
     live = set()
-    for rule in app.url_map.iter_rules():
+    for rule in flask_app.url_map.iter_rules():
         if rule.endpoint == "static":
             continue
         for m in (rule.methods or set()) - {"HEAD", "OPTIONS"}:
@@ -137,15 +145,15 @@ def _self_check(app):
     stale = sorted(f"{m} {r}" for (m, r) in registered - live)
     if missing:
         msg = "[auth] 未登记路由: " + "; ".join(sorted(missing))
-        if app.debug:
+        if flask_app.debug:
             raise RuntimeError(msg + "（DEBUG 下拒绝带漏登启动）")
-        app.logger.warning(msg)
+        flask_app.logger.warning(msg)
     if stale:
-        app.logger.warning("[auth] 反向残留（表有、url_map 无）: " + "; ".join(stale))
+        flask_app.logger.warning("[auth] 反向残留（表有、url_map 无）: " + "; ".join(stale))
     return missing, stale
 
 
-def init_auth(app):
+def init_auth(flask_app):
     """接线：secret_key → auth_bp → _auth_gate → 建表种子 → 启动自检。"""
     import config
     from auth import schema
@@ -153,11 +161,11 @@ def init_auth(app):
     from auth.routes import auth_bp
     # B 工单：生产缺 YXSTAMP_TOKEN 拒绝启动，绝不带弱默认上线。
     # 导入期不 raise（app.debug/testing 此时未赋值），此处才有 app 对象可判。
-    if is_production(app) and config.STAMP_TOKEN is None:
+    if is_production(flask_app) and config.STAMP_TOKEN is None:
         raise RuntimeError("YXSTAMP_TOKEN 未设置，拒绝启动 /api/stamp")
-    if not app.secret_key:
-        app.secret_key = config.AUTH_SECRET_KEY or service._secret()
-    app.register_blueprint(auth_bp)
-    app.before_request(_auth_gate)
+    if not flask_app.secret_key:
+        flask_app.secret_key = config.AUTH_SECRET_KEY or service._secret()
+    flask_app.register_blueprint(auth_bp)
+    flask_app.before_request(_auth_gate)
     schema.init_db(strict=True)
-    return _self_check(app)
+    return _self_check(flask_app)

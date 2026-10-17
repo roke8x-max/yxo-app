@@ -552,8 +552,16 @@ def test_g7_manager_gone_and_new_perms():
         assert p in rbac.ROLE_PERMS["admin"]
         assert p not in rbac.ROLE_PERMS["fengqian"]
         assert p not in rbac.ROLE_PERMS["visitor"]
-    assert "tuoshu:generate" not in rbac.ROLE_PERMS["fengqian"]
+    # 托书权限名单扩为冯茜 + 杨雅雯 + 韩文豪（taskbook A/B）
+    assert "tuoshu:generate" in rbac.ROLE_PERMS["fengqian"]
     assert "price:manage" not in rbac.ROLE_PERMS["fengqian"]
+    # 前台算价权限 price:apply 拆分（taskbook B1/B2）
+    assert "price:apply" in rbac.PERMISSIONS
+    assert "price:apply" in rbac.ROLE_PERMS["fengqian"]
+    assert "price:apply" in rbac.ROLE_PERMS["admin"]
+    assert "price:apply" not in rbac.ROLE_PERMS["hanwenhao"]
+    assert "price:apply" not in rbac.ROLE_PERMS["yangyawen"]
+    assert "price:apply" not in rbac.ROLE_PERMS["visitor"]
 
 
 def test_g7_route_perm_split():
@@ -562,6 +570,83 @@ def test_g7_route_perm_split():
     assert rbac.ROUTE_PERMISSIONS[("DELETE", "/api/trash/<int:rid>")] == "trash:purge"
     assert rbac.ROUTE_PERMISSIONS[("POST", "/api/trash/<int:rid>/restore")] == "record:write"
     assert rbac.ROUTE_PERMISSIONS[("POST", "/api/train_status")] == "train:manage"
+
+
+# ---------------- price:apply 拆分：路由 / 冻结 / 影子日志 / HTTP 矩阵 ----------------
+
+def test_price_route_split_and_frozen_roles():
+    # 前台算价两条 = 任一放行元组；后台价格维护全部仍为 price:manage 单品权限。
+    from auth import rbac
+    assert rbac.ROUTE_PERMISSIONS[("POST", "/api/price/<int:rid>")] == ("price:apply", "price:manage")
+    assert rbac.ROUTE_PERMISSIONS[("POST", "/api/price/batch")] == ("price:apply", "price:manage")
+    admin_price = {k: v for k, v in rbac.ROUTE_PERMISSIONS.items()
+                   if k[1].startswith("/api/admin/price")}
+    assert admin_price, "后台价格维护路由必须存在"
+    assert set(admin_price.values()) == {"price:manage"}
+    # 冻结（洋拍板「杨/韩权限一律不动、游客不动」）：全量枚举，抓任何悄悄变动
+    frozen_yh = frozenset(["record:read", "record:write", "record:export",
+                           "manifest:import", "tuoshu:generate",
+                           "price:manage", "train:manage"])
+    assert frozenset(rbac.ROLE_PERMS["yangyawen"]) == frozen_yh
+    assert frozenset(rbac.ROLE_PERMS["hanwenhao"]) == frozen_yh
+    assert frozenset(rbac.ROLE_PERMS["visitor"]) == frozenset(["record:read", "record:export"])
+
+
+def test_dry_run_log_multi_perm_format(dclient, caplog):
+    # 多权限路由影子期 dry-run 输出 matched=price:apply|price:manage。
+    # （单权限路由格式不变：既有 test_dry_run_log_fields 的 matched=record:write 继续守着。）
+    import logging
+    c, _ = dclient
+    caplog.set_level(logging.INFO, logger="app")
+    caplog.clear()
+    c.post("/api/price/batch", json={})
+    msgs = [rec.getMessage() for rec in caplog.records
+            if rec.name == "app" and "AUTH_DRY_RUN" in rec.getMessage()]
+    assert msgs, "disabled 期非噪声请求必须记 AUTH_DRY_RUN"
+    assert "matched=price:apply|price:manage" in msgs[-1]
+
+
+def _login_new(c, username, password):
+    tok = _csrf(c)
+    r = c.post("/api/login",
+               data=json.dumps({"username": username, "password": password}),
+               content_type="application/json",
+               headers={"X-CSRF-Token": tok})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    return _csrf(c)
+
+
+def test_price_apply_http_matrix(client):
+    # 开闸状态下的门禁矩阵（taskbook B6 硬要求）：
+    #  冯茜(price:apply) 前台算价非 403、后台价格维护 403；
+    #  杨雅雯(price:manage) 前台算价非 403(回归)、后台价格维护非 403(回归)。
+    from auth import service
+    c, _ = client
+    service.create_user("t_fengqian", "TestFf123456", role="fengqian", scope_type="all")
+    service.create_user("t_yang", "TestGg123456", role="yangyawen", scope_type="all")
+
+    tok = _login_new(c, "t_fengqian", "TestFf123456")
+    r = c.post("/api/price/batch", json={}, headers={"X-CSRF-Token": tok})
+    assert r.status_code != 403, r.get_data(as_text=True)
+    assert c.get("/api/admin/price").status_code == 403
+
+    tok = _login_new(c, "t_yang", "TestGg123456")
+    r = c.post("/api/price/batch", json={}, headers={"X-CSRF-Token": tok})
+    assert r.status_code != 403, r.get_data(as_text=True)
+    assert c.get("/api/admin/price").status_code != 403
+
+
+def test_price_apply_any_perm_and_default_deny(client):
+    # 仅持 price:manage（韩文豪）前台算价仍放行（任一放行生效）；
+    # 两权限都没有（游客）同路由 403 —— 默认拒绝未被放宽。
+    c, _ = client
+    tok = _authed(c, MGR)
+    r = c.post("/api/price/batch", json={}, headers={"X-CSRF-Token": tok})
+    assert r.status_code != 403, r.get_data(as_text=True)
+
+    tok = _authed(c, VIS)
+    r = c.post("/api/price/batch", json={}, headers={"X-CSRF-Token": tok})
+    assert r.status_code == 403
 
 
 def test_g7_seed_roles(tmp_path, monkeypatch):
