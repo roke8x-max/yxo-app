@@ -7,10 +7,10 @@ is_production(app)：唯一判定口径。
 import os
 
 
-def is_production(app):
+def is_production(flask_app):
     # 唯一判定口径；bool() 包裹避免 PYTEST_CURRENT_TEST 返回字符串污染 or 表达式
     return not (
-        bool(getattr(app, "debug", False)) or
-        bool(getattr(app, "testing", False)) or
+        bool(getattr(flask_app, "debug", False)) or
+        bool(getattr(flask_app, "testing", False)) or
         bool(os.environ.get("PYTEST_CURRENT_TEST"))
     )

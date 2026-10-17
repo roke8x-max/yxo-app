@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 """RBAC 定义 + 全路由权限登记表（spec §3 / §6 / §7）。
 
-ROUTE_PERMISSIONS: {(method, rule): "public" | "authenticated" | "<perm>"}。
+ROUTE_PERMISSIONS: {(method, rule): "public" | "authenticated" | "<perm>"
+                    | ("<permA>", "<permB>", ...)}。
 rule 必须用 Flask 的 url_rule.rule 原串（含 <int:rid> 等占位符），
 门禁按 request.url_rule.rule 查表。
+值为元组/列表时语义为「任一权限满足即放行」（例：前台算价
+("price:apply", "price:manage")）。
 
 偏离 spec 说明（落码时按写入表/现存路由定的）：
  1. §7.4 的 `GET /api/meta`（认证身份）与现存表格元数据接口 `/api/meta`
@@ -31,7 +34,8 @@ PERMISSIONS = {
     "manifest:import": "舱单空跑/上传",
     "manifest:apply": "舱单应用/回退/还原",
     "tuoshu:generate": "托书生成",
-    "price:manage": "价格维护与算价",
+    "price:manage": "价格维护（后台改报价源数据）",
+    "price:apply":  "按报价表算价（前台填写单箱价格）",
     "config:manage": "配置管理",
     "train:manage": "班列状态维护",
     "admin:view": "管理页查看",
@@ -52,7 +56,7 @@ ROLE_PERMS = {
     "admin": ["record:read", "record:write", "record:export",
               "options:manage", "trash:purge",
               "manifest:import", "manifest:apply", "tuoshu:generate",
-              "price:manage", "train:manage", "config:manage",
+              "price:manage", "price:apply", "train:manage", "config:manage",
               "admin:view", "user:manage"],
     "hanwenhao": ["record:read", "record:write", "record:export",
                   "manifest:import", "tuoshu:generate",
@@ -61,7 +65,8 @@ ROLE_PERMS = {
                   "manifest:import", "tuoshu:generate",
                   "price:manage", "train:manage"],
     "fengqian": ["record:read", "record:write", "record:export",
-                 "manifest:import", "train:manage"],
+                 "manifest:import", "tuoshu:generate",
+                 "price:apply", "train:manage"],
     "visitor": ["record:read", "record:export"],
 }
 
@@ -106,8 +111,8 @@ ROUTE_PERMISSIONS = {
     # 写入目标表 = records(dsk/ATB)；认证靠 X-Stamp-Token，门禁 public + CSRF 豁免
     # B 加固：函数体另有 IP 白名单(127.0.0.1/::1)+拒代理头+compare_digest，弱默认已删
     ("POST", "/api/stamp"): PUBLIC,
-    ("POST", "/api/price/<int:rid>"): "price:manage",
-    ("POST", "/api/price/batch"): "price:manage",
+    ("POST", "/api/price/<int:rid>"): ("price:apply", "price:manage"),
+    ("POST", "/api/price/batch"): ("price:apply", "price:manage"),
     ("POST", "/api/export"): "record:export",
     ("GET", "/api/tuoshu/meta"): AUTHENTICATED,
     ("POST", "/api/tuoshu/preview"): "tuoshu:generate",

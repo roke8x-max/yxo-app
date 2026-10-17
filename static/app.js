@@ -2469,6 +2469,11 @@ function enterApp() {
     if (tsBtn) tsBtn.classList.toggle("hidden", !hasPerm("tuoshu:generate"));
     const mfBtn = document.getElementById("manifestBtn");
     if (mfBtn) mfBtn.classList.toggle("hidden", !hasPerm("manifest:import"));
+    // 批量算价入口（右键菜单项）：持 price:apply 或 price:manage 任一即显示
+    // （冯茜凭 price:apply；杨/韩凭 price:manage，两人都不能被误伤）
+    const batchPriceItem = document.querySelector('#ctxMenu .ctx-item[data-act="priceall"]');
+    if (batchPriceItem) batchPriceItem.classList.toggle(
+      "hidden", !(hasPerm("price:apply") || hasPerm("price:manage")));
     const loBtn = document.getElementById("logoutBtn");
     if (loBtn) loBtn.onclick = doLogout;
     setInterval(pollRemoteChanges, 4000);   // 每 4 秒检查他人改动（同 WPS 在线协同）
