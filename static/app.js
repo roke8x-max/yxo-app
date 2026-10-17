@@ -530,9 +530,9 @@ function refreshSortBadges() {
 }
 
 function monthOf(r) {
-  // 优先用“台账月份”（可手动改归属），为空时回退到发班时间所在月
-  const t = String(r["台账月份"] || "").trim();
-  if (/^\d{4}-\d{2}$/.test(t)) return t;
+  // 月份筛选口径（2026-10-16 洋定）：按班列发运时间（发班时间）归月。
+  // 「台账月份」退为数据统计辅助字段，不再参与月份筛选。
+  // 发班时间为空的记录不归任何月份，只在「全部」下可见（方案A）。
   const s = String(r["发班时间"] || "").trim();
   const m = s.slice(0, 7).replace(/\//g, "-");
   return /^\d{4}-\d{2}$/.test(m) ? m : "";
