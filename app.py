@@ -787,6 +787,21 @@ def sync_departure(conn, rid, field, value, now, user, old_year):
     return cur.rowcount or 0
 
 
+# 退舱行「单格人工编辑」白名单（毛骁洋 2026-10-19 拍板）：
+# 状态可人工改（只要不被批量改），备注沿用 §4 原有规则，其余字段防误改。
+# 依据 AGENTS.md 硬规则 12 + docs/mainsite/specs/退舱记录处理约定.md §4
+CANCEL_EDITABLE_FIELDS = ("备注", "状态")
+# 退舱行「批量落点」白名单（洋 2026-10-19 17:12：批量改备注允许）：只有备注。
+CANCEL_BATCH_EDITABLE_FIELDS = ("备注",)
+
+
+def _is_cancel_row(conn, rid):
+    """该行当前是否为退舱记录（状态为 NULL / 空串一律视为非退舱）。"""
+    r = conn.execute('SELECT COALESCE("状态",\'\') AS s FROM records WHERE id=?',
+                     (rid,)).fetchone()
+    return bool(r and str(r["s"]).strip() == "退舱")
+
+
 @app.route("/api/row/<int:rid>", methods=["PATCH"])
 def api_update(rid):
     data = request.get_json(force=True, silent=True) or {}
@@ -796,6 +811,10 @@ def api_update(rid):
     if field not in config.ALL_FIELDS:
         return jsonify({"ok": False, "msg": "非法字段"}), 400
     conn = get_db()
+    # 退舱记录：只允许改「备注」「状态」，其余字段拒绝（洋 2026-10-19 拍板）
+    if field not in CANCEL_EDITABLE_FIELDS and _is_cancel_row(conn, rid):
+        conn.close()          # 早退必须关连接
+        return jsonify({"ok": False, "msg": "退舱记录只允许修改「备注」和「状态」"}), 403
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     # 改「发班时间」前先取原值年份：联动范围必须按【原年份】锁定，
     # 否则把 2026 年的班列改成 2027 年日期时，同班列其他行会因年份不匹配而漏改。
@@ -825,10 +844,15 @@ def api_cells():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     conn = get_db()
     saved = 0
+    cancelled_skipped = 0          # 被跳过的退舱单元格数（不得静默处理）
     for e in edits:
         field = e.get("field")
         rid = e.get("id")
         if field not in config.ALL_FIELDS or not isinstance(rid, int):
+            continue
+        # 退舱记录：批量只允许写「备注」；状态与其他字段一律跳过并计数（同 api_update 的口径）
+        if field not in CANCEL_BATCH_EDITABLE_FIELDS and _is_cancel_row(conn, rid):
+            cancelled_skipped += 1
             continue
         value = e.get("value", "")
         old_year = departure_year(conn, rid) if field == "发班时间" else ""
@@ -844,7 +868,7 @@ def api_cells():
         bump_version(conn)
     conn.commit()
     conn.close()
-    return jsonify({"ok": True, "saved": saved})
+    return jsonify({"ok": True, "saved": saved, "cancelled_skipped": cancelled_skipped})
 
 
 # ====================== 时间戳回写接口（B方案P1：飞书→yxo.db 切换） ======================
@@ -906,6 +930,9 @@ def api_price(rid):
     conn.close()
     if not r:
         return jsonify({"ok": False}), 404
+    # 退舱行不允许算价（洋 2026-10-19）：状态只放开单格人工改，价格不属于此列
+    if str(r["状态"] or "").strip() == "退舱":
+        return jsonify({"ok": False, "msg": "退舱记录不允许算价"}), 403
     try:
         cfg = load_price_config()
     except RuntimeError as e:

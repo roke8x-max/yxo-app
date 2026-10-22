@@ -200,6 +200,7 @@ function findCellTd(id, field) {
 
 // 打开单元格编辑器（双击 / 键入即编辑共用）。prefill：键入即编辑时预填的字符
 function openCellEditor(r, c, td, prefill) {
+  if (isCancelLocked(r, c.name)) { toast("退舱记录只允许修改「备注」和「状态」"); return; }
   _activeCell = { id: r.id, field: c.name };
   const renderText = () => {
     const cur = r[c.name] == null ? "" : String(r[c.name]);
@@ -207,7 +208,7 @@ function openCellEditor(r, c, td, prefill) {
     const span = el("span", { class: "cell-text" }, cur);
     if (cur) span.title = cur;
     td.appendChild(span);
-    if (c.name === "备注" && !String(r[c.name] || "").trim()) {
+    if (c.name === "单箱价格" && !String(r[c.name] || "").trim() && !isCancelRow(r)) {
       td.appendChild(el("button", { class: "mini price-fab", text: "算价", onclick: (e) => { e.stopPropagation(); priceRow(r.id); } }));
     }
   };
@@ -845,6 +846,13 @@ function clearAllColFilters() {
   toast("已清空所有列筛选");
 }
 
+/* ---------- 退舱行编辑白名单（对齐后端常量） ---------- */
+const CANCEL_EDITABLE = ["备注", "状态"];         // 对齐后端 CANCEL_EDITABLE_FIELDS（单格）
+const CANCEL_BATCH_EDITABLE = ["备注"];           // 对齐后端 CANCEL_BATCH_EDITABLE_FIELDS（批量）
+function isCancelRow(r) { return !!(r && String(r["状态"] || "").trim() === "退舱"); }
+function isCancelLocked(r, field) { return isCancelRow(r) && CANCEL_EDITABLE.indexOf(field) < 0; }
+function isCancelBatchLocked(r, field) { return isCancelRow(r) && CANCEL_BATCH_EDITABLE.indexOf(field) < 0; }
+
 /* ---------- 渲染：表格 ---------- */
 function renderBody(reset = true) {
   highlightFilteredCols();
@@ -874,7 +882,7 @@ function renderBody(reset = true) {
   pageRows.forEach((r, i) => {
     const tr = el("tr", { "data-id": r.id });
     if (rh[r.id]) tr.style.minHeight = rh[r.id] + "px";
-    if (String(r["状态"] || "").trim() === "退舱") tr.classList.add("row-cancel");
+    if (isCancelRow(r)) tr.classList.add("row-cancel");
     // 点击任意位置选中整行（高亮定位，便于左右滚动时跟踪）；点数据单元格则由单元格自身处理（选单元格，不整行）
     tr.addEventListener("click", (e) => { if (e.target.closest("td.cell-edit")) return; selectRow(r.id); });
     // 序号格 + 行高拖拽把手（拖动调整该行高度，仅自己可见）
@@ -937,7 +945,7 @@ function renderBody(reset = true) {
         const span = el("span", { class: "cell-text" }, cur);
         if (cur) span.title = cur;
         td.appendChild(span);
-        if (c.name === "单箱价格" && !String(r[c.name] || "").trim()) {
+        if (c.name === "单箱价格" && !String(r[c.name] || "").trim() && !isCancelRow(r)) {
           // 算价按钮悬浮在右上角，不撑高单元格（保证所有行行高一致）
           td.appendChild(el("button", { class: "mini price-fab", text: "算价", onclick: (e) => { e.stopPropagation(); priceRow(r.id); } }));
         }
@@ -1233,14 +1241,15 @@ window.addEventListener("beforeunload", flushPending);
 
 function saveCell(id, field, val) {
   const rec = DATA.find((x) => x.id === id);
+  if (isCancelLocked(rec, field)) { toast("退舱记录只允许修改「备注」和「状态」"); return; }
   const oldValue = rec ? (rec[field] == null ? "" : rec[field]) : "";
-  pushUndo({ type: "cell", id, field, oldValue: String(oldValue), newValue: String(val) });
   markPending(id, field, val);
   fetch("api/row/" + id, {
     method: "PATCH", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ field, value: val }),
   }).then((r) => r.json()).then((j) => {
     if (j.ok) {
+      pushUndo({ type: "cell", id, field, oldValue: String(oldValue), newValue: String(val) });
       clearPending(id, field);
       const rec = DATA.find((x) => x.id === id); if (rec) rec[field] = val;
       if (field === "班列类型") {
@@ -1262,7 +1271,12 @@ function saveCell(id, field, val) {
         toast("已保存");
       }
       syncVersion();
-    } else toast("保存失败: " + j.msg);
+    } else {
+      clearPending(id, field);
+      if (rec) rec[field] = oldValue;   // DATA 本来没改，重绘即还原显示
+      renderActive();
+      toast("保存失败: " + j.msg);
+    }
   }).catch(() => toast("保存失败(网络)"));
 }
 
@@ -1749,17 +1763,36 @@ async function readSystemClipboard() {
 
 /* 统一保存多字段编辑并记一笔可撤销操作（批量粘贴 / 整行粘贴共用）。
    本地先更新 DATA 并即时渲染，再写服务端。 */
-function applyEdits(edits, msg) {
-  if (!edits.length) { toast("没有需要粘贴的内容"); return; }
-  edits.forEach((e) => { const rec = DATA.find((x) => x.id === e.id); if (rec) rec[e.field] = e.value; });
+function applyEdits(edits, msg, extraCancelSkipped = 0) {
+  // 退舱行批量只允许写「备注」（与后端 CANCEL_BATCH_EDITABLE_FIELDS 一致）
+  let selfSkipped = 0;
+  const kept = [];
+  edits.forEach((e) => {
+    const target = DATA.find((x) => x.id === e.id);
+    if (isCancelBatchLocked(target, e.field)) { selfSkipped++; return; }
+    kept.push(e);
+  });
+  const skippedNoReq = extraCancelSkipped + selfSkipped;
+
+  if (!kept.length) {
+    if (skippedNoReq > 0) {
+      toast("退舱记录不可修改，已跳过 " + skippedNoReq + " 个单元格");
+      loadRows(true).then(renderActive);   // 本地 DATA 可能比库旧，以服务端为准重取
+    } else toast("没有需要粘贴的内容");
+    return;
+  }
+
+  kept.forEach((e) => { const rec = DATA.find((x) => x.id === e.id); if (rec) rec[e.field] = e.value; });
   fetch("api/cells", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user: USER, edits }),
+    body: JSON.stringify({ user: USER, edits: kept }),
   }).then((r) => r.json()).then((j) => {
+    const totalSkipped = skippedNoReq + (j.cancelled_skipped || 0);
     if (j.ok) {
-      renderActive();
-      toast(msg);
-      pushUndo({ type: "bulk-edit", edits: JSON.parse(JSON.stringify(edits)) });
+      toast(msg + (totalSkipped > 0 ? "（已跳过 " + totalSkipped + " 个退舱单元格）" : ""));
+      pushUndo({ type: "bulk-edit", edits: JSON.parse(JSON.stringify(kept)) });
+      if (totalSkipped > 0) loadRows(true).then(renderActive);
+      else renderActive();
     } else toast("保存失败: " + (j.msg || ""));
   }).catch(() => toast("保存失败(网络)"));
 }
@@ -1784,6 +1817,7 @@ async function pasteToRow(id) {
     const cols = userColumns();
     const target = (_ctxField && cols.find((c) => c.name === _ctxField)) || cols[0];
     if (!target) return;
+    if (isCancelLocked(rec, target.name)) { toast("退舱记录只允许修改「备注」和「状态」"); return; }
     if (String(rec[target.name] || "") === raw) { toast("内容相同，无需粘贴"); return; }
     let nv = raw;
     if (target.type === "date") nv = normalizeDate(nv);
@@ -1871,6 +1905,7 @@ function doGridPaste(id, field, raw) {
   const C = Math.max.apply(null, matrix.map((a) => a.length));
   const edits = [];
   let skipped = 0;
+  let skippedCancel = 0;
   for (let dr = 0; dr < R; dr++) {
     const target = viewRows[anchorIdx + dr];
     if (!target) { skipped += (R - dr); break; }
@@ -1882,14 +1917,19 @@ function doGridPaste(id, field, raw) {
       if (tc.type === "date") nv = normalizeDate(nv);
       else if (tc.type === "select") nv = normalizeSelect(tc, nv);
       if (String(target[tc.name] == null ? "" : target[tc.name]) === nv) continue;
+      if (isCancelBatchLocked(target, tc.name)) { skippedCancel++; continue; }
       edits.push({ id: target.id, field: tc.name, value: nv });
       target[tc.name] = nv;
     }
   }
-  if (!edits.length) { toast("没有需要粘贴的内容"); return; }
+  if (!edits.length) {
+    if (skippedCancel > 0) toast("退舱记录不可修改，已跳过 " + skippedCancel + " 个单元格");
+    else toast("没有需要粘贴的内容");
+    return;
+  }
   const note = skipped ? `（末尾 ${skipped} 行超出，已跳过）` : "";
   const msg = `已粘贴 ${R}×${C}${note}，从「${field}」开始向右/向下铺开`;
-  applyEdits(edits, msg);
+  applyEdits(edits, msg, skippedCancel);
 }
 
 /* Excel 日期序列号 / 各种 yyyy/m/d 文本 → 统一 YYYY-MM-DD */
@@ -2420,19 +2460,26 @@ function applyBulkSet() {
     : getView();
   if (!targets.length) { toast("没有可更新的专列行"); return; }
   const edits = [];
+  let skipped = 0;
   targets.forEach((r) => {
     const cur = r[field] == null ? "" : String(r[field]);
     if (mode === "fill" && cur.trim() !== "") return;   // 仅补空：跳过非空
+    if (isCancelBatchLocked(r, field)) { skipped++; return; }   // 退舱行：备注放行，其余跳过
     edits.push({ id: r.id, field, value });
   });
-  if (!edits.length) { toast("没有需要补写的空值行"); return; }
+  if (!edits.length) {
+    if (skipped > 0) toast("退舱记录不可修改，已跳过 " + skipped + " 个单元格");
+    else toast("没有需要补写的空值行");
+    return;
+  }
   if (!confirm("确认把【" + edits.length + "】条专列的「" + field + "」设为「" + (value || "空") + "」？\n模式：" + (mode === "fill" ? "仅补空" : "覆盖全部"))) return;
   fetch("api/cells", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ user: USER, edits }),
   }).then((r) => r.json()).then((j) => {
     if (j.ok) {
-      toast("已批量更新 " + edits.length + " 行「" + field + "」");
+      const totalSkipped = skipped + (j.cancelled_skipped || 0);
+      toast("已更新 " + j.saved + " 行「" + field + "」" + (totalSkipped > 0 ? "（跳过 " + totalSkipped + " 个退舱单元格）" : ""));
       syncVersion(); loadRows().then(renderAll);
     } else toast("批量更新失败: " + (j.msg || ""));
   }).catch(() => toast("批量更新失败(网络)"));
