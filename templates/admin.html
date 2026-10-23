@@ -52,6 +52,12 @@
   .hidden { display:none; }
   #denied { text-align:center; padding:80px 20px; }
   .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; background:var(--primary-soft); color:var(--primary); font-weight:500; }
+  .tr-disabled { opacity:.55; }
+  .modal-mask { position:fixed; inset:0; z-index:600; background:rgba(15,23,42,.35); display:flex; align-items:center; justify-content:center; padding:20px; }
+  .modal-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); box-shadow:var(--shadow-lg); padding:18px; width:460px; max-width:100%; }
+  .modal-card h3 { margin:0 0 6px; font-size:15px; color:var(--title); }
+  .modal-card label { display:block; margin:10px 0 4px; font-size:13px; color:var(--text-secondary); }
+  .pw-result { margin-top:12px; padding:10px; background:var(--primary-soft); border-radius:var(--radius-sm); word-break:break-all; }
   @media (max-width:640px){ main{padding:8px;} th,td{padding:5px 6px;font-size:12px;} }
 
   /* 草单机器人配置卡 */
@@ -106,6 +112,7 @@
     <div class="tab" data-tab="price">价格维护</div>
     <div class="tab" data-tab="options">选项维护</div>
     <div class="tab" data-tab="trash">回收站</div>
+    <div class="tab hidden" data-tab="users">用户管理</div>
   </div>
   <main>
     <!-- ============ 服务状态 ============ -->
@@ -272,7 +279,48 @@
         <div id="trashView" style="overflow:auto"><p class="muted">加载中…</p></div>
       </div>
     </section>
+
+    <!-- ============ 用户管理（仅 user:manage + 登录模式） ============ -->
+    <section id="tab-users" class="hidden">
+      <div class="card">
+        <div class="row">
+          <h3 style="margin:0">用户列表</h3>
+          <button class="ghost" onclick="loadUsers()">刷新</button>
+          <span id="usersInfo" class="muted"></span>
+        </div>
+        <p class="muted" style="margin:4px 0 10px">重置密码 / 停用会立即使该用户所有在线会话失效。明文密码只在随机生成时显示一次。</p>
+        <div id="usersView">加载中…</div>
+      </div>
+    </section>
   </main>
+</div>
+
+<!-- 重置密码弹层 -->
+<div id="resetModal" class="modal-mask hidden">
+  <div class="modal-card">
+    <h3>重置密码 · <span id="resetUser"></span></h3>
+    <p class="muted" style="margin:4px 0 0">该用户所有在线会话会立即失效。</p>
+    <div id="resetInputArea">
+      <label>新密码</label>
+      <input id="resetPw" type="password" autocomplete="new-password">
+      <label>确认新密码</label>
+      <input id="resetPw2" type="password" autocomplete="new-password">
+      <div id="resetErr" class="muted"></div>
+      <div class="row">
+        <button id="resetGo" onclick="submitResetPw()">确认重置</button>
+        <button class="ghost" id="resetRandomBtn" onclick="resetRandomPw()">生成随机密码</button>
+        <button class="ghost" onclick="closeResetPw()">取消</button>
+      </div>
+    </div>
+    <div id="resetResult" class="hidden">
+      <p>请抄给对方（只显示这一次）：</p>
+      <div class="pw-result"><b id="resetPwOut"></b></div>
+      <div class="row">
+        <button class="ghost" onclick="copyResetPw()">复制密码</button>
+        <button onclick="resetDone()">完成</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="static/auth_mode.js"></script>
@@ -302,6 +350,12 @@ function enterAdmin(u, perms) {
   document.getElementById("who").textContent = u || "未选择身份";
   document.getElementById("app").classList.remove("hidden");
   document.getElementById("denied").classList.add("hidden"); // 身份确认后消失
+  // 用户管理单独判 user:manage，且影子期永不显示（permissions 全量也不给）
+  const usersTab = document.querySelector('.tab[data-tab="users"]');
+  const usersPanel = document.getElementById("tab-users");
+  const canManageUsers = has("user:manage") && AUTH_MODE === "auth";
+  if (usersTab) usersTab.classList.toggle("hidden", !canManageUsers);
+  if (usersPanel && !canManageUsers) usersPanel.classList.add("hidden");
   const IS_FULL = has("config:manage");  // admin/manager：管理页全开
   if (IS_FULL) {
     loadStatus();
@@ -405,7 +459,7 @@ function esc(s) { const d = document.createElement("div"); d.textContent = s == 
   document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
     t.classList.add("active");
-    ["status","logs","config","price","options","trash"].forEach(k => document.getElementById("tab-"+k).classList.toggle("hidden", k !== t.dataset.tab));
+    ["status","logs","config","price","options","trash","users"].forEach(k => document.getElementById("tab-"+k).classList.toggle("hidden", k !== t.dataset.tab));
     if (t.dataset.tab === "config") {
       if (!window._cfgLoaded) { loadCfg(); window._cfgLoaded = true; }
       if (!window._botLoaded) { loadAllBots(); window._botLoaded = true; }
@@ -413,6 +467,7 @@ function esc(s) { const d = document.createElement("div"); d.textContent = s == 
     if (t.dataset.tab === "price" && !window._priceLoaded) { loadPrice(); window._priceLoaded = true; }
     if (t.dataset.tab === "options" && !window._optLoaded) { loadOptions(); window._optLoaded = true; }
     if (t.dataset.tab === "trash" && !window._trashLoaded) { loadTrash(); window._trashLoaded = true; }
+    if (t.dataset.tab === "users" && !window._usersLoaded) { loadUsers(); window._usersLoaded = true; }
   }));
 
 // ---------- 服务状态 ----------
@@ -792,6 +847,190 @@ function prConfirmImport() {
       document.getElementById("prFile").value = "";
       loadPrice();
     });
+}
+
+// ---------- 用户管理 ----------
+const ROLE_LABEL = {
+  admin: "管理员", hanwenhao: "韩文豪", yangyawen: "杨雅雯",
+  fengqian: "冯茜", visitor: "游客",
+};
+let _resetUser = "";
+let _resetSelf = false;
+
+function roleText(role) { return ROLE_LABEL[role] || role || "—"; }
+
+function scopeText(u) {
+  if (u.scope_type === "all") return "全部";
+  if (u.scope_type === "none") return "无";
+  if (u.scope_type === "companies") {
+    let arr = u.scope_companies;
+    if (Array.isArray(arr)) return arr.length ? arr.join("、") : "—";
+    if (!arr) return "—";
+    try { arr = JSON.parse(arr); }
+    catch (e) { return "—"; }
+    return (Array.isArray(arr) && arr.length) ? arr.join("、") : "—";
+  }
+  return "—";
+}
+
+function loadUsers() {
+  const view = document.getElementById("usersView");
+  if (!view) return;
+  view.innerHTML = '<p class="muted">加载中…</p>';
+  api("api/admin/users").then((j) => {
+    if (!j.ok) { view.innerHTML = "❌ " + esc(j.msg || "加载失败"); return; }
+    renderUsers(j.users || []);
+  }).catch((e) => { view.innerHTML = "❌ " + esc(e); });
+}
+
+function renderUsers(users) {
+  const view = document.getElementById("usersView");
+  const info = document.getElementById("usersInfo");
+  if (info) info.textContent = "共 " + users.length + " 个账号";
+  if (!users.length) { view.innerHTML = '<span class="muted">（暂无账号）</span>'; return; }
+  const rows = users.map((u) => {
+    const disabled = Number(u.disabled) === 1;
+    const self = u.username === USER;
+    return `<tr class="${disabled ? "tr-disabled" : ""}">
+      <td>${esc(u.username)}</td>
+      <td>${esc(roleText(u.role))}</td>
+      <td>${esc(scopeText(u))}</td>
+      <td>${disabled ? '<span class="bad">已停用</span>' : '<span class="ok">启用</span>'}</td>
+      <td class="muted">${esc(u.created_at || "—")}</td>
+      <td>
+        <button class="ghost" data-act="reset" data-user="${esc(u.username)}">重置密码</button>
+        <button class="${disabled ? "ghost" : "danger"}" data-act="toggle"
+                data-user="${esc(u.username)}" data-disabled="${disabled ? 1 : 0}"
+                ${self && !disabled ? "disabled" : ""}>${disabled ? "启用" : "停用"}</button>
+      </td>
+    </tr>`;
+  }).join("");
+  view.innerHTML = `<table><thead><tr><th>用户名</th><th>角色</th><th>数据范围</th>` +
+    `<th>状态</th><th>创建时间</th><th style="width:190px">操作</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>`;
+  view.querySelectorAll("button[data-act]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.user;
+      if (btn.dataset.act === "reset") openResetPw(name);
+      else toggleUserDisabled(name, btn.dataset.disabled !== "1");
+    });
+  });
+}
+
+function openResetPw(username) {
+  _resetUser = username;
+  _resetSelf = false;
+  document.getElementById("resetUser").textContent = username;
+  document.getElementById("resetPw").value = "";
+  document.getElementById("resetPw2").value = "";
+  document.getElementById("resetErr").textContent = "";
+  document.getElementById("resetPwOut").textContent = "";
+  document.getElementById("resetInputArea").classList.remove("hidden");
+  document.getElementById("resetResult").classList.add("hidden");
+  document.getElementById("resetGo").disabled = false;
+  document.getElementById("resetRandomBtn").disabled = false;
+  document.getElementById("resetModal").classList.remove("hidden");
+  document.getElementById("resetPw").focus();
+}
+
+function closeResetPw() {
+  document.getElementById("resetModal").classList.add("hidden");
+  document.getElementById("resetPw").value = "";
+  document.getElementById("resetPw2").value = "";
+  document.getElementById("resetPwOut").textContent = "";
+}
+
+function showResetResult(pw) {
+  document.getElementById("resetInputArea").classList.add("hidden");
+  document.getElementById("resetResult").classList.remove("hidden");
+  document.getElementById("resetPwOut").textContent = pw;
+}
+
+function handleResetResult(j) {
+  if (!j.ok) { document.getElementById("resetErr").textContent = j.msg || "重置失败"; return; }
+  if (j.self) {
+    _resetSelf = true;
+    if (j.password) { showResetResult(j.password); return; }
+    closeResetPw();
+    alert("密码已重置，请用新密码重新登录");
+    showLoginModal("密码已重置，请用新密码重新登录");
+    return;
+  }
+  loadUsers();
+  if (j.password) { showResetResult(j.password); return; }
+  closeResetPw();
+  alert("密码已重置");
+}
+
+function submitResetPw() {
+  const p1 = document.getElementById("resetPw").value;
+  const p2 = document.getElementById("resetPw2").value;
+  const err = document.getElementById("resetErr");
+  if (!p1) { err.textContent = "新密码不能为空"; return; }
+  if (p1 !== p2) { err.textContent = "两次输入的新密码不一致"; return; }
+  if (!confirm("确认重置「" + _resetUser + "」的密码？该用户所有在线会话会立即失效。")) return;
+  const btn = document.getElementById("resetGo");
+  btn.disabled = true;
+  api("api/admin/users/reset_password", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: _resetUser, password: p1 }),
+  }).then((j) => { btn.disabled = false; handleResetResult(j); })
+    .catch(() => { btn.disabled = false; err.textContent = "网络错误，请重试"; });
+}
+
+function resetRandomPw() {
+  if (!confirm("确认重置「" + _resetUser + "」的密码？该用户所有在线会话会立即失效。")) return;
+  const btn = document.getElementById("resetRandomBtn");
+  btn.disabled = true;
+  api("api/admin/users/reset_password", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: _resetUser }),   // 不传 password → 后端生成
+  }).then((j) => { btn.disabled = false; handleResetResult(j); })
+    .catch(() => {
+      btn.disabled = false;
+      document.getElementById("resetErr").textContent = "网络错误，请重试";
+    });
+}
+
+function copyResetPw() {
+  const pw = document.getElementById("resetPwOut").textContent;
+  if (!pw) return;
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = pw;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); alert("已复制"); }
+    catch (e) { alert("复制失败，请手动抄下：" + pw); }
+    ta.remove();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(pw).then(() => alert("已复制")).catch(fallback);
+  } else fallback();
+}
+
+function resetDone() {
+  const self = _resetSelf;
+  closeResetPw();
+  if (self) {
+    alert("密码已重置，请用新密码重新登录");
+    showLoginModal("密码已重置，请用新密码重新登录");
+  }
+}
+
+function toggleUserDisabled(username, disabled) {
+  const act = disabled ? "停用" : "启用";
+  const extra = disabled ? "该用户所有在线会话会立即失效。" : "";
+  if (!confirm("确认" + act + "「" + username + "」？" + extra)) return;
+  api("api/admin/users/set_disabled", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: username, disabled: disabled }),
+  }).then((j) => {
+    if (!j.ok) alert("操作失败：" + (j.msg || ""));
+    else loadUsers();
+  }).catch(() => alert("操作失败（网络）"));
 }
 
 // ---------- 选项维护 ----------

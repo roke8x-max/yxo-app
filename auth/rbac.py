@@ -157,6 +157,9 @@ ROUTE_PERMISSIONS = {
     ("GET", "/api/csrf"): PUBLIC,
     ("GET", "/api/auth_meta"): AUTHENTICATED,
     ("POST", "/api/change_password"): AUTHENTICATED,
+    ("GET",  "/api/admin/users"):                 "user:manage",
+    ("POST", "/api/admin/users/reset_password"):  "user:manage",
+    ("POST", "/api/admin/users/set_disabled"):    "user:manage",
 }
 
 # spec §6.1：模块加载时预构建，供「未登记 → 403」判定

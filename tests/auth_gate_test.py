@@ -819,3 +819,186 @@ def test_g10_youke_rows_match_all_companies(tmp_path, monkeypatch):
     assert {row["开票子公司名称"] for row in rows} == {"同程配", "保时达", "港九港铁",
                                                       "中欧木业", "沙坪坝", "太平洋",
                                                       "东盟", "联运"}
+
+
+# ---------------- 2026-10-23 改密界面 + 后台用户管理 ----------------
+
+NEW_PW = "ResetAa123456"
+
+
+def _admin_post(c, path, body):
+    return c.post(path, json=body, headers={"X-CSRF-Token": _csrf(c)})
+
+
+def test_change_password_kills_old_session(client):
+    # A5：改密成功后旧会话失效（当前请求的 cookie 也一起失效）
+    c, _ = client
+    tok = _authed(c, MGR)
+    assert c.get_cookie("yxo_session") is not None
+    r = c.post("/api/change_password",
+               json={"old_password": PW[MGR], "new_password": "NewStrongPass98"},
+               headers={"X-CSRF-Token": tok})
+    assert r.status_code == 200
+    assert c.get("/api/rows").status_code == 401
+
+
+def test_shadow_change_password_403(dclient):
+    # A8：影子期直接改密 → 403，不是 400/200
+    c, _ = dclient
+    r = c.post("/api/change_password",
+               json={"old_password": "whatever", "new_password": "NewStrongPass98"})
+    assert r.status_code == 403
+
+
+def test_non_admin_cannot_list_users(client):
+    # B9：韩文豪无 user:manage → 403
+    c, _ = client
+    _authed(c, MGR)
+    assert c.get("/api/admin/users").status_code == 403
+
+
+def test_admin_list_users_has_seeds_and_no_pw_hash(client):
+    # B10：至少 5 个种子账号在列；响应永不含 pw_hash
+    c, _ = client
+    _authed(c, ADMIN)
+    r = c.get("/api/admin/users")
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["ok"] is True
+    users = j["users"]
+    names = {u["username"] for u in users}
+    assert {"毛骁洋", "冯茜", "杨雅雯", "韩文豪", "游客"} <= names
+    assert "pw_hash" not in r.get_data(as_text=True)
+    for u in users:
+        assert set(u) == {"id", "username", "role", "scope_type",
+                          "scope_companies", "disabled", "created_at"}
+
+
+def test_admin_reset_other_password_input(client):
+    # B11：输入型重置 → 200、目标可用新密码登录、响应不含 password
+    c, _ = client
+    _authed(c, ADMIN)
+    r = _admin_post(c, "/api/admin/users/reset_password",
+                    {"username": MGR, "password": NEW_PW})
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["ok"] is True and j["username"] == MGR and j["self"] is False
+    assert "password" not in j
+    assert _login(c, MGR, NEW_PW).status_code == 200
+
+
+def test_disable_kills_target_session(client):
+    # B13：停用后目标原有会话立即失效
+    c, appmod = client
+    c2 = appmod.app.test_client()
+    _authed(c2, MGR)
+    _authed(c, ADMIN)
+    r = _admin_post(c, "/api/admin/users/set_disabled",
+                    {"username": MGR, "disabled": 1})
+    assert r.status_code == 200
+    assert c2.get("/api/rows").status_code == 401
+
+
+def test_disabled_user_cannot_login_then_reenable(client):
+    # B12/B14：停用后登录被拒；重新启用后可登录
+    c, _ = client
+    _authed(c, ADMIN)
+    assert _admin_post(c, "/api/admin/users/set_disabled",
+                       {"username": MGR, "disabled": 1}).status_code == 200
+    assert _login(c, MGR, PW[MGR]).status_code == 401
+    _authed(c, ADMIN)
+    assert _admin_post(c, "/api/admin/users/set_disabled",
+                       {"username": MGR, "disabled": 0}).status_code == 200
+    assert _login(c, MGR, PW[MGR]).status_code == 200
+
+
+def test_admin_cannot_disable_self(client):
+    # B15：停用自己 → 403
+    c, _ = client
+    _authed(c, ADMIN)
+    r = _admin_post(c, "/api/admin/users/set_disabled",
+                    {"username": ADMIN, "disabled": 1})
+    assert r.status_code == 403
+    assert "不能停用" in r.get_json()["msg"]
+
+
+def test_shadow_admin_user_apis_403(dclient):
+    # B16/B17：影子期三个新接口一律 403
+    c, _ = dclient
+    assert c.get("/api/admin/users").status_code == 403
+    assert c.post("/api/admin/users/reset_password",
+                  json={"username": MGR}).status_code == 403
+    assert c.post("/api/admin/users/set_disabled",
+                  json={"username": MGR, "disabled": 1}).status_code == 403
+
+
+def test_admin_reset_weak_password_400(client):
+    # B18：管理员也不能设弱密码
+    c, _ = client
+    _authed(c, ADMIN)
+    r = _admin_post(c, "/api/admin/users/reset_password",
+                    {"username": MGR, "password": "123"})
+    assert r.status_code == 400
+
+
+def test_admin_reset_missing_user_404(client):
+    # B19：目标不存在 → 404
+    c, _ = client
+    _authed(c, ADMIN)
+    r = _admin_post(c, "/api/admin/users/reset_password",
+                    {"username": "no_such_user", "password": NEW_PW})
+    assert r.status_code == 404
+    assert r.get_json()["msg"] == "用户不存在"
+
+
+def test_admin_reset_empty_password_400(client):
+    # B20：空串是非法输入，不当作"帮我生成"
+    c, _ = client
+    _authed(c, ADMIN)
+    r = _admin_post(c, "/api/admin/users/reset_password",
+                    {"username": MGR, "password": ""})
+    assert r.status_code == 400
+    assert r.get_json()["msg"] == "新密码不能为空"
+
+
+def test_set_disabled_invalid_value_400(client):
+    # B21：非法 disabled 值 → 400
+    c, _ = client
+    _authed(c, ADMIN)
+    r = _admin_post(c, "/api/admin/users/set_disabled",
+                    {"username": MGR, "disabled": "yes"})
+    assert r.status_code == 400
+
+
+def test_set_disabled_true_normalized(client):
+    # B22：true / "true" 都归一化成 1
+    c, _ = client
+    _authed(c, ADMIN)
+    for flag in (True, "true"):
+        r = _admin_post(c, "/api/admin/users/set_disabled",
+                        {"username": MGR, "disabled": flag})
+        assert r.status_code == 200
+        assert r.get_json()["disabled"] == 1
+
+
+def test_admin_reset_self_reports_self_and_kills_session(client):
+    # B23：重置自己 → 200、self == True、旧会话随即 401
+    c, _ = client
+    tok = _authed(c, ADMIN)
+    r = c.post("/api/admin/users/reset_password",
+               json={"username": ADMIN, "password": "SelfAa123456"},
+               headers={"X-CSRF-Token": tok})
+    assert r.status_code == 200
+    assert r.get_json()["self"] is True
+    assert c.get("/api/rows").status_code == 401
+
+
+def test_admin_reset_random_password_can_login(client):
+    # 附：不传 password → 后端随机生成，回传的密码可登录
+    c, _ = client
+    _authed(c, ADMIN)
+    r = _admin_post(c, "/api/admin/users/reset_password", {"username": MGR})
+    assert r.status_code == 200
+    pw = r.get_json().get("password")
+    assert pw and len(pw) >= 12
+    assert _login(c, MGR, pw).status_code == 200

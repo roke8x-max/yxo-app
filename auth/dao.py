@@ -161,6 +161,18 @@ def list_shadow_users():
         conn.close()
 
 
+def list_users():
+    """后台用户管理：全部用户（含游客、含已停用），按 id 排序。绝不返回 pw_hash。"""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, role, scope_type, scope_companies, disabled, created_at "
+            "FROM auth_users ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def user_companies_scope(username):
     """取某用户的 scope（供 records_dao 用）。返回 (scope_type, [companies])。"""
     row = get_user(username)
