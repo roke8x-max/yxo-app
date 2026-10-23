@@ -15,6 +15,7 @@
         <select id="whoSel" class="hidden"></select>
       </label>
       <button id="logoutBtn" class="tbtn ghost icon" title="登出">登出</button>
+      <button id="chpwBtn" class="tbtn ghost hidden" title="修改密码">修改密码</button>
       <span id="filterBadge" class="filter-badge" title="点击清空所有列筛选" style="display:none"></span>
       <span class="pending">待跟进 <b id="pending">0</b></span>
       <span class="count">共 <b id="total">0</b> 行</span>
@@ -200,6 +201,24 @@
     </div>
   </div>
 
+  <!-- 修改密码弹层（仅 auth 模式显示入口；成功后旧会话失效，弹回登录层） -->
+  <div id="chpwModal" class="user-gate hidden">
+    <div class="gate-inner">
+      <div class="gate-title">修改密码</div>
+      <div class="gate-sub">修改成功后所有旧会话（包括本页）都会失效，需要重新登录。</div>
+      <div class="pop-body">
+        <label>旧密码 <input id="chpwOld" type="password" style="width:100%" autocomplete="current-password"></label>
+        <label>新密码 <input id="chpwNew" type="password" style="width:100%" autocomplete="new-password"></label>
+        <label>确认新密码 <input id="chpwNew2" type="password" style="width:100%" autocomplete="new-password"></label>
+        <div id="chpwErr" class="muted"></div>
+        <div class="pop-foot">
+          <button id="chpwCancel" class="tbtn ghost">取消</button>
+          <button id="chpwGo" class="tbtn">提交</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 登录弹层（未登录访问受保护接口 → 401 → 弹出本层；无独立 /login 路由） -->
   <div id="loginModal" class="user-gate hidden">
     <div class="gate-inner">
@@ -219,6 +238,6 @@
   </div>
 
   <script src="static/auth_mode.js"></script>
-  <script src="static/app.js?v=20261019cancelguard"></script>
+  <script src="static/app.js?v=20261023chpw"></script>
 </body>
 </html>

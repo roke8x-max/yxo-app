@@ -74,6 +74,46 @@ function showLoginModal(msg) {
 function doLogout() {
   fetch("api/logout", { method: "POST" }).then(() => location.reload()).catch(() => location.reload());
 }
+function openChangePw() {
+  ["chpwOld", "chpwNew", "chpwNew2"].forEach((i) => {
+    const el = document.getElementById(i);
+    if (el) el.value = "";
+  });
+  const err = document.getElementById("chpwErr");
+  if (err) err.textContent = "";
+  const modal = document.getElementById("chpwModal");
+  if (modal) modal.classList.remove("hidden");
+  const first = document.getElementById("chpwOld");
+  if (first) first.focus();
+}
+function closeChangePw() {
+  const modal = document.getElementById("chpwModal");
+  if (modal) modal.classList.add("hidden");
+}
+function submitChangePw() {
+  const oldPw = (document.getElementById("chpwOld") || {}).value || "";
+  const p1 = (document.getElementById("chpwNew") || {}).value || "";
+  const p2 = (document.getElementById("chpwNew2") || {}).value || "";
+  const err = document.getElementById("chpwErr");
+  const btn = document.getElementById("chpwGo");
+  if (!p1) { if (err) err.textContent = "新密码不能为空"; return; }
+  if (p1 !== p2) { if (err) err.textContent = "两次输入的新密码不一致"; return; }
+  if (btn) btn.disabled = true;
+  fetch("api/change_password", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ old_password: oldPw, new_password: p1 }),
+  }).then((r) => r.json()).then((j) => {
+    if (btn) btn.disabled = false;
+    if (!j.ok) { if (err) err.textContent = j.msg || "修改失败"; return; }
+    closeChangePw();
+    _pending = {};
+    toast("密码已修改，请用新密码重新登录");
+    showLoginModal("密码已修改，请用新密码重新登录");
+  }).catch(() => {
+    if (btn) btn.disabled = false;
+    if (err) err.textContent = "网络错误，请重试";
+  });
+}
 
 let META = { columns: [], users: [], company_field: "", groupable: [], followup_fields: [] };
 let DATA = [];
@@ -2523,6 +2563,15 @@ function enterApp() {
       "hidden", !(hasPerm("price:apply") || hasPerm("price:manage")));
     const loBtn = document.getElementById("logoutBtn");
     if (loBtn) loBtn.onclick = doLogout;
+    const chpwBtn = document.getElementById("chpwBtn");
+    if (chpwBtn) {
+      chpwBtn.classList.toggle("hidden", AUTH_MODE !== "auth");
+      chpwBtn.onclick = openChangePw;
+    }
+    const chpwCancel = document.getElementById("chpwCancel");
+    if (chpwCancel) chpwCancel.onclick = closeChangePw;
+    const chpwGo = document.getElementById("chpwGo");
+    if (chpwGo) chpwGo.onclick = submitChangePw;
     setInterval(pollRemoteChanges, 4000);   // 每 4 秒检查他人改动（同 WPS 在线协同）
   });
 }

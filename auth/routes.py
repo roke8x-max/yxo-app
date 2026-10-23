@@ -6,6 +6,7 @@
 因与现存表格元数据接口 /api/meta 重名而改名（见 auth/rbac.py 头部说明）。
 """
 import secrets
+import string
 
 from flask import Blueprint, g, jsonify, request
 
@@ -22,6 +23,39 @@ def _err(code, msg, status):
     except Exception:
         req_id = "-"
     return jsonify({"ok": False, "error": code, "msg": msg, "req_id": req_id}), status
+
+
+def _shadow_denied():
+    """影子期（AUTH_ENABLED=0）无鉴权：所有账号安全相关写操作一律拒绝。"""
+    if not config.AUTH_ENABLED:
+        return _err("HTTP_403", "该功能仅在登录模式可用（当前为影子期）", 403)
+    return None
+
+
+def _gen_password(length=14):
+    """生成满足 password_strength 的随机密码：三类字符各先放 1 个，再补随机，最后打乱。"""
+    upper, lower, digits = string.ascii_uppercase, string.ascii_lowercase, string.digits
+    pool = upper + lower + digits
+    for _ in range(50):
+        chars = [secrets.choice(upper), secrets.choice(lower), secrets.choice(digits)]
+        chars += [secrets.choice(pool) for _ in range(max(0, length - 3))]
+        secrets.SystemRandom().shuffle(chars)
+        pw = "".join(chars)
+        ok, _msg = service.password_strength(pw)
+        if ok:
+            return pw
+    raise RuntimeError("随机密码生成失败")
+
+
+def _to_bool01(v):
+    """disabled 归一化：1/True/'1'/'true' → 1；0/False/'0'/'false' → 0；其他 → None。"""
+    if isinstance(v, bool):
+        return 1 if v else 0
+    if isinstance(v, int) and v in (0, 1):
+        return v
+    if isinstance(v, str) and v.strip().lower() in ("0", "1", "true", "false"):
+        return 1 if v.strip().lower() in ("1", "true") else 0
+    return None
 
 
 @auth_bp.route("/api/csrf", methods=["GET"])
@@ -101,6 +135,9 @@ def api_auth_meta():
 
 @auth_bp.route("/api/change_password", methods=["POST"])
 def api_change_password():
+    denied = _shadow_denied()
+    if denied:
+        return denied
     data = request.get_json(silent=True) or {}
     old = data.get("old_password") or ""
     new = data.get("new_password") or ""
@@ -113,5 +150,74 @@ def api_change_password():
     if not ok:
         return _err("HTTP_400", msg, 400)
     dao.set_password(username, service.hash_password(new))
+    dao.delete_user_sessions(username)      # 改密后旧会话立即失效（含当前会话）
     audit.log_event("改密成功", username)
     return jsonify({"ok": True})
+
+
+@auth_bp.route("/api/admin/users", methods=["GET"])
+def api_admin_users():
+    denied = _shadow_denied()
+    if denied:
+        return denied
+    return jsonify({"ok": True, "users": dao.list_users()})
+
+
+@auth_bp.route("/api/admin/users/reset_password", methods=["POST"])
+def api_admin_user_reset_password():
+    denied = _shadow_denied()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    if not username:
+        return _err("HTTP_400", "缺少 username", 400)
+    if not dao.get_user(username):
+        return _err("HTTP_404", "用户不存在", 404)
+
+    # password 语义（写死）：字段不存在或 None → 生成随机密码；空串 → 400；非字符串 → 400；有值 → 过强度
+    if "password" in data and data["password"] is not None:
+        raw = data["password"]
+        if not isinstance(raw, str):
+            return _err("HTTP_400", "新密码格式错误", 400)
+        if raw == "":
+            return _err("HTTP_400", "新密码不能为空", 400)
+        ok, msg = service.password_strength(raw)
+        if not ok:
+            return _err("HTTP_400", msg, 400)
+        new_pw, generated = raw, False
+    else:
+        new_pw, generated = _gen_password(), True
+
+    dao.set_password(username, service.hash_password(new_pw))
+    dao.delete_user_sessions(username)               # 旧会话必须失效
+    audit.log_event("重置密码", g.identity.username, target=f"user:{username}")
+    resp = {"ok": True, "username": username,
+            "self": username == getattr(g.identity, "username", "")}
+    if generated:
+        resp["password"] = new_pw                    # 只在随机生成时回传一次
+    return jsonify(resp)
+
+
+@auth_bp.route("/api/admin/users/set_disabled", methods=["POST"])
+def api_admin_user_set_disabled():
+    denied = _shadow_denied()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    flag = _to_bool01(data.get("disabled"))
+    if not username:
+        return _err("HTTP_400", "缺少 username", 400)
+    if flag is None:
+        return _err("HTTP_400", "disabled 只能是 0 或 1", 400)
+    if not dao.get_user(username):
+        return _err("HTTP_404", "用户不存在", 404)
+    if username == getattr(g.identity, "username", ""):
+        return _err("HTTP_403", "不能停用自己的账号", 403)
+    dao.set_disabled(username, bool(flag))
+    if flag:
+        dao.delete_user_sessions(username)           # 停用即时踢下线
+    audit.log_event("停用账号" if flag else "启用账号",
+                    g.identity.username, target=f"user:{username}")
+    return jsonify({"ok": True, "username": username, "disabled": flag})
