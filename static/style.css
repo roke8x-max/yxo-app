@@ -1196,3 +1196,16 @@ td.cell-selected {
 td.cell-in-range {
   background: rgba(15, 110, 86, 0.10);
 }
+
+/* 「显示密码」眼睛按钮（2026-10-26）：包一层 .pw-wrap 定位，按钮绝对定位在输入框右侧 */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { width: 100%; padding-right: 38px; }
+.pw-eye {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; padding: 4px 6px; cursor: pointer;
+  font-size: 15px; line-height: 1; opacity: .55; border-radius: 4px;
+}
+.pw-eye:hover { opacity: 1; background: rgba(0,0,0,.05); }
+.pw-eye.on { opacity: 1; }
+.pw-wrap input[type="password"]::-ms-reveal,
+.pw-wrap input[type="password"]::-ms-clear { display: none; }   /* 只作用于自绘眼睛的框；登录框保留原生眼睛 */

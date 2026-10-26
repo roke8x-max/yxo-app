@@ -66,10 +66,10 @@ def verify_password(stored, password):
 
 
 def password_strength(password):
-    """新密码强度：长度≥12、含大小写字母、含数字（spec §7.4）。"""
+    """新密码强度：长度≥8、含大小写字母、含数字（2026-10-23 起由 12 位降为 8 位）。"""
     p = password or ""
-    if len(p) < 12:
-        return False, "新密码长度至少 12 位"
+    if len(p) < 8:
+        return False, "新密码长度至少 8 位"
     if not any(c.islower() for c in p) or not any(c.isupper() for c in p):
         return False, "新密码须同时含大小写字母"
     if not any(c.isdigit() for c in p):

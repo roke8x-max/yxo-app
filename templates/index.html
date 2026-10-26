@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>YXO 订舱数据管理</title>
-  <link rel="stylesheet" href="static/style.css?v=20260803c">
+  <link rel="stylesheet" href="static/style.css?v=20261026pw">
 </head>
 <body>
   <header class="topbar">
@@ -207,9 +207,27 @@
       <div class="gate-title">修改密码</div>
       <div class="gate-sub">修改成功后所有旧会话（包括本页）都会失效，需要重新登录。</div>
       <div class="pop-body">
-        <label>旧密码 <input id="chpwOld" type="password" style="width:100%" autocomplete="current-password"></label>
-        <label>新密码 <input id="chpwNew" type="password" style="width:100%" autocomplete="new-password"></label>
-        <label>确认新密码 <input id="chpwNew2" type="password" style="width:100%" autocomplete="new-password"></label>
+        <label>旧密码
+          <span class="pw-wrap">
+            <input id="chpwOld" type="password" autocomplete="current-password">
+            <button type="button" class="pw-eye" data-target="chpwOld"
+                    title="显示密码" aria-label="显示密码">👁</button>
+          </span>
+        </label>
+        <label>新密码
+          <span class="pw-wrap">
+            <input id="chpwNew" type="password" autocomplete="new-password">
+            <button type="button" class="pw-eye" data-target="chpwNew"
+                    title="显示密码" aria-label="显示密码">👁</button>
+          </span>
+        </label>
+        <label>确认新密码
+          <span class="pw-wrap">
+            <input id="chpwNew2" type="password" autocomplete="new-password">
+            <button type="button" class="pw-eye" data-target="chpwNew2"
+                    title="显示密码" aria-label="显示密码">👁</button>
+          </span>
+        </label>
         <div id="chpwErr" class="muted"></div>
         <div class="pop-foot">
           <button id="chpwCancel" class="tbtn ghost">取消</button>
@@ -238,6 +256,6 @@
   </div>
 
   <script src="static/auth_mode.js"></script>
-  <script src="static/app.js?v=20261023chpw"></script>
+  <script src="static/app.js?v=20261026pw"></script>
 </body>
 </html>

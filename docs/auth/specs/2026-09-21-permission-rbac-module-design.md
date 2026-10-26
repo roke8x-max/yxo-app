@@ -294,7 +294,7 @@ yxo-app/
 | `/api/logout` | POST | authenticated | 删 session |
 | `/api/csrf` | GET | public | 登录前取 CSRF token |
 | `/api/meta` | GET | authenticated | 登录后取身份 + CSRF |
-| `/api/change_password` | POST | authenticated（仅改本人） | 手动改密，非强制；**须验旧密码（Argon2）+ 新密码强度校验（长度≥12、含大小写数字）** |
+| `/api/change_password` | POST | authenticated（仅改本人） | 手动改密，非强制；**须验旧密码（Argon2）+ 新密码强度校验（长度≥8、含大小写数字）** |
 
 > 这些路由同属「全路由登记」范围，§6.3 启动自检应覆盖（auth 蓝图注册后 `url_map` 含它们）。
 
