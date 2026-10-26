@@ -52,20 +52,20 @@
 
 ---
 
-## 5. ⛔ 翻开关的硬前置：先给 `manifest.html` 补 CSRF
+## 5. ✅ 翻开关的前置：CSRF 已完成，剩实跑验收
 
-**事实**：开关一开，CSRF 立刻生效；而四个页面的实测结果是——
+**CSRF 已在代码中落地**（2026-10-23 复核 `templates/manifest.html`，不再是待办项）。开关一开，CSRF 立刻生效；四个页面的实测结果——
 
 | 页面 | 带 `X-CSRF-Token`？ |
 |---|---|
 | `static/app.js`（主表） | ✅ |
 | `templates/admin.html` | ✅ |
 | `templates/tuoshu.html` | ✅ |
-| **`templates/manifest.html`** | ❌ **零**（裸 `fetch`） |
+| **`templates/manifest.html`** | ✅ **已实现**：`:200` 声明 `let CSRF_TOKEN = ""`；`:209-210` fetch 包装器在「非 GET + 同源 + `AUTH_MODE === "auth"`」时自动加 `X-CSRF-Token`；`:303-304` 启动时从 `api/csrf` 拉取 token |
 
-⇒ **翻 `=1` 之后，`/api/manifest/*` 的全部 POST 会返回 403，舱单导入页当场不可用。**
+同页的 401 处理与登录入口也已具备：`:114` 登录弹层 `#loginModal`、`:296` 收到 401 时调用 `showLoginModal()`。
 
-**要求**：翻 1 之前，先给 `manifest.html` 补 CSRF（并一并补 401 处理与登录入口）；翻 1 的同一批验收里，必须实跑「舱单上传 → 看差异 → 应用 → 回退/还原」并附输出。
+**要求（仍未完成，翻 1 之前必须做）**：翻 1 的同一批验收里，必须实跑「舱单上传 → 看差异 → 应用 → 回退/还原」并附输出。**CSRF 不是待办，这条实跑验收才是。**
 
 ---
 
@@ -81,7 +81,7 @@
 | G6 | 同一路由的权限要求存在**两处定义**，会漂移 |
 | G7 | **`manager` 角色权限过宽**（≈除用户管理外全部，含"整库还原"）——**已拍板重划**，见 `docs/2026-10-06-角色与权限-勾选结果(确认版).md` |
 | G8 | **权限名单散在 5 处且不同步**（`config.USERS`、`config.TUOSHU_ADMINS`、`tuoshu.html` 前端硬编码、`admin_api.LIMITED_ADMINS`(死代码)、`auth` 角色表）——这正是"给某人开了权限他却用不了"的结构性原因 |
-| **G9** | **翻开关的硬前置 = 给 `manifest.html` 补 CSRF**（见 §5） |
+| **G9** | ✅ **已完成（2026-10-23 复核）**：`manifest.html` 的 CSRF 已实现 —— `:200` 声明 `CSRF_TOKEN`、`:209-210` 自动注入 `X-CSRF-Token`、`:303-304` 启动时从 `api/csrf` 拉取。**剩余非编码项 = 翻 1 前实跑验收**（见 §5） |
 
 ---
 
