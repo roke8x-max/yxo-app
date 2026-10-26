@@ -89,6 +89,27 @@ function openChangePw() {
 function closeChangePw() {
   const modal = document.getElementById("chpwModal");
   if (modal) modal.classList.add("hidden");
+  // 关弹窗必须复位成圆点，否则明文会残留在界面上
+  ["chpwOld", "chpwNew", "chpwNew2"].forEach((id) => {
+    const el = document.getElementById(id); if (el) el.type = "password";
+    const b = document.querySelector('.pw-eye[data-target="' + id + '"]');
+    if (b) { b.classList.remove("on"); b.title = "显示密码"; }
+  });
+}
+function bindPwEyes() {
+  document.querySelectorAll(".pw-eye").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      const inp = document.getElementById(btn.dataset.target);
+      if (!inp) return;
+      const show = inp.type === "password";
+      inp.type = show ? "text" : "password";
+      btn.classList.toggle("on", show);
+      btn.title = show ? "隐藏密码" : "显示密码";
+      inp.focus();
+      try { const n = inp.value.length; inp.setSelectionRange(n, n); } catch (err) {}
+    });
+  });
 }
 function submitChangePw() {
   const oldPw = (document.getElementById("chpwOld") || {}).value || "";
@@ -2572,6 +2593,7 @@ function enterApp() {
     if (chpwCancel) chpwCancel.onclick = closeChangePw;
     const chpwGo = document.getElementById("chpwGo");
     if (chpwGo) chpwGo.onclick = submitChangePw;
+    bindPwEyes();   // 「显示密码」眼睛按钮（改密弹层三个框）
     setInterval(pollRemoteChanges, 4000);   // 每 4 秒检查他人改动（同 WPS 在线协同）
   });
 }

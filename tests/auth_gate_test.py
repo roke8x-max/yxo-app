@@ -10,6 +10,7 @@ docs/superpowers/specs/2026-09-21-permission-rbac-module-design.md
 """
 import json
 import os
+import re
 import sqlite3
 import sys
 
@@ -1002,3 +1003,27 @@ def test_admin_reset_random_password_can_login(client):
     pw = r.get_json().get("password")
     assert pw and len(pw) >= 12
     assert _login(c, MGR, pw).status_code == 200
+
+
+# ---------------- 任务 02：后台弹窗 / 密码 8 位 / 显示密码（2026-10-26） ----------------
+
+def test_admin_hidden_has_important():
+    """admin.html 的 .hidden 必须带 !important，否则 .modal-mask 会覆盖 → 弹窗常显且关不掉。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "templates", "admin.html"), encoding="utf-8").read()
+    m = re.search(r"\.hidden\s*\{[^}]*display\s*:\s*none\s*!important", src)
+    assert m, "admin.html 的 .hidden 必须带 !important"
+
+
+def test_password_min_length_rejects_7():
+    """7 位必须拒。"""
+    from auth import service
+    ok, msg = service.password_strength("Abc1234")
+    assert not ok and "8 位" in msg
+
+
+def test_password_min_length_accepts_8():
+    """8 位且含大小写+数字 → 通过。"""
+    from auth import service
+    ok, _msg = service.password_strength("Abc12345")
+    assert ok

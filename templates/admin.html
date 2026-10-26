@@ -49,7 +49,9 @@
   input { width:100%; }
   pre.logbox { background:#10201a; color:#c9e8dc; padding:12px; border-radius:var(--radius-sm); overflow:auto; max-height:65vh; font-size:12px; line-height:1.5; white-space:pre-wrap; margin:0; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
-  .hidden { display:none; }
+  /* ⚠️ 必须带 !important：本页 .modal-mask 在后方定义 display:flex，
+     特异性相同会覆盖 display:none，导致被 .hidden 遮住的弹窗默认显示且关不掉。 */
+  .hidden { display:none !important; }
   #denied { text-align:center; padding:80px 20px; }
   .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; background:var(--primary-soft); color:var(--primary); font-weight:500; }
   .tr-disabled { opacity:.55; }
@@ -58,6 +60,18 @@
   .modal-card h3 { margin:0 0 6px; font-size:15px; color:var(--title); }
   .modal-card label { display:block; margin:10px 0 4px; font-size:13px; color:var(--text-secondary); }
   .pw-result { margin-top:12px; padding:10px; background:var(--primary-soft); border-radius:var(--radius-sm); word-break:break-all; }
+  /* 「显示密码」眼睛按钮（2026-10-26）；后台不引 style.css，故此处单列一份 */
+  .pw-wrap { position: relative; display: block; }
+  .pw-wrap input { width: 100%; padding-right: 38px; }
+  .pw-eye {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; padding: 4px 6px; cursor: pointer;
+    font-size: 15px; line-height: 1; opacity: .55; border-radius: 4px;
+  }
+  .pw-eye:hover { opacity: 1; background: rgba(0,0,0,.05); }
+  .pw-eye.on { opacity: 1; }
+  .pw-wrap input[type="password"]::-ms-reveal,
+  .pw-wrap input[type="password"]::-ms-clear { display: none; }   /* 只作用于自绘眼睛的框；登录框保留原生眼睛 */
   @media (max-width:640px){ main{padding:8px;} th,td{padding:5px 6px;font-size:12px;} }
 
   /* 草单机器人配置卡 */
@@ -302,9 +316,17 @@
     <p class="muted" style="margin:4px 0 0">该用户所有在线会话会立即失效。</p>
     <div id="resetInputArea">
       <label>新密码</label>
-      <input id="resetPw" type="password" autocomplete="new-password">
+      <div class="pw-wrap">
+        <input id="resetPw" type="password" autocomplete="new-password">
+        <button type="button" class="pw-eye" data-target="resetPw"
+                title="显示密码" aria-label="显示密码">👁</button>
+      </div>
       <label>确认新密码</label>
-      <input id="resetPw2" type="password" autocomplete="new-password">
+      <div class="pw-wrap">
+        <input id="resetPw2" type="password" autocomplete="new-password">
+        <button type="button" class="pw-eye" data-target="resetPw2"
+                title="显示密码" aria-label="显示密码">👁</button>
+      </div>
       <div id="resetErr" class="muted"></div>
       <div class="row">
         <button id="resetGo" onclick="submitResetPw()">确认重置</button>
@@ -938,6 +960,15 @@ function closeResetPw() {
   document.getElementById("resetPw").value = "";
   document.getElementById("resetPw2").value = "";
   document.getElementById("resetPwOut").textContent = "";
+  // 关弹窗必须复位成圆点，否则明文会残留在界面上
+  ["resetPw", "resetPw2"].forEach((id) => {
+    const el = document.getElementById(id); if (el) el.type = "password";
+    const b = document.querySelector('.pw-eye[data-target="' + id + '"]');
+    if (b) { b.classList.remove("on"); b.title = "显示密码"; }
+  });
+  // 清空选中态：避免弹窗关掉后仍能拿残留的用户名发请求
+  _resetUser = "";
+  _resetSelf = false;
 }
 
 function showResetResult(pw) {
@@ -963,6 +994,11 @@ function handleResetResult(j) {
 }
 
 function submitResetPw() {
+  if (!_resetUser) {
+    const e = document.getElementById("resetErr");
+    if (e) e.textContent = "未选中用户：请先关闭本弹窗，在「用户管理」表格里重新点一次「重置密码」按钮。";
+    return;
+  }
   const p1 = document.getElementById("resetPw").value;
   const p2 = document.getElementById("resetPw2").value;
   const err = document.getElementById("resetErr");
@@ -979,6 +1015,11 @@ function submitResetPw() {
 }
 
 function resetRandomPw() {
+  const err = document.getElementById("resetErr");
+  if (!_resetUser) {
+    if (err) err.textContent = "未选中用户：请先关闭本弹窗，在「用户管理」表格里重新点一次「重置密码」按钮。";
+    return;
+  }
   if (!confirm("确认重置「" + _resetUser + "」的密码？该用户所有在线会话会立即失效。")) return;
   const btn = document.getElementById("resetRandomBtn");
   btn.disabled = true;
@@ -1147,6 +1188,21 @@ function purgeSelected() {
   Promise.all(ids.map(id => api("api/trash/" + id, { method:"DELETE" })))
     .then(() => loadTrash());
 }
+
+// ---------- 「显示密码」眼睛按钮（脚本在 body 末尾，元素已存在） ----------
+document.querySelectorAll(".pw-eye").forEach((btn) => {
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    const inp = document.getElementById(btn.dataset.target);
+    if (!inp) return;
+    const show = inp.type === "password";
+    inp.type = show ? "text" : "password";
+    btn.classList.toggle("on", show);
+    btn.title = show ? "隐藏密码" : "显示密码";
+    inp.focus();
+    try { const n = inp.value.length; inp.setSelectionRange(n, n); } catch (err) {}
+  });
+});
 </script>
 </body>
 </html>
