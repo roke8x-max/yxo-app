@@ -60,6 +60,12 @@ from email.utils import parseaddr, parsedate_to_datetime
 from datetime import datetime
 
 from common_io import atomic_write_json, daemon_loop, to_local_naive
+from core.nummatch import (NUM_AUTO_LEVEL, NUM_AUTO_NO_ROUTE_MSG,
+                           match_record, decide_action,
+                           load_records as _load_records_db)
+
+# 默认开启；设 DRAFT_NUM_RELAX=0 回退到改动前行为（线上回滚用）
+NUM_RELAX_ENABLED = os.environ.get("DRAFT_NUM_RELAX", "1") != "0"
 
 # ---------- 路径自适应（服务器 D:\YXO_DATA / 远程共享） ----------
 # 用 config.py 是否存在判定（不能只看目录：空的残留目录会误判）
@@ -317,42 +323,12 @@ def classify(subject, sender, att_names, body, draft_nums, code_num):
 
 # ---------- 匹配 ----------
 def load_records():
-    rows = []
+    """薄包装：判定逻辑在 core/nummatch.py（零副作用，便于单测）。"""
     try:
-        conn = sqlite3.connect(f"file:{YXO_DB}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        for r in conn.execute('SELECT id, "客户编码", "箱号", "开票子公司名称", "状态" FROM records'):
-            rows.append({
-                "id": r["id"],
-                "code": str(r["客户编码"] or "").strip(),
-                "box": str(r["箱号"] or "").strip(),
-                "company": str(r["开票子公司名称"] or "").strip(),
-                "status": str(r["状态"] or "").strip(),
-            })
-        conn.close()
+        return _load_records_db(YXO_DB)
     except Exception as e:
         log(f"⚠ 只读打开 yxo.db 失败: {e}")
-    return rows
-
-
-def match_record(records, code, num, box):
-    """返回 (level, rec)  level: full/num/box/none"""
-    if code:
-        hits = [r for r in records if r["code"] == code]
-        if hits:
-            return "full", hits[0]
-    if num:
-        hits = [r for r in records if r["code"].startswith("CQWLJT") and
-                CODE_NUM_RE.match(r["code"]) and CODE_NUM_RE.match(r["code"]).group(1) == num]
-        if hits:
-            return "num", hits[0]
-    if box:
-        hits = [r for r in records if r["box"] == box]
-        if len(hits) == 1:
-            return "box", hits[0]
-        if len(hits) > 1:
-            return "box_multi", hits[0]
-    return "none", None
+        return []
 
 
 def load_dsk_routing():
@@ -683,21 +659,19 @@ def run():
         cat = classify(it["subject"], it["sender"], it["atts"], it["body"], draft_nums, num)
         if cat in ("A", "B") and num:
             draft_nums.add(num)
-        level, rec = match_record(records, code, num, box)
+        level, rec = match_record(records, code, num, box, NUM_RELAX_ENABLED)
         if it["sender"] and it["sender"] not in known:
             new_senders.add(it["sender"])
         company = rec["company"] if rec else None
         to_list, cc_list, route_src = resolve_recipients(box, company, default_map, box_map)
         # ── 退舱跳过（2026-08-03）：状态=退舱的记录不再转发相关邮件 ──
-        if (rec is not None and rec.get("status") == "退舱") or (box and is_box_cancelled(box)):
-            log(f"  ⏭ 退舱跳过: {it.get('subject', '')[:40]} (箱号 {box or (rec.get('box', '') if rec else '')})")
-            action = "cancel"
-        else:
-            # 动作决策
-            if cat in ("C2", "W"):
-                action = "record"
-            elif cat in ("A", "B", "C1"):
-                action = "forward" if (level == "full" and to_list) else "pending"
+        box_cancelled = is_box_cancelled(box) if box else False
+        action = decide_action(
+            cat, level, to_list,
+            rec.get("status") if rec else "", box_cancelled)
+        if action == "cancel":
+            log(f"  ⏭ 退舱跳过: {it.get('subject', '')[:40]} "
+                f"(箱号 {box or (rec.get('box', '') if rec else '')})")
         plan.append({
             **{k: it[k] for k in ("mailbox", "message_id", "subject", "sender", "date", "atts", "boxes_seen")},
             "code": code, "num": num, "box": box, "category": cat,
@@ -818,6 +792,8 @@ def run():
     #   LIVE: 全部 pending 入队+通知负责同事
     #   TEST: 仅 PENDING_SIM 指定的人各挑一封模拟（供演示确认流程, 不占正式队列语义）
     def _pending_reason(p):
+        if p["level"] == NUM_AUTO_LEVEL:
+            return NUM_AUTO_NO_ROUTE_MSG
         if p["level"] == "num":
             return (f"客编数字段命中但完整客编不同（库里可能到站字母未更新）: "
                     f"邮件={p['code'] or '-'}")
