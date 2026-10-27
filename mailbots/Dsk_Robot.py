@@ -46,6 +46,7 @@ from config import (
     BOT_LOG_DIR,
     company_to_name,
     sender_for_company,
+    YXO_DB_PATH,
 )
 from cs_bot import wecom_api
 
@@ -54,6 +55,14 @@ import dedup_store
 
 # 退舱跳过（2026-08-03）：状态=退舱的记录不再转发相关邮件
 from db_write import is_box_cancelled, get_conn
+
+# 路由判定（纯模块，2026-10-27）：箱号+班列号组合键 + 告警
+from core.dskroute import (
+    extract_train, extract_boxes_from_text, load_index, resolve, decide,
+    plan_email, alert_names,
+    LV_TRAIN_BOX, LV_BOX_ONLY, LV_MULTI, LV_MISS,
+    ACTION_FORWARD, ACTION_ALERT,
+)
 
 # ==================== DSK 常量 ====================
 DSK_IMAP_SERVER = "imap.qiye.aliyun.com"
@@ -110,6 +119,50 @@ def log(msg):
     except Exception:
         pass
     print(line)
+
+
+# ── 路由告警（2026-10-27）：判定无法唯一确定 / 无法解析时通知「相关公司负责人 + 毛骁洋」，并落文件 ──
+ROUTE_ALERT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "data", "route_alerts.jsonl")
+ROUTE_ALERT_ALWAYS = ("毛骁洋",)      # 始终抄送（他自己也负责太平洋 / 港九港铁）
+
+
+def route_alert(kind, subject, box_no, detail, companies=None):
+    """通知「候选公司的负责人 + ROUTE_ALERT_ALWAYS」，并把结果落 data/route_alerts.jsonl。
+
+    companies: 候选记录的「开票子公司名称」列表；拿不到公司时传 None（只发 ALWAYS）。
+    任何异常都吞掉 —— 告警失败绝不能影响转发主流程。
+    """
+    names = alert_names(companies, company_to_name, ROUTE_ALERT_ALWAYS)
+    notify = {}
+    for name in names:
+        try:
+            text = ("⚠️ DSK 路由无法确定，需人工处理\n"
+                    f"原因：{kind}\n箱号：{box_no or '未知'}\n"
+                    f"主题：{subject[:80]}\n{detail}")
+            ok, ch = wecom_api.notify_by_name(name, text)
+            notify[name] = "ok" if ok else "fail"
+            log(f"     📲 路由告警 → {name}: {'成功(' + ch + ')' if ok else '失败'}")
+        except Exception as e:
+            notify[name] = "error"
+            log(f"     ⚠ 路由告警通知失败({name}): {e}")
+
+    try:
+        rec = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "robot": "DSK",
+            "kind": kind,
+            "box": box_no,
+            "subject": subject,
+            "detail": detail,
+            "companies": list(companies or []),
+            "notify": notify,
+        }
+        os.makedirs(os.path.dirname(ROUTE_ALERT_FILE), exist_ok=True)
+        with open(ROUTE_ALERT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log(f"     ⚠ 写路由告警文件失败: {e}")
 
 
 def decode_subject(msg):
@@ -503,6 +556,14 @@ def run_dsk_robot():
         # yxo.db 直读后写本地缓存
         save_dsk_config_cache(box_company, box_customer_code, default_map, box_record_map, box_config_ids, {})
 
+    # ── B2. 箱号索引（过滤软删；箱号+班列号组合键）──
+    try:
+        by_box_train, by_box = load_index(YXO_DB_PATH)
+        log(f"  箱号索引: 组合键 {len(by_box_train)} 个, 箱号 {len(by_box)} 个（已过滤软删）")
+    except Exception as e:
+        log(f"  ❌ 构建箱号索引失败: {e} — 本轮不转发（避免按旧映射取错公司）")
+        return 0
+
     # ── C. 去重指纹：本地 SQLite 点查（2026-07-31 芙蕾雅 P1 改造）──
     # 改造前：每次运行都 fs.get_all_records(TABLE_DSK_LOG) 拉整张飞书日志表，
     #         该表从不清理 → 两年后越拉越慢（这是「每次转发都全表搜索」的真实来源）。
@@ -587,8 +648,16 @@ def run_dsk_robot():
 
                 # --- 提取容器表格 ---
                 soup, container_rows, _ = extract_container_table(html_body)
+                mail_train = extract_train(subject)
+
                 if not container_rows:
-                    log(f"  ⏭ [{subject}] — 正文中未找到箱号表格")
+                    # 从附件名兜底提取箱号，仅用于告警文案（帮助人工定位）
+                    att_boxes = extract_boxes_from_text(
+                        " ".join(fn for _, fn in attachments))
+                    detail = ("正文中未找到箱号表格；班列 " + (mail_train or "未知")
+                              + "；附件名中的箱号 " + (", ".join(att_boxes) or "无"))
+                    log(f"  ⚠ [{subject}] {detail} — 不转发，已告警")
+                    route_alert("no_table", subject, ",".join(att_boxes), detail)
                     if not TEST_MODE:
                         mail_conn.store(m_id, '+FLAGS', '\\Seen')
                     total_skipped += 1
@@ -597,29 +666,40 @@ def run_dsk_robot():
                 box_list = [c[0] for c in container_rows]
                 log(f"  📧 [{subject}] 箱号: {box_list}")
 
-                # --- 路由预检：所有箱号必须可路由，否则整封跳过 ---
-                unresolved_box = None
-                unresolved_company = None
-                for box_no, assoc_code, _ in container_rows:
-                    tmp_company = box_company.get(box_no)
-                    tmp_to, _, _ = resolve_recipients(
-                        box_no, tmp_company, company_map, default_map, box_record_map
-                    )
-                    if not tmp_to:
-                        unresolved_box = box_no
-                        unresolved_company = tmp_company
-                        break
-                if unresolved_box:
-                    log(f"  ⏭ [{subject}] 箱号 {unresolved_box} "
-                        f"(公司: {unresolved_company or '未知'}) 无路由配置(DEFAULT行), "
-                        f"整封邮件跳过")
+                # --- 整封预检：任一箱不可确定 → 告警、整封不转发 ---
+                plans, blocked = plan_email(
+                    by_box_train, by_box,
+                    [(b, a) for b, a, _ in container_rows],
+                    mail_train,
+                    lambda b, comp: resolve_recipients(
+                        b, comp, company_map, default_map, box_record_map)[0],
+                )
+
+                if blocked:
+                    box_no, level, msg, cands = blocked
+                    detail = (f"班列 {mail_train or '无'}；{msg}；候选项: "
+                              + ("; ".join("%s/%s/%s" % (c["train"], c["company"], c["status"])
+                                           for c in cands) or "无"))
+                    log(f"  ⚠ [{subject}] 箱号 {box_no} 路由无法确定（{level}）— 整封不转发")
+                    route_alert(level, subject, box_no, detail,
+                                [c["company"] for c in cands])
                     total_skipped += 1
+                    if not TEST_MODE:
+                        mail_conn.store(m_id, '+FLAGS', '\\Seen')
                     continue
 
+                if mail_train:
+                    log(f"  🚄 班列: {mail_train}")
+                for p in plans:
+                    if p["level"] == LV_BOX_ONLY:
+                        log(f"     ⚠ [{p['box']}] 按箱号唯一命中兜底（班列 {mail_train or '无'}）")
+
                 # --- 按箱号拆分转发 ---
-                for box_no, assoc_code, _ in container_rows:
-                    company = box_company.get(box_no)
-                    customer_code = box_customer_code.get(box_no, "")
+                for p in plans:
+                    box_no = p["box"]
+                    assoc_code = p["assoc"]
+                    company = p["rec"]["company"]
+                    customer_code = p["rec"]["code"]
 
                     # ── 退舱跳过（2026-08-03）：状态=退舱的箱号不再转发相关邮件 ──
                     if is_box_cancelled(box_no):
