@@ -38,6 +38,7 @@ from config import (
     ACCOUNTS,
     company_to_name,
     sender_for_company,
+    YXO_DB_PATH,
 )
 from cs_bot import wecom_api
 
@@ -46,6 +47,13 @@ import dedup_store
 
 # 退舱跳过（2026-08-03）：状态=退舱的记录不再转发相关邮件
 from db_write import is_box_cancelled, get_conn
+
+# 路由判定（纯模块，2026-10-27）：客编+箱号组合键，避免箱号复用取错公司
+from core.atbroute import (
+    extract_code, extract_train, load_index, resolve, decide, alert_names,
+    LV_CODE_BOX, LV_BOX_ONLY, LV_MULTI, LV_MISS,
+    ACTION_FORWARD, ACTION_ALERT,
+)
 
 # ==================== ATB 常量 ====================
 ATB_IMAP_SERVER = "imap.qiye.aliyun.com"
@@ -104,6 +112,51 @@ def log(msg):
     except Exception:
         pass
     print(line)
+
+
+# ── 路由告警（2026-10-27）：判定无法唯一确定时通知「相关公司负责人 + 毛骁洋」，并落文件 ──
+ROUTE_ALERT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "data", "route_alerts.jsonl")
+ROUTE_ALERT_ALWAYS = ("毛骁洋",)      # 始终抄送（他自己也负责太平洋 / 港九港铁）
+
+
+def route_alert(kind, subject, box_no, detail, companies=None):
+    """通知「候选公司的负责人 + ROUTE_ALERT_ALWAYS」，并把结果落 data/route_alerts.jsonl。
+
+    companies: 候选记录的「开票子公司名称」列表；拿不到公司时传 None（只发 ALWAYS）。
+    任何异常都吞掉 —— 告警失败绝不能影响转发主流程。
+    """
+    names = alert_names(companies, company_to_name, ROUTE_ALERT_ALWAYS)
+    notify = {}
+    for name in names:
+        try:
+            text = ("⚠️ ATB 路由无法确定，需人工处理\n"
+                    f"原因：{kind}\n箱号：{box_no or '未知'}\n"
+                    f"主题：{subject[:80]}\n{detail}")
+            ok, ch = wecom_api.notify_by_name(name, text)
+            notify[name] = "ok" if ok else "fail"
+            log(f"     📲 路由告警 → {name}: {'成功(' + ch + ')' if ok else '失败'}")
+        except Exception as e:
+            notify[name] = "error"
+            log(f"     ⚠ 路由告警通知失败({name}): {e}")
+
+    # 落文件放在通知之后，把 notify 结果一起记下来（发失败了也能查）
+    try:
+        rec = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "robot": "ATB",
+            "kind": kind,
+            "box": box_no,
+            "subject": subject,
+            "detail": detail,
+            "companies": list(companies or []),
+            "notify": notify,
+        }
+        os.makedirs(os.path.dirname(ROUTE_ALERT_FILE), exist_ok=True)
+        with open(ROUTE_ALERT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log(f"     ⚠ 写路由告警文件失败: {e}")
 
 
 def decode_subject(msg):
@@ -474,6 +527,14 @@ def run_atb_robot():
         # yxo.db 直读后写本地缓存
         save_dsk_config_cache(box_company, box_customer_code, default_map, box_record_map, box_config_ids, {})
 
+    # ── B2. 箱号索引（过滤软删；客编+箱号组合键）──
+    try:
+        by_code_box, by_box = load_index(YXO_DB_PATH)
+        log(f"  箱号索引: 组合键 {len(by_code_box)} 个, 箱号 {len(by_box)} 个（已过滤软删）")
+    except Exception as e:
+        log(f"  ❌ 构建箱号索引失败: {e} — 本轮不转发（避免按旧映射取错公司）")
+        return 0
+
     # ── C. 去重指纹：本地 SQLite 点查（2026-07-31 芙蕾雅 P1 改造）──
     # 改造前：每次运行都 fs.get_all_records(TABLE_DSK_LOG) 拉整张飞书日志表，
     #         且每转发一封就把整个集合重写一遍 atb_forwarded.json，双重低效。
@@ -569,11 +630,32 @@ def run_atb_robot():
                 box_list = [b[0] for b in boxes]
                 log(f"  📧 [{subject}] 箱号: {box_list}")
 
-                # --- 按箱号转发 ---
+                # --- 按箱号转发（客编+箱号组合键判定）---
+                mail_code = extract_code(subject)
+                mail_train = extract_train(subject)
+                if mail_code:
+                    log(f"     客编: {mail_code}"
+                        + (f" | 班列: {mail_train}" if mail_train else ""))
+
                 skip_email = False
                 for box_no, extra_info in boxes:
-                    company = box_company.get(box_no)
-                    customer_code = box_customer_code.get(box_no, "")
+                    level, rec, cands = resolve(by_code_box, by_box, mail_code, box_no)
+                    action = decide(level)
+
+                    if action == ACTION_ALERT:
+                        detail = (f"候选项 {len(cands)} 条: "
+                                  + "; ".join("%s/%s/%s" % (c["train"], c["company"], c["status"])
+                                              for c in cands))
+                        log(f"     ⚠ [{box_no}] 路由无法确定（{level}），不转发：{detail}")
+                        route_alert(level, subject, box_no, detail,
+                                    [c["company"] for c in cands])
+                        total_skipped += 1
+                        continue
+
+                    company = rec["company"]
+                    customer_code = rec["code"] or mail_code
+                    if level == LV_BOX_ONLY:
+                        log(f"     ⚠ [{box_no}] 主题无客编，按箱号唯一命中（{company}）")
 
                     # ── 退舱跳过（2026-08-03）：状态=退舱的箱号不再转发相关邮件 ──
                     if is_box_cancelled(box_no):
@@ -584,20 +666,20 @@ def run_atb_robot():
                     if TEST_MODE:
                         to_list = split_emails(TEST_TO)
                         cc_list = []
-                        src = "测试模式"
+                        src = "测试模式" if level == LV_CODE_BOX else "测试模式(箱号回退)"
                     else:
                         to_list, cc_list, src = resolve_recipients(
                             box_no, company, default_map, box_record_map
                         )
+                        src = "%s/%s" % (src, level)          # 例：DEFAULT回退/code_box
 
                     if not to_list:
-                        log(f"  ⏭ [{box_no}] — 公司 '{company or '未知'}' 无路由配置(DEFAULT行), 跳过该邮件")
+                        detail = f"公司 '{company or '未知'}' 无 DEFAULT 路由"
+                        log(f"  ⏭ [{box_no}] — {detail}, 跳过该邮件")
+                        route_alert("no_default_route", subject, box_no, detail, [company])
                         total_skipped += 1
                         skip_email = True
                         break
-
-                    if not company:
-                        src = "yxo.db无此箱号"
 
                     # 发件人：按箱号所属公司的负责同事发信（收件人看到的是同事邮箱）
                     sen = sender_for_company(company)
@@ -619,7 +701,7 @@ def run_atb_robot():
                             import forward_log
                             forward_log.record(
                                 "ATB", owner=company_to_name(company) or "",
-                                company=company or "", code="",
+                                company=company or "", code=customer_code or "",
                                 box=box_no, subject=subject,
                                 to_list=to_list, sender=s_email, test=TEST_MODE)
                         except Exception:
