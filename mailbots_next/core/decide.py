@@ -42,6 +42,12 @@ def decide_draft(row, routing, records) -> Decision:
         if routing.success and any(r.get("客户编码") == code for r in records):
             return Decision("T1", "forward", "Exact customer code match")
 
+        # T1N: 数字段命中且排除退舱后公司唯一（route_draft 的 num 分支已判过唯一）
+        # 🔴 必须留在 T2/T7 之前：同数字段同箱不同后缀的邮件会先被 T2 截成 pending，
+        #    这正是对齐前 #45 放宽失效的根因。
+        if getattr(routing, "route_source", "") == "num_match" and routing.success:
+            return Decision("T1N", "forward", "Customer code stem match with unique company")
+
         # Stem analysis on the active subset (records are pre-filtered by the
         # scope rule: 状态<>'退舱' AND is_deleted=0)
         stem, suffix = _split_code(code)
