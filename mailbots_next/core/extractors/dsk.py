@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from bs4 import BeautifulSoup
 
 from mailbots_next.config import CONTAINER_RE, COMPANY_ALIAS, OPS_OWNER_EMAIL
+from mailbots_next.core import boxmatch
 from mailbots_next.core.extract import BaseExtractor, ExtractedRow, parse_email
 from mailbots_next.core.log import get_logger
 from mailbots_next.core.notify import get_notifier
@@ -20,6 +21,7 @@ class DSKExtractor(BaseExtractor):
         attachments = parsed["attachments"]
 
         container_rows = self._extract_container_table(html_body)
+        train_no = boxmatch.extract_train_number(subject)
         box_nos = self._extract_box_from_attachments(attachments)
         box_nos.update(self._extract_box_from_subject(subject))
 
@@ -41,6 +43,7 @@ class DSKExtractor(BaseExtractor):
                 customer_code=None,
                 customer_code_num=None,
                 container_no=box_no,
+                train_no=train_no,
             )
             rows.append(row)
 

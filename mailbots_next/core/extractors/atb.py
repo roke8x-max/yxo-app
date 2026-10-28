@@ -39,7 +39,7 @@ class ATBExtractor(BaseExtractor):
             row_idx=0,
             email_type="atb",
             raw_data={**parsed, "subject_box": box_from_subject, "att_box": box_from_attachment},
-            customer_code=None,
+            customer_code=(codes[0] if codes else None),
             customer_code_num=code_num,
             container_no=box_no,
         )
