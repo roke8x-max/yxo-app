@@ -22,17 +22,19 @@ class DSKExtractor(BaseExtractor):
 
         container_rows = self._extract_container_table(html_body)
         train_no = boxmatch.extract_train_number(subject)
-        box_nos = self._extract_box_from_attachments(attachments)
-        box_nos.update(self._extract_box_from_subject(subject))
+
+        if container_rows:
+            # 与老系统同口径：正文表格是权威来源（Dsk_Robot.py:666）
+            box_nos = {row[0] for row in container_rows}
+        else:
+            # 表格缺失时才退回附件名 / 主题
+            box_nos = self._extract_box_from_attachments(attachments)
+            box_nos.update(self._extract_box_from_subject(subject))
 
         if not box_nos:
             return []
 
         sender_type = self._identify_sender(sender)
-        if sender_type == "kasa" and html_body:
-            container_rows = self._extract_container_table(html_body)
-            if container_rows:
-                box_nos = {row[0] for row in container_rows}
 
         rows = []
         for i, box_no in enumerate(sorted(box_nos)):
