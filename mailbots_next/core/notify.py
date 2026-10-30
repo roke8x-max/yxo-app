@@ -18,7 +18,7 @@ _client_unavailable_logged = False
 
 # 程序错误通知折叠（2026-09-21）：短时间内的同类 program_error 只发首条，
 # 窗口结束时补发一条"共 N 次"汇总。日志仍逐条、计数不受影响、不同种类绝不合并。
-_COLLAPSIBLE_TYPES = {"program_error"}
+_COLLAPSIBLE_TYPES = {"program_error", "send_check"}
 _COLLAPSE_MAX_ENTRIES = 500
 _collapse_state: Dict[str, Dict[str, Any]] = {}
 _collapse_lock = threading.Lock()
@@ -316,6 +316,10 @@ class WeComNotifier:
         content = f"⚙️ 配置缺失 [error_id={error_id}]\n{detail}"
         return self.notify("config_missing", [admin_person], content, error_id)
 
+    def send_send_check(self, recipients: List[str], detail: str, error_id: Optional[str] = None) -> bool:
+        content = f"📮 发送自检\n{detail}"
+        return self.notify("send_check", recipients, content, error_id)
+
     def send_digest(self, admin_person: str, counts: Dict[str, int]) -> bool:
         if not counts:
             return True
@@ -328,9 +332,16 @@ class WeComNotifier:
                 f"邮件已正常发给客户，不会重发；"
                 f"但对应的 DSK/ATB 时间戳或运踪记录可能没写上，请按需人工核对。"
             )
+        _LABELS = {
+            "post_send_bookkeeping_failed": "发信后记账失败",
+            "send_check_skip_no_id": "自检跳过(邮件无匹配键)",
+            "send_check_skip_no_sender": "自检跳过(行缺发信账号)",
+            "send_check_failed": "自检抓取失败",
+            "send_check_alerted": "自检告警条数",
+        }
         for k, v in sorted(counts.items()):
-            # R3：可读中文标签（仅该键），其余保持原样
-            label = "发信后记账失败" if k == "post_send_bookkeeping_failed" else k
+            # R3：可读中文标签（键写错就静默显示英文键，所以这里必须用 dict）
+            label = _LABELS.get(k, k)
             lines.append(f"  {label}: {v}")
         content = "\n".join(lines)
         return self.notify("digest", [admin_person], content)

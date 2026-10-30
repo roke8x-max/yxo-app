@@ -174,10 +174,12 @@ def send_smtp(
 
 
 def _record_forward(forward_id, message_id, row, send_ctx, to_list, cc_list,
-                    original_raw, sent_by=""):
+                    original_raw, sent_by="", company="", no_fid=False):
     """成功转发后写 forward_log（仅 is_live 落库）。元数据取自 send_ctx['_meta']；
     sent_by 为本封 SMTP 发信账号（NDR 次键关联用）。row_key 优先取 serve 侧
-    注入的 send_ctx['_row_key']（单一来源），缺失才用 serve_row_key(row) 兜底。"""
+    注入的 send_ctx['_row_key']（单一来源），缺失才用 serve_row_key(row) 兜底。
+    company 供发送后自检按公司找负责人；no_fid=信上没带 X-YXO-Forward-Id
+    ⇒ 该行直接标 SKIP_NO_ID，永远不进核对（否则会被误判成 NONE 报给公司负责人）。"""
     from mailbots_next.core.rowkey import serve_row_key
     if not config.is_live():
         return
@@ -189,6 +191,7 @@ def _record_forward(forward_id, message_id, row, send_ctx, to_list, cc_list,
         int(meta.get("uid", 0) or 0),
         meta.get("subject", ""), meta.get("sender", ""), meta.get("date_hdr", ""),
         original_raw, to_list, cc_list, sent_by,
+        company=company, no_fid=no_fid,
     )
 
 
@@ -497,13 +500,19 @@ def _forward_split(decision, row, routing, original_msg, sender_email: str,
                                mail_from=_envelope_from(sub_fid, sender_email))  # envelope 用 sub_fid
             if not result["success"]:
                 return False, f"SMTP failed: {result.get('error')}"
+            # 自检：信上有没有匹配键，在写库这一刻就判掉（缺头 ⇒ 永远不进核对）
+            part_no_fid = not part["msg"].get("X-YXO-Forward-Id")
             try:
                 _record_forward(sub_fid, message_id, row, send_ctx,
-                                part["to"], part["cc"], original_raw, sender_email)
+                                part["to"], part["cc"], original_raw, sender_email,
+                                company=company, no_fid=part_no_fid)
             except Exception as e:
                 _log.error(f"Post-send bookkeeping failed (mail already sent) | msg={message_id}: {e}")
                 from mailbots_next.core.notify import increment_counter
                 increment_counter("post_send_bookkeeping_failed")
+            if part_no_fid:
+                from mailbots_next.core.notify import increment_counter
+                increment_counter("send_check_skip_no_id")
             return True, "forwarded"
         elif email_type in ("dsk", "atb"):
             company, box = key
@@ -529,16 +538,22 @@ def _forward_split(decision, row, routing, original_msg, sender_email: str,
                                mail_from=_envelope_from(sub_fid, sender_email))  # envelope 用 sub_fid
             if not result["success"]:
                 return False, f"SMTP failed: {result.get('error')}"
+            # 自检：同上，缺头 ⇒ SKIP_NO_ID
+            dsk_no_fid = not msg.get("X-YXO-Forward-Id")
             try:
                 if row.container_no:
                     write_dsk_timestamp(row.container_no, email_type.upper(),
                                         datetime.now().strftime("%m/%d %H:%M"))
                 _record_forward(sub_fid, message_id, row, send_ctx,
-                                to_list, cc_list, original_raw, sender_email)
+                                to_list, cc_list, original_raw, sender_email,
+                                company=company, no_fid=dsk_no_fid)
             except Exception as e:
                 _log.error(f"Post-send bookkeeping failed (mail already sent) | msg={message_id}: {e}")
                 from mailbots_next.core.notify import increment_counter
                 increment_counter("post_send_bookkeeping_failed")
+            if dsk_no_fid:
+                from mailbots_next.core.notify import increment_counter
+                increment_counter("send_check_skip_no_id")
             return True, "forwarded"
         else:
             return False, f"Unsupported split type: {email_type}"
@@ -599,9 +614,11 @@ def execute_action(
         if not result["success"]:
             return False, f"SMTP failed: {result.get('error')}"
         # 邮件已发出：此后任何失败都不得翻转结论，否则重放会导致重复发信
+        single_no_fid = not msg.get("X-YXO-Forward-Id")
         try:
             _record_forward(forward_id, message_id, row, send_ctx,
-                            to_list, cc_list, original_raw, sender_email)
+                            to_list, cc_list, original_raw, sender_email,
+                            company=(routing.company or ""), no_fid=single_no_fid)
             if row.email_type in ("dsk", "atb") and row.container_no:
                 write_dsk_timestamp(row.container_no, row.email_type.upper(),
                                     datetime.now().strftime("%m/%d %H:%M"))
@@ -609,6 +626,9 @@ def execute_action(
             _log.error(f"Post-send bookkeeping failed (mail already sent) | msg={message_id}: {e}")
             from mailbots_next.core.notify import increment_counter
             increment_counter("post_send_bookkeeping_failed")
+        if single_no_fid:
+            from mailbots_next.core.notify import increment_counter
+            increment_counter("send_check_skip_no_id")
         return True, "forwarded"
     except Exception as e:
         _log.error(f"Forward failed for {message_id}: {e}")
