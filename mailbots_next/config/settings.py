@@ -145,3 +145,28 @@ COMPANY_ALIAS = {
 CONTAINER_RE = re.compile(r'^[A-Z]{4}\d{7}$')
 CODE_RE = re.compile(r'CQWLJT[0-9A-Za-z\-]+')
 CODE_NUM_RE = re.compile(r'CQWLJT(\d+)')
+
+# ---- 发送后自检（2026-10-29）----
+# 默认关闭：代码合入、单测通过、真实邮箱不碰；切换验证完再由运维打开。
+SEND_CHECK_ENABLED = os.environ.get("SEND_CHECK_ENABLED", "0") in ("1", "true", "True")
+# 发出去多久之后才核对（秒）。实测到达 QQ 7.9~22s、已发送 <21s，取 120 留 5~15 倍余量。
+SEND_CHECK_DELAY_SEC = int(os.environ.get("SEND_CHECK_DELAY_SEC", "120"))
+# 每轮最多核对多少封（防一次涌入过多把 sweep 拖长）。
+SEND_CHECK_BATCH_MAX = int(os.environ.get("SEND_CHECK_BATCH_MAX", "200"))
+# QQ 侧每个文件夹取「序号尾部 K 封」来比对（腾讯 SEARCH SINCE 无效，只能这样）。
+SEND_CHECK_TAIL_N = int(os.environ.get("SEND_CHECK_TAIL_N", "300"))
+# 阿里「已发送」的 IMAP 文件夹名（UTF-7 编码的「已发送」）
+SENT_FOLDER_UTF7 = os.environ.get("SENT_FOLDER_UTF7", "&XfJT0ZAB-")
+# QQ 旁路邮箱（第二路证据）。凭据从 secrets.json 读，env 优先。
+QQ_VERIFY_IMAP_SERVER = os.environ.get("QQ_VERIFY_IMAP_SERVER", "imap.qq.com")
+QQ_VERIFY_IMAP_PORT = int(os.environ.get("QQ_VERIFY_IMAP_PORT", "993"))
+QQ_VERIFY_USER = os.environ.get("QQ_VERIFY_USER", "")
+QQ_VERIFY_PASSWORD = os.environ.get("QQ_VERIFY_PASSWORD", "")
+# QQ「其他文件夹」的 IMAP 前缀（UTF-7）；其下所有子夹都要查，不写死清单
+QQ_VERIFY_OTHER_ROOT = os.environ.get("QQ_VERIFY_OTHER_ROOT", "&UXZO1mWHTvZZOQ-")
+# QQ 侧必须排除的文件夹（前两个实测 EXAMINE 会报 [CLIENTBUG]）
+QQ_VERIFY_EXCLUDE = ("Sent Messages", "Deleted Messages", "Drafts", "Junk")
+# 「其他文件夹」下要跳过的子夹（按名字最后一段匹配，不含前缀）。
+# 依据：tracing 不纳入核对（洋 2026-10-29 拍板）。动态枚举本来会把它扫进来，
+# 跳过它只是省时间，不影响判定结果（候选集来自 forward_log，tracing 的信永远不在里面）。
+QQ_VERIFY_SKIP_SUBFOLDERS = ("tracing",)

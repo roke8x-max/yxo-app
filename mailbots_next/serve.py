@@ -769,6 +769,8 @@ def _bounce_poll_due(now: float, last_ts: float) -> bool:
 
 def run_sweeper():
     from mailbots_next.config import SWEEP_INTERVAL_SEC
+    # 发送后自检开关（默认 0）。从 settings 直接取，避免扩大 config/__init__ 的导出面。
+    from mailbots_next.config.settings import SEND_CHECK_ENABLED
 
     global _last_bounce_poll_ts
 
@@ -790,6 +792,15 @@ def run_sweeper():
                     _log.error(f"bounce poll tick failed: {e}")
 
         sweep_once()
+
+        # 发送后自检：与 sweep 同节奏（默认 300s），默认关闭。
+        # 函数内 import 避免循环导入；单次异常绝不能把 sweeper 线程打死。
+        if SEND_CHECK_ENABLED:
+            try:
+                from mailbots_next.core.send_check import run_once
+                run_once()
+            except Exception as e:
+                _log.error(f"send_check tick failed: {e}")
 
 
 def flush_and_notify() -> bool:

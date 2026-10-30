@@ -312,16 +312,49 @@ def init_forward_log():
                 conn.commit()
             except Exception:
                 pass  # 列已存在（新库建表时自带）
+            # 发送后自检（任务 08）新增三列。用 PRAGMA 逐列判断而不是「三条 ALTER
+            # 包一个 try 靠事务回滚」：Python sqlite3 默认不为 DDL 开事务，
+            # 中途失败时 rollback() 是空操作（实测），失败后第 1 条 ALTER 会在下次
+            # 启动时直接抛、整段被跳过，第 2/3 列永远补不上。
+            # 这是启动期代码（本函数在模块底部被调用），不许抛异常。
+            try:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(forward_log)")}
+                for _col, _ddl in (
+                    ("company", "ALTER TABLE forward_log ADD COLUMN company TEXT DEFAULT ''"),
+                    ("checked_at", "ALTER TABLE forward_log ADD COLUMN checked_at TEXT DEFAULT ''"),
+                    ("check_result", "ALTER TABLE forward_log ADD COLUMN check_result TEXT DEFAULT ''"),
+                ):
+                    if _col not in cols:
+                        conn.execute(_ddl)
+                conn.commit()
+                # 独立、幂等、可自愈：只标「一天前就存在、且从未核对过」的行。
+                # 不依赖「本次是否加过列」，所以上一次启动半途失败也能在这一次补标。
+                conn.execute(
+                    "UPDATE forward_log SET checked_at=datetime('now'), "
+                    "check_result='SKIP_LEGACY' "
+                    "WHERE checked_at='' AND check_result='' "
+                    "  AND sent_at < datetime('now','-1 day')"
+                )
+                conn.commit()
+            except Exception as _e:
+                conn.rollback()
+                _log.warning(
+                    f"forward_log 迁移未完成（不影响启动，下次启动会重试）: "
+                    f"{type(_e).__name__}: {_e}"
+                )
         finally:
             conn.close()
 
 
 def write_forward_log(forward_id, message_id, row_key, account, folder, uid,
                       subject, sender, date_hdr, raw_bytes, to_list, cc_list,
-                      sent_by=""):
+                      sent_by="", company="", no_fid=False):
     import json
+    from datetime import datetime, timezone
     if not config.is_live():
         return
+    # UTC，与 SQLite datetime('now') 同基准（不要用已弃用的 datetime.utcnow()）。
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with _bot_config_lock:
         conn = get_bot_config_connection()
         try:
@@ -329,12 +362,14 @@ def write_forward_log(forward_id, message_id, row_key, account, folder, uid,
                 "INSERT OR REPLACE INTO forward_log "
                 "(forward_id, message_id, row_key, account, folder, uid, "
                 "subject, sender, date_hdr, raw_hex, to_list, cc_list, sent_by, "
-                "sent_at, bounced) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),0)",
+                "company, checked_at, check_result, sent_at, bounced) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),0)",
                 (forward_id, message_id, row_key, account, folder, uid, subject, sender,
                  date_hdr, raw_bytes.hex() if raw_bytes else "",
                  json.dumps(to_list, ensure_ascii=False),
-                 json.dumps(cc_list, ensure_ascii=False), sent_by))
+                 json.dumps(cc_list, ensure_ascii=False), sent_by, company,
+                 now_str if no_fid else "",
+                 "SKIP_NO_ID" if no_fid else ""))
             conn.commit()
         finally:
             conn.close()
@@ -346,6 +381,43 @@ def get_forward_log(forward_id):
         try:
             row = conn.execute("SELECT * FROM forward_log WHERE forward_id=?", (forward_id,)).fetchone()
             return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def get_pending_checks(delay_sec=120, limit=200):
+    """返回到期待核对的行（dict 列表，按 sent_at 升序）。
+
+    条件：未核对 / 未退信 / 已过延迟窗口。sent_at 与 datetime('now') 都是 UTC，
+    同一基准，不要引入本地时间。
+    """
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            rows = conn.execute(
+                "SELECT forward_id, sent_by, company, subject, to_list, sent_at "
+                "FROM forward_log "
+                "WHERE checked_at = '' AND bounced = 0 "
+                "  AND sent_at <= datetime('now', ?) "
+                "ORDER BY sent_at LIMIT ?",
+                (f"-{int(delay_sec)} seconds", int(limit)),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+def mark_check_result(forward_id, result):
+    """写核对结论（幂等；再次调用会覆盖）。result 取值见 send_check.RESULT_*。"""
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            conn.execute(
+                "UPDATE forward_log SET checked_at=datetime('now'), check_result=? "
+                "WHERE forward_id=?",
+                (result, forward_id),
+            )
+            conn.commit()
         finally:
             conn.close()
 
