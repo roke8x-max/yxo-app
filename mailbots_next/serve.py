@@ -335,9 +335,25 @@ class MailProcessor:
         import re
 
         sender_lower = sender.lower() if sender else ""
+        subject = subject or ""
 
         for route in TYPE_ROUTES:
+            # 停用的规则整条跳过（现有 5 条均为 enabled: True，行为不变）
+            if not route.get("enabled", True):
+                continue
+
             match = route["match"]
+
+            # 主题必须包含 / 必须不含（仅新规则配置了这两个键，
+            # 现有 5 条没有 ⇒ match.get() 恒为 None ⇒ 行为 100% 不变）
+            subject_pattern = match.get("subject_pattern")
+            if subject_pattern and not re.search(subject_pattern, subject):
+                continue
+
+            subject_exclude = match.get("subject_exclude")
+            if subject_exclude and re.search(subject_exclude, subject):
+                continue
+
             if "sender_whitelist" in match:
                 for wl in match["sender_whitelist"]:
                     if wl.lower() in sender_lower:

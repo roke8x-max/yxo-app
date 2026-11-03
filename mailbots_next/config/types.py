@@ -10,6 +10,9 @@ class EmailType(str, Enum):
     TRACING = "tracing"
     DSK = "dsk"
     ATB = "atb"
+    RELEASE = "release"
+    RELEASE_CANCEL = "release_cancel"
+    RETBOX = "retbox"
 
 
 class DraftCategory(StrEnum):
@@ -29,6 +32,9 @@ EXTRACTION_KEYS: Dict[EmailType, List[str]] = {
     EmailType.TRACING: ["train_no", "container_no"],
     EmailType.DSK: ["container_no"],
     EmailType.ATB: ["container_no"],
+    EmailType.RELEASE: ["customer_code", "release_no", "code_no"],
+    EmailType.RELEASE_CANCEL: ["customer_code", "release_no", "code_no"],
+    EmailType.RETBOX: ["customer_code", "container_no", "train_no"],
 }
 
 TYPE_ROUTES = [
@@ -79,6 +85,49 @@ TYPE_ROUTES = [
             ],
         },
     },
+]
+
+# ---------------------------------------------------------------------------
+# 放箱令 / 取消放箱令 / 还箱令 —— 第一阶段只做识别与提取，规则**停用**合入。
+# `enabled: False` 时 _identify_type() 直接跳过，现有 5 类行为完全不变。
+# 必须插到列表最前面：_identify_type() 是按列表顺序遍历、命中即停，
+# 而「取消放箱令」的主题同样含「放箱」，排在 release 之后会被它先吃掉。
+# priority 运行时无人读取，但 tests/test_core.py 会断言整体升序，故必须带 5/6/7。
+# ---------------------------------------------------------------------------
+_TYPE_ROUTES_NEW = [
+    {
+        "type": EmailType.RELEASE_CANCEL,
+        "enabled": False,
+        "priority": 5,
+        "match": {
+            "sender_whitelist": ["shidong@yxologistics.com"],
+            "subject_pattern": r"取消放箱令",
+        },
+    },
+    {
+        "type": EmailType.RELEASE,
+        "enabled": False,
+        "priority": 6,
+        "match": {
+            "sender_whitelist": ["shidong@yxologistics.com"],
+            "subject_pattern": r"放箱",
+            "subject_exclude": r"取消",
+        },
+    },
+    {
+        "type": EmailType.RETBOX,
+        "enabled": False,
+        "priority": 7,
+        "match": {
+            "sender_whitelist": ["luohua@yxologistics.com", "735274962@qq.com"],
+            "subject_pattern": r"还箱令",
+        },
+    },
+]
+
+TYPE_ROUTES = _TYPE_ROUTES_NEW + [
+    r for r in TYPE_ROUTES
+    if r["type"] not in (EmailType.RELEASE, EmailType.RELEASE_CANCEL, EmailType.RETBOX)
 ]
 
 # 需要"留人工"的草单分类：不自动转发、不进错误队列、不标已读。

@@ -53,6 +53,15 @@ def get_extractor(email_type) -> BaseExtractor:
     elif email_type == EmailType.ATB:
         from .extractors.atb import ATBExtractor
         return ATBExtractor()
+    elif email_type == EmailType.RELEASE:
+        from .extractors.release import ReleaseExtractor
+        return ReleaseExtractor()
+    elif email_type == EmailType.RELEASE_CANCEL:
+        from .extractors.release import ReleaseExtractor
+        return ReleaseExtractor()
+    elif email_type == EmailType.RETBOX:
+        from .extractors.retbox import RetboxExtractor
+        return RetboxExtractor()
     else:
         raise ValueError(f"No extractor for type {email_type}")
 

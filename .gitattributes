@@ -13,3 +13,8 @@ scripts/hooks/* text eol=lf
 # PowerShell / 批处理脚本在 Windows 上用 CRLF 最稳
 *.ps1 text eol=crlf
 *.bat text eol=crlf
+
+# 邮件原文是「字节即事实」的样本：提取测试的断言建立在它的精确内容上，
+# 换行被 git 往返转换会让同一封邮件在不同平台解析出不同结果。
+# 交叉验证时也靠 md5 比对交付包与仓库，转换会直接让比对失效。
+*.eml -text
