@@ -1,0 +1,60 @@
+X-Alimail-AntiSpam: =?utf-8?q?AC=3DCONTINUE=3BBC=3D0=2E08467191=7C-1=3BCH=3D?=
+ =?utf-8?q?green=3BDM=3D=7CCONTINUE=7Cfalse=7C=3BDS=3DCONTINUE=7Cham=5Fsocia?=
+ =?utf-8?q?l=7C0=2E163966-0=2E00232005-0=2E833714=3BFP=3D32913581122389118?=
+ =?utf-8?q?=7C9=7C1=7C1=7C0=7C-1=7C-1=7C-1=3BHT=3Dmaildocker-contentspam0330?=
+ =?utf-8?b?MzcwMjExMzA7TUY9NzM1Mjc0OTYyQHFxLmNvbTtOTT0xO1BIPURNO1JOPTQ7UlQ9?=
+ =?utf-8?q?4=3BSC=3D80=3BSR=3D1=3BTI=3DMTA=5F---=2EhHLpt6s=5F1776820963=3B?=
+Received: from xmbg7.mail.qq.com(mailfrom:735274962@qq.com ip:101.91.43.105)
+          by mx1.aliyun-inc.com;
+          Wed, 22 Apr 2026 09:22:44 +0800
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=qq.com; s=s201512;
+	t=1776820963; bh=380lKb7SDB2Nf/tjx7s1yocT6GqjnBno3fNxEmSr+bA=;
+	h=From:To:Subject:Date;
+	b=zSPeGMottSwhZ/BOlhedjXIjIHT7S3BdP9XkGM2jchHkLi5RdaY1BnpM8lGcYbMd2
+	 NSNkCV+ZnRjEVjA0iF/HtwkF8bptI06qkxKGvd9wSqhQH9YLkxyluyq+gvnmKEQzDI
+	 cENJRskisVsC78MnzKM1rgyy88Ib6d4hm96Xnen4=
+Received: from localhost ([110.43.67.134])
+	by newxmesmtplogicsvrszb51-1.qq.com (NewEsmtp) with SMTP
+	id 5A9292AF; Wed, 22 Apr 2026 09:22:41 +0800
+X-QQ-mid: xmsmtpt1776820961tkwgkwxql
+Message-ID: <tencent_7146954B6CF0E9D46DDE192E30356B85B10A@qq.com>
+X-QQ-XMAILINFO: NzvgoOffVB4j1mWr0ysDTpA8Lu7GZUNnhcqyKDwZPRfrXgTc1Ysy4XR3df/uBc
+	 XHL1S6urKl7if7TPjbR8oDWvMrXl6+WPwMcoJ7FHjmMhthumvb7e7EiYRSz5hF0Dp3r1SUfjZf7b
+	 6MVpSSHrQcU1VXsz+6Tmrn0dB+GwUVByjXgm27KMbSZJ70s2Jo58rcOL+fOq+UyZALMh4Z4jEV4j
+	 S9Rv4k3yPjQqWa59Pg/a0BV0UJGdiHVQZDM1nOjk0crqSjCQFs4EPcCQvkYz/N8Lr1rc75xZwQY9
+	 ZONQT+WCLm/aZS3syKjBRcJwL1UYiHV+qMzps8BFdhtljHzPqgq+w5DaxrI2858F5nlIqGKwErA7
+	 P2a/2uyB3a4ZmeKWKFxtAjZoOJodF7qnhieDenzzz/ErvXUR8pA4VFk4qBbhHH5GqcN0VBpZ8y3j
+	 w1tTrRbWd/CNcLGKVfiVPXNVbWOX+njA6WJjE1JRIWUvyk/DBFbQsVJ5MaKwMt2CxX1V6354gQIW
+	 h1VPYF1gKksXog1jEB65Fxmq15FrlpQxULW3LrVcqquTAwIIe5qB7PCg4u7erIbQQfPsKr5lVTR/
+	 vDB4Sh/piSjIwMxygaTwg1bOmu2Z3ROpQskKj3Ksl0BQ26eOJOXzjZNG8TnOmsz7s1DLpsYvK8AP
+	 9btbRtuVx/DL7vMTqpX/U8ktIAloUgRaBF+Gy4h/oziHUousq6Yb192o0PF0QKon4U4oD1hdf7Ad
+	 PpyIEIDpS7DRu9k9t6UUy458mos86r6O8VYNWOLqOIDlkdNidOc/ZIbzLQNWIdf71luOlLqREsAH
+	 vcfft8jFOaxlyHhDro9cuvCkCz6hVRLQX9CqxRR2N2IiQ6caNbjNQqo6sHDO26VdEz78sA8UMgZ3
+	 EWoHH9uCzrl0tqmegzTWlXCiZF3p5KAgEv5jNwbPreXSL6dNLHv8dbH3iMqjHNFrbyaJCP/oXceE
+	 JjoxIX7pQqpP/dpEFSEJ9RIQpnmNm7GY3sVTJL+a1PEgVJs4aNFV6o6uYsS2nq5CyvhYsaXEr7s4
+	 cabJmDmZYnNdw10hiigG6oPnqlRn+KfdBu2Jeona9ECFrb8lSRRuX1kbPbVpnqwyD2NH0DVQiUCG
+	 kgCVvd0NwCbHl18HjY5TCo4HGPMy7liSONQYqMbfwIdqqnXy4ZkmS+jT837/PoIIJALsmb
+X-QQ-XMRINFO: MPJ6Tf5t3I/ylTmHUqvI8+Wpn+Gzalws3A==
+MIME-Version: 1.0
+From: "YXOJUDY" <735274962@qq.com>
+To: <maoxiaoyang@cqtransit.com>, <yangyawen@cqtransit.com>,
+ <fengqian@cqtransit.com>, <hanwenhao@cqtransit.com>
+Subject: =?UTF-8?Q?YXO-2026-327_=E8=BF=98=E7=AE=B1=E4=BB=A4?=
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+Date: Wed, 22 Apr 2026 09:22:41 +0800
+
+<p>Hi all=EF=BC=8C</p><p>CQWLJT260402010-DMZ&nbsp;TBJU7482194&nbsp;YXO-2026=
+-327 =E8=BF=98=E7=AE=B1=E4=BB=A4=E4=B8=BA=EF=BC=9A327=E7=8F=AD=E4=B8=AD=E9=
+=93=81=E6=9F=9C=E8=BF=98=E7=AE=B1=E4=BB=A4=D0=A0=D0=B5=D0=BB=D0=B8=D0=B7=C2=
+=A0=D0=BF=D1=80=D0=B8=D0=B5=D0=BC=D0=B0_=D0=9A=D1=83=D0=BF=D0=B0=D0=B2=D0=
+=BD=D0=B0_6=EF=BC=8C=E7=82=B9=E5=87=BB=E9=93=BE=E6=8E=A5=E4=B8=8B=E8=BD=BD=
+=EF=BC=8C=E9=93=BE=E6=8E=A5=E5=9C=B0=E5=9D=80=EF=BC=9Ahttps://365.kdocs.cn/=
+folder/coCfRLteOihh<br>=E9=93=BE=E6=8E=A5=E4=B8=AD=E7=9A=84=E8=BF=98=E7=AE=
+=B1=E4=BB=A4=EF=BC=8C=E4=B8=80=E4=B8=AA=E6=9C=88=E5=90=8E=E5=88=A0=E9=99=A4=
+=EF=BC=8C=E8=AF=B7=E5=8F=8A=E6=97=B6=E4=B8=8B=E8=BD=BD=E3=80=82=E8=BF=98=E7=
+=AE=B1=E5=90=8E=EF=BC=8C=E5=8F=91=E9=80=81=E8=BF=98=E7=AE=B1=E5=87=AD=E8=AF=
+=81=E5=88=B0 luohua@yxologistics.com=EF=BC=8C=E8=87=AA=E8=A1=8C=E6=A0=B9=E6=
+=8D=AE=E7=B3=BB=E7=BB=9F=E5=88=B0=E7=AB=99=E6=97=B6=E9=97=B4=E5=92=8C=E8=BF=
+=98=E7=AE=B1=E6=97=B6=E9=97=B4=EF=BC=8C=E6=8F=90=E5=89=8D=E6=94=B6=E5=8F=96=
+=E8=B6=85=E6=9C=9F=E7=94=A8=E7=AE=B1=E8=B4=B9=E3=80=82</p>

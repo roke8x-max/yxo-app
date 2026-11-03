@@ -156,7 +156,7 @@ class TestConfigProvider:
         snap = snapshot()
         assert snap.mode in ("test", "live")
         assert isinstance(snap.type_routes, list)
-        assert len(snap.type_routes) == 5
+        assert len(snap.type_routes) == 8
         assert isinstance(snap.enabled_types, dict)
         assert "accounts" in snap.__dict__
 
@@ -166,9 +166,10 @@ class TestConfigProvider:
 
     def test_enabled_types_defaults(self):
         enabled = get_enabled_types()
+        NEW_TYPES = {"release", "release_cancel", "retbox"}   # 第一阶段先停用
         for t in EmailType:
             assert t.value in enabled
-            assert enabled[t.value] is True
+            assert enabled[t.value] is (t.value not in NEW_TYPES)
 
     def test_get_type_route(self):
         route = get_type_route("draft")
