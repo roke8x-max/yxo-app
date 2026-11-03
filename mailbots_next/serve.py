@@ -417,6 +417,13 @@ class MailProcessor:
         decision = decide(email_type, row, routing, self.records)
         _log.log_decide(message_id, row.row_idx, decision.tier, decision.action, decision.reason)
 
+        # 阶段二：聚合器未实现，专列先不动作（类型仍 enabled=False，不会有真信走到这里）
+        if decision.action == "pool":
+            _log.info(f"POOL_DEFERRED_TO_STAGE3 | msg={message_id[:50]} | "
+                      f"company={routing.company} train={getattr(row, 'train_no', '')}")
+            increment_counter("pool_deferred")
+            return "skipped"
+
         sender_info = None
         if routing.responsible_person:
             sender_info = get_sender_by_email(routing.responsible_person)

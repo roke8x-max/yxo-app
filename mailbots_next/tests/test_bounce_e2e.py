@@ -70,7 +70,7 @@ def _e2e_dbs(monkeypatch, tmp_path):
         conn.execute(
             "CREATE TABLE records (id INTEGER PRIMARY KEY, "
             "\u5ba2\u6237\u7f16\u7801 TEXT, \u7bb1\u53f7 TEXT, \u73ed\u5217\u53f7 TEXT, \u76ee\u7684\u7ad9 TEXT, \u5f00\u7968\u5b50\u516c\u53f8\u540d\u79f0 TEXT, \u672c\u5730\u8d27\u6e90\u516c\u53f8 TEXT, "
-            "\u72b6\u6001 TEXT, is_deleted INTEGER, dsk TEXT, ATB TEXT)"
+            "\u72b6\u6001 TEXT, is_deleted INTEGER, dsk TEXT, ATB TEXT, \u73ed\u5217\u7c7b\u578b TEXT)"
         )
         conn.execute(
             "INSERT INTO records "

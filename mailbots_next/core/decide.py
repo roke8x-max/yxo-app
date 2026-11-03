@@ -128,6 +128,105 @@ def decide_tracing(row, routing, records) -> Decision:
     return Decision("TRACE_MISS", "skip", "No company matched for this train")
 
 
+_TRAIN_TYPE_POOL = "专列"
+
+
+def _train_type(records, row) -> str:
+    """专列/散舱：字段优先，客编数 >40 兜底，都拿不到按散舱（保守）。
+
+    🔴 兜底算出结果后**必须写回 row.raw_data["train_type"]**。
+    下游 spec 03 的聚合器直接读 raw_data["train_type"] 决定「进池还是直发」，
+    不写回的话兜底路径等于白算：decide 里发了 pool，聚合器却按散舱处理。
+    """
+    t = ((row.raw_data or {}).get("train_type") or "").strip()
+    if t in ("专列", "散舱"):
+        # 走「字段优先」这一支也要把 strip 后的值写回。
+        # route 阶段若带进 "专列 "（尾随空格），这里 return "专列" 而 raw_data
+        # 仍是 "专列 "，下游 spec03 用 == "专列" 比较会 False ⇒ 专列当散舱。
+        row.raw_data["train_type"] = t
+        return t
+
+    tn = getattr(row, "train_no", "") or ""
+    if tn:
+        # 🔴 用 _split_code（非标准编码各自当独立客编），不能用 routing._stem：
+        #    后者对非 CQWLJT 编码一律返回 ""，会把不同客编塌成同一个、去重数偏小
+        #    ⇒ 专列被判成散舱 ⇒ 该合的不合。
+        n = len({_split_code(r.get("客户编码", ""))[0]
+                 for r in records if r.get("班列号") == tn})
+        result = "专列" if n > 40 else "散舱"
+    else:
+        result = "散舱"
+
+    row.raw_data["train_type"] = result      # ← 关键：落回 raw_data
+    return result
+
+
+def decide_release(row, routing, records) -> Decision:
+    src = getattr(routing, "route_source", "")
+
+    if not routing.success:
+        # 分三种，排查方向完全不同：
+        #   ① company 非空 ⇒ bot_config 没配收件人
+        #   ② 数字段命中了行但有歧义 ⇒ 编码/数据问题，不是"查无"
+        #   ③ 真的查无此编码
+        if routing.company:
+            return Decision("R0", "alarm",
+                            f"No recipients: company={routing.company} src={src}")
+        if src in ("num_multi_company", "num_no_company"):
+            return Decision("R0", "alarm", f"Stem ambiguous: {src}")
+        return Decision("R0", "alarm", f"No route: {src}")
+
+    # 业务上"重复到达照常发"，所以这里不拦——去重交给 spec 03 的批次内去重
+    train_type = _train_type(records, row)
+    action = "pool" if train_type == _TRAIN_TYPE_POOL else "forward"
+
+    if src == "code_exact":
+        return Decision("R1", action, f"Exact code match | train_type={train_type}")
+
+    # R1N：只靠数字段命中，有串到「同数字段、不同后缀」那张票的风险。
+    # log_decide() 只打 INFO，必须额外 WARN 一次，否则取消件静默串号没人发现。
+    _log.warning(
+        f"R1N stem match | code={row.customer_code} code_num={row.customer_code_num} "
+        f"company={routing.company} src={src} train={getattr(row, 'train_no', '')}"
+    )
+    return Decision("R1N", action, f"Stem match | train_type={train_type}")
+
+
+def decide_retbox(row, routing, records) -> Decision:
+    src = getattr(routing, "route_source", "")
+
+    if not routing.success:
+        # 和 decide_release 同样的三分法（B6 是箱号复用，单独一档）
+        if src == "box_reuse":
+            return Decision("B6", "alarm", "Box reused")
+        if routing.company:
+            return Decision("B0", "alarm",
+                            f"No recipients: company={routing.company} src={src}")
+        if src in ("num_multi_company", "num_no_company"):
+            return Decision("B0", "alarm", f"Stem ambiguous: {src}")
+        return Decision("B0", "alarm", f"No route: {src}")
+
+    train_type = _train_type(records, row)
+    action = "pool" if train_type == _TRAIN_TYPE_POOL else "forward"
+
+    if src == "code_exact":
+        return Decision("B1", action, f"Exact code match | train_type={train_type}")
+    if src == "code_num":
+        _log.warning(
+            f"B1N stem match | code={row.customer_code} code_num={row.customer_code_num} "
+            f"company={routing.company} src={src} train={getattr(row, 'train_no', '')}"
+        )
+        return Decision("B1N", action, f"Stem match | train_type={train_type}")
+
+    # B2：老模板没有客编，只能靠箱号唯一定位。箱号的语义比客编弱（同一箱会跑多趟），
+    # 单看箱子就对上了必须留痕，方便事后核对。
+    _log.warning(
+        f"B2 box-only match | box={row.container_no} "
+        f"company={routing.company} src={src} train={getattr(row, 'train_no', '')}"
+    )
+    return Decision("B2", action, f"Box-only match | train_type={train_type}")
+
+
 def decide(email_type, row, routing, records) -> Decision:
     # Accept both EmailType enum and string
     if isinstance(email_type, str):
@@ -146,5 +245,11 @@ def decide(email_type, row, routing, records) -> Decision:
         return decide_atb(row, routing, records)
     elif email_type == EmailType.TRACING:
         return decide_tracing(row, routing, records)
+    elif email_type == EmailType.RELEASE:
+        return decide_release(row, routing, records)
+    elif email_type == EmailType.RELEASE_CANCEL:
+        return decide_release(row, routing, records)
+    elif email_type == EmailType.RETBOX:
+        return decide_retbox(row, routing, records)
     else:
         return Decision("UNKNOWN", "skip", f"Unknown email type: {email_type}")
