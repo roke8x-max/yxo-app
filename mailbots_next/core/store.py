@@ -85,7 +85,7 @@ def load_records(active_only: bool = True) -> List[Dict[str, Any]]:
                 where = "WHERE 状态 <> '退舱' AND COALESCE(is_deleted, 0) = 0"
             rows = conn.execute(
                 f"""
-                SELECT id, 客户编码, 箱号, 班列号, 目的站, 开票子公司名称, 本地货源公司, 状态, is_deleted, dsk, ATB
+                SELECT id, 客户编码, 箱号, 班列号, 目的站, 开票子公司名称, 本地货源公司, 状态, is_deleted, dsk, ATB, 班列类型
                 FROM records
                 {where}
                 """

@@ -21,7 +21,7 @@ def _seed_yxo(path):
         conn.execute(
             "CREATE TABLE records (id INTEGER PRIMARY KEY, 客户编码 TEXT, 箱号 TEXT,"
             " 班列号 TEXT, 目的站 TEXT, 开票子公司名称 TEXT, 本地货源公司 TEXT,"
-            " 状态 TEXT, is_deleted INTEGER, dsk TEXT, ATB TEXT)"
+            " 状态 TEXT, is_deleted INTEGER, dsk TEXT, ATB TEXT, 班列类型 TEXT)"
         )
         conn.executemany(
             "INSERT INTO records (客户编码, 箱号, 班列号, 目的站, 开票子公司名称,"
