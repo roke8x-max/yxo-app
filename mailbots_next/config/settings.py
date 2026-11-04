@@ -108,6 +108,20 @@ BOUNCE_ENVELOPE_MODE = os.environ.get("BOUNCE_ENVELOPE_MODE", "sender")
 # 否则 → [BOUNCE_IMAP_USER]。
 BOUNCE_POLL_ACCOUNTS = os.environ.get("BOUNCE_POLL_ACCOUNTS", "")
 
+# ---- 专列聚合（放箱令 / 还箱令，任务 11 / spec 03）----
+# 三闸，先到先发：
+#   静默闸（主）  now - last_item_at  >= RELEASE_QUIET_SEC
+#   条数闸        item_count         >= RELEASE_MAX_ITEMS
+#   硬上限        now - first_item_at >= RELEASE_MAX_WAIT_SEC
+# 用「最后一封 + 120s」而不是「首封 + 120s」：实测专列 3 分钟内连发 55 封，
+# 按首封计时会在第 2 分钟就把前一批发掉，漏掉后面 30 封。
+RELEASE_QUIET_SEC = int(os.environ.get("RELEASE_QUIET_SEC", "120"))
+RELEASE_MAX_ITEMS = int(os.environ.get("RELEASE_MAX_ITEMS", "200"))
+RELEASE_MAX_WAIT_SEC = int(os.environ.get("RELEASE_MAX_WAIT_SEC", "1800"))
+# 单个 zip 超过这个体积才分卷（仍在同一封邮件里，多个 _partN.zip 附件）。
+# 实测 55 票一票一文件 = 8.11MB（zip 只省 5%，PDF 已压缩）⇒ 50MB 约可容 340 票。
+RELEASE_ZIP_MAX_BYTES = int(os.environ.get("RELEASE_ZIP_MAX_BYTES", str(50 * 1024 * 1024)))
+
 DEDUP_RETENTION_DAYS = 90
 
 DEFAULT_ACCOUNTS = [
