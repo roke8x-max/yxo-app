@@ -166,8 +166,11 @@ class MailProcessor:
         }
 
         has_manual = False
+        # 入池的票还没发出去 ⇒ 本封不能标已读（发送成功后由 flush_batch 补标）
+        has_pooled = False
         outcome = {"forwarded": 0, "alarm": 0, "pending": 0, "queued": 0,
-                   "manual": 0, "duplicate": 0, "skipped": 0}
+                   "manual": 0, "duplicate": 0, "skipped": 0,
+                   "pooled": 0}
         for row in rows:
             from mailbots_next.core.rowkey import serve_row_key
             row_key = serve_row_key(row)
@@ -180,6 +183,10 @@ class MailProcessor:
                                                 send_ctx)
                 if row_outcome == "manual":
                     has_manual = True
+                elif row_outcome == "pooled":
+                    # 重复票（is_dup）走的也是 "pooled"（见 _process_routing_result），
+                    # 所以这里天然覆盖 —— 它同样还没进任何合并邮件，标已读等于漏处理。
+                    has_pooled = True
                 outcome[row_outcome] = outcome.get(row_outcome, 0) + 1
             except Exception as e:
                 # Pure last-resort guard: one row's unexpected failure must
@@ -203,7 +210,7 @@ class MailProcessor:
         # rows, and no unsettled error-queue entries for this message.
         # Mark-seen is a UX aid only — forward-first ordering is guaranteed
         # because this runs after the whole row loop above.
-        if config.is_live() and uid and not has_manual \
+        if config.is_live() and uid and not has_manual and not has_pooled \
                 and not has_pending_message(message_id):
             mark_seen(account, folder, uid)
         # sweep_once 需要行级明细（queued  vs forwarded）来决定 resolve/attempt，
@@ -417,12 +424,37 @@ class MailProcessor:
         decision = decide(email_type, row, routing, self.records)
         _log.log_decide(message_id, row.row_idx, decision.tier, decision.action, decision.reason)
 
-        # 阶段二：聚合器未实现，专列先不动作（类型仍 enabled=False，不会有真信走到这里）
+        # 阶段三：专列聚合池（任务 11 / spec 03）。入池既不发送、也不标已读 ——
+        # 邮件的"已读"改由 aggregate.flush_batch 发送成功后补标，
+        # 这样「未读 = 还没发出去」，人工待处理视图才准。
         if decision.action == "pool":
-            _log.info(f"POOL_DEFERRED_TO_STAGE3 | msg={message_id[:50]} | "
-                      f"company={routing.company} train={getattr(row, 'train_no', '')}")
-            increment_counter("pool_deferred")
-            return "skipped"
+            from mailbots_next.core import aggregate
+            added, is_dup = aggregate.pool_add(
+                company=routing.company,
+                train_no=getattr(row, "train_no", "") or "",
+                email_type=email_type,
+                message_id=message_id,
+                account=account, folder=folder, uid=uid,
+                customer_code=row.customer_code or "",
+                release_no=row.raw_data.get("release_no") or "",
+                code_no=row.raw_data.get("code_no") or "",
+                box_no=row.container_no or "",
+                note=row.raw_data.get("tail_note") or "",
+                validity=row.raw_data.get("validity") or "",
+                link=row.raw_data.get("link") or "",
+                retbox_doc=row.raw_data.get("retbox_doc") or "",
+            )
+            if is_dup:
+                increment_counter("release_pool_duplicate")
+            # 🔴 两种（新增 / 已在池里）都返回 "pooled"，绝不返回 "duplicate"：
+            # 后者在 _process_row 里是 dedup claim 命中的意思，混用会污染 outcome
+            # 统计；而且重复票同样还没发出去 ⇒ 同样不能标已读（见 process_email）。
+            _log.info(
+                f"Release pooled | msg={message_id[:50]} | company={routing.company} | "
+                f"train={getattr(row, 'train_no', '')} | type={email_type} | "
+                f"added={added} dup={is_dup}"
+            )
+            return "pooled"
 
         sender_info = None
         if routing.responsible_person:
@@ -944,6 +976,20 @@ def main():
 
     digest_thread = threading.Thread(target=run_digest, daemon=True)
     digest_thread.start()
+
+    # 阶段三：专列聚合。建表 + 启动恢复（pending 与崩在 flush 中途的 flushing 都要救），
+    # 然后起独立线程按 10 秒节奏扫到期批次。
+    from mailbots_next.core import aggregate
+    aggregate.init_release_tables()
+    try:
+        _recovery = aggregate.flush_due_on_startup()
+        _log.info(f"Release aggregate startup recovery: {_recovery}")
+    except Exception as e:
+        # 恢复失败不能拦住收信主链路
+        _log.error(f"Release aggregate startup recovery failed: {type(e).__name__}: {e}")
+
+    aggregator_thread = threading.Thread(target=aggregate.run_aggregator, daemon=True)
+    aggregator_thread.start()
 
     try:
         while not _shutdown_event.is_set():

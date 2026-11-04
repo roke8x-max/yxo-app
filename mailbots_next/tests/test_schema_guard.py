@@ -34,8 +34,11 @@ _EXTERNAL_TABLES = {
 }
 
 # 代码自建表（生产初始化路径建出）：dedup.py 尾部 init_db()、
-# store.py 尾部 init_bot_config_db() / init_forward_log() / init_bounce_handled()。
-_CREATED_TABLES = {"dedup", "error_queue", "bot_config", "forward_log", "bounce_handled"}
+# store.py 尾部 init_bot_config_db() / init_forward_log() / init_bounce_handled()、
+# 任务 11 的聚合池 aggregate.py::init_release_tables()（release_batch / release_item，
+# 落 dedup.db；serve.main() 启动期调用）。
+_CREATED_TABLES = {"dedup", "error_queue", "bot_config", "forward_log",
+                   "bounce_handled", "release_batch", "release_item"}
 
 
 def _clean_source(text: str) -> str:
@@ -114,7 +117,12 @@ def test_every_referenced_table_is_created():
 
 
 def test_fresh_production_init_creates_all_tables(tmp_path):
-    """生产初始化冒烟：子进程 import 即建表（模块级 init），不调任何 init_*。"""
+    """生产初始化冒烟：子进程 import 即建表（模块级 init），不调其它 init_*。
+
+    任务 11 起多一步 `aggregate.init_release_tables()` —— release_batch /
+    release_item 是**启动期函数**建表（不是 import 副作用），serve.main() 在起
+    聚合线程前调用它；这里显式调一次，才能证明两张表真的落到了 dedup.db。
+    """
     import os
 
     env = dict(os.environ)
@@ -127,7 +135,10 @@ def test_fresh_production_init_creates_all_tables(tmp_path):
     # 凭证：沿用父进程 conftest 的假 secrets（MAILBOT_SECRETS_PATH 已指向 tmp 假文件，
     # 经 env 继承）；import 路径只做建表，不发信。
     proc = subprocess.run(
-        [sys.executable, "-c", "import mailbots_next.core.dedup, mailbots_next.core.store"],
+        [sys.executable, "-c",
+         "import mailbots_next.core.dedup, mailbots_next.core.store;"
+         " from mailbots_next.core import aggregate;"
+         " aggregate.init_release_tables()"],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,

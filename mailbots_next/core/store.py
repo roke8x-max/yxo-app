@@ -385,6 +385,27 @@ def get_forward_log(forward_id):
             conn.close()
 
 
+def find_forward_log_by_message_id(message_id: str):
+    """按 message_id 找一条 forward_log（rowid 倒序 = 最新在前），没有则 None。
+
+    专列聚合（任务 11）的崩溃恢复判据用它：合并邮件的 message_id 固定为
+    `BATCH::<batch_id>`，命中即证明这批**已经发出去了**（flush_batch 里
+    「写 forward_log」严格早于「标 sent」，见 aggregate.flush_batch 第 6.5 步）。
+    只读，不改任何状态。"""
+    if not message_id:
+        return None
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM forward_log WHERE message_id=? ORDER BY rowid DESC LIMIT 1",
+                (message_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
 def get_pending_checks(delay_sec=120, limit=200):
     """返回到期待核对的行（dict 列表，按 sent_at 升序）。
 
