@@ -38,7 +38,8 @@ _EXTERNAL_TABLES = {
 # 任务 11 的聚合池 aggregate.py::init_release_tables()（release_batch / release_item，
 # 落 dedup.db；serve.main() 启动期调用）。
 _CREATED_TABLES = {"dedup", "error_queue", "bot_config", "forward_log",
-                   "bounce_handled", "release_batch", "release_item"}
+                   "bounce_handled", "release_batch", "release_item",
+                   "archive_log"}
 
 
 def _clean_source(text: str) -> str:
@@ -138,7 +139,9 @@ def test_fresh_production_init_creates_all_tables(tmp_path):
         [sys.executable, "-c",
          "import mailbots_next.core.dedup, mailbots_next.core.store;"
          " from mailbots_next.core import aggregate;"
-         " aggregate.init_release_tables()"],
+         " aggregate.init_release_tables();"
+         " from mailbots_next.core import archive;"
+         " archive.init_table()"],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,
