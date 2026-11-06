@@ -23,7 +23,11 @@ logs/
 TracingLog/
 SyncerLog/
 error_logs/
-data/
+# ⚠️ 必须写成 `/data/`（只忽略本目录下的 data/）。
+# 写成 `data/` 会连 `tests/data/` 一起忽略，而 git 的 `!` 否定规则
+# **无法重新包含被父目录忽略的文件** ⇒ 下面第 34 行的 `!tests/data/*.db` 会静默失效，
+# 测试快照库永远进不了仓库。
+/data/
 __pycache__/
 *.log
 *.bak_*
