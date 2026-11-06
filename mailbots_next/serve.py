@@ -56,6 +56,8 @@ from mailbots_next.core import (
     get_connection,
     poll_bounces,
 )
+# 任务 12：复制归档 / 每日核对删除（独立模块，不参与 core 的 __init__ 汇总导出）
+from mailbots_next.core import archive
 
 _log = EmailLogger("mailbots_next.serve")
 
@@ -491,6 +493,24 @@ class MailProcessor:
             _log.log_action(message_id, row.row_idx, decision.action, detail)
             increment_counter(f"action_{decision.action}")
 
+            # 归档（任务 12）：邮件**已经发出去了**才复制到「放箱令 / 还箱令」夹。
+            # 🔴 detail 有两个值表示"已发出"：forwarded（本行单独发了一封）和
+            # group-covered（本行被公司组邮件覆盖，组邮件已发出）。只判 forwarded
+            # 会让被组合邮件覆盖的票永远不归档、也就永远不删，在收信夹越积越多。
+            # 失败只记 ERROR + 计数，**绝不影响主流程**（邮件已经发出去了）。
+            target_folder = archive.TARGET_BY_TYPE.get(str(email_type or ""))
+            if detail in ("forwarded", "group-covered") and target_folder:
+                try:
+                    archive.copy_after_forward(
+                        account, folder, uid, message_id, target_folder,
+                    )
+                except Exception as e:
+                    _log.error(
+                        f"Archive copy failed (mail already sent) | "
+                        f"msg={message_id} detail={detail}: {type(e).__name__}: {e}"
+                    )
+                    increment_counter("archive_copy_failed")
+
             # Group-covered rows ride on their company's group mail: no
             # extra notify, no extra send.
             if detail == "forwarded" and decision.action == "forward":
@@ -897,6 +917,46 @@ def run_digest():
         flush_and_notify()
 
 
+# 归档核对删除的每日小时（洋定 12:00，与 09:00 的日报错开）。
+ARCHIVE_PURGE_HOUR = 12
+
+
+def _next_purge_time(now: datetime) -> datetime:
+    """下一个 12:00（当天还没到就是今天，否则明天）。照 _next_digest_time 的算法。"""
+    next_run = now.replace(hour=ARCHIVE_PURGE_HOUR, minute=0, second=0, microsecond=0)
+    if next_run <= now:
+        next_run = next_run + timedelta(days=1)
+    return next_run
+
+
+def run_archive_purge():
+    """每天 12:00 的归档核对删除线程（结构照 run_digest）。
+
+    删除不可逆，所以这条链路有**三道闸**（时间 / 副本 / 新鲜），缺一不删；
+    任何异常只记日志，绝不把线程打死（明天还要跑）。
+    """
+    while not _shutdown_event.is_set():
+        now = datetime.now()
+        next_run = _next_purge_time(now)
+        wait_secs = (next_run - now).total_seconds()
+        if wait_secs > 86400:
+            wait_secs = 86400
+
+        for _ in range(int(wait_secs)):
+            if _shutdown_event.is_set():
+                break
+            time.sleep(1)
+
+        if _shutdown_event.is_set():
+            break
+
+        try:
+            stats = archive.purge_verified()
+            _log.info(f"Archive purge done: {stats}")
+        except Exception as e:
+            _log.error(f"Archive purge failed: {type(e).__name__}: {e}")
+
+
 def main():
     # Argparse first: MAILBOT_MODE must be set before any runtime is_live()
     # check below can observe it (import-time MODE constants stay frozen).
@@ -981,6 +1041,8 @@ def main():
     # 然后起独立线程按 10 秒节奏扫到期批次。
     from mailbots_next.core import aggregate
     aggregate.init_release_tables()
+    # 任务 12：archive_log（与 release_batch 同库 dedup.db）。启动期执行，不可抛异常。
+    archive.init_table()
     try:
         _recovery = aggregate.flush_due_on_startup()
         _log.info(f"Release aggregate startup recovery: {_recovery}")
@@ -990,6 +1052,10 @@ def main():
 
     aggregator_thread = threading.Thread(target=aggregate.run_aggregator, daemon=True)
     aggregator_thread.start()
+
+    # 任务 12：每天 12:00 核对副本确实存在后，才删源邮件（当天复制、次日再删）
+    purge_thread = threading.Thread(target=run_archive_purge, daemon=True)
+    purge_thread.start()
 
     try:
         while not _shutdown_event.is_set():

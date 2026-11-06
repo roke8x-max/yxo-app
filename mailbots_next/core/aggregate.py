@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..config import IMAP_PORT, IMAP_SERVER, OPS_OWNER_EMAIL, EmailType, settings
 from ..config.secrets import get_accounts, get_sender_by_email
 from .act import _record_forward, build_forward_message, make_forward_id, send_smtp
+from . import archive
 from .dedup import _db_lock
 from .dedup import get_connection as get_dedup_connection
 from .extract import parse_email
@@ -791,6 +792,41 @@ def _migrate_leftovers(old_bid: str, batch: Dict[str, Any]) -> int:
     return n
 
 
+def _group_by_account(items: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """按账号分组：归档批量入口要求"同组同账号"（每个账号只 login 一次）。"""
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for it in items or []:
+        groups.setdefault(it.get("account") or "", []).append(it)
+    return groups
+
+
+def _archive_items(items: List[Dict[str, Any]], batch: Dict[str, Any]) -> None:
+    """第 9.5 步：对本批全部 item 复制归档。失败只记 WARN/ERROR，绝不外抛。
+
+    ⚠️ `batch` 必须是 **dict**：`flush_batch` 开头有 `bd = dict(batch)`，传进来的
+       是那个 `bd`。sqlite3.Row 没有 `.get()`，直接传 row 会在 `batch.get(...)` 处
+       抛 AttributeError。
+
+    🔴 **不能逐条调 `copy_after_forward`** —— 那是单封接口，内部自带
+       "登录→干活→登出"，55 票 = 55 次 IMAP 登录（55–110 秒，还可能被限流）。
+       走批量入口 `archive_copy_many`：**每个账号只 login 一次**。
+       这和任务 11「不许循环调 fetch_raw_by_uid」是同一条红线。
+    """
+    target = archive.TARGET_BY_TYPE.get(str(batch.get("email_type") or ""))
+    if not target:
+        return
+    for account, group in _group_by_account(list(items or [])).items():
+        try:
+            n = archive.archive_copy_many(group, target)
+            _log.info(f"archive batch done | batch={batch.get('batch_id')} |"
+                      f" account={account} | items={n}/{len(group)} | target={target}")
+        except Exception as e:
+            # 邮件已经发出去了（第 7 步已标 sent），归档失败只记录
+            _log.error(f"Archive copy failed (batch sent) | batch={batch.get('batch_id')} |"
+                       f" account={account} | {type(e).__name__}: {e}")
+            increment_counter("archive_copy_failed")
+
+
 def flush_batch(batch: Dict[str, Any]) -> bool:
     """把一批合成 1 封发出。返回 True = 发出去了（或已确认发过）。
 
@@ -908,6 +944,16 @@ def flush_batch(batch: Dict[str, Any]) -> bool:
 
     # 9. 对整批补标已读（失败只 WARN）
     _mark_items_seen(items)
+
+    # 9.5 归档复制（邮件已经发出去了；失败只记 WARN/ERROR，不影响 sent）
+    # 双保险：_archive_items 内部按账号组逐组 try，这里再包一层 ——
+    # 归档永远不能把已经发出去的一批变成失败。
+    try:
+        _archive_items(items, bd)
+    except Exception as e:
+        _log.error(f"archive batch crashed (mail already sent) | batch={batch_id} | "
+                   f"{type(e).__name__}: {e}")
+        increment_counter("archive_copy_failed")
 
     # 10. 收尾复查：flush 期间万一还有票漏进来，迁到新批次
     _migrate_leftovers(batch_id, bd)
