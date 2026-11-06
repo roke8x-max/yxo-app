@@ -58,6 +58,17 @@ git checkout fix-ingest-poll-uid-watermark               # ③ 切过去干活
 > ls .git/refs/heads/                      # ④ 复核：这个 ref 文件真的在盘上
 > ```
 > `git update-ref refs/heads/fix/xxx` 同样「返回 0 但没落盘」；连手工 `mkdir` 建出的那层目录也会被抹掉。**扁平名实测稳定可用**（已用过：`fix-forward-layer-waybill-body`、`docs-interpreter-path`、`chore-workflow-main-only`）—— 这条已由洋确认写进 `AGENTS.md` §11。
+>
+> 🔴🔴 **2026-11-06 同一坑再犯，且更严重（`.git` 整套损坏）**：
+> 用 `git checkout -b chore/repo-hygiene` 建分支 —— **两个错同时犯**：① 用了 `checkout -b`（本文档 §3.1 明写「用 update-ref，不用 checkout -b」）；② 用了**带斜杠**的名字（同节明写「绝不用斜杠」）。
+> git 照常打印 `Switched to a new branch 'chore/repo-hygiene'`，**ref 却没落盘**。
+> 没跑复核就继续 `git add` + `commit` ⇒ 提交挂到悬空 HEAD 上。
+> 之后反复 `checkout` / `branch` / 强删 `index.lock` 重试，最终：**`.git/refs/` 目录整个消失**、`objects/pack/*.pack` 丢失（只剩 `.idx`）、`git status` 报 `not a git repository`。
+> **救法见 §10 最后三行**（重新 clone 只换 `.git`，工作区文件不动，一个都没丢）。
+>
+> **这次真正的教训不是「不知道」而是「知道但没执行」**：上述两条禁令在本文档里都有，
+> 2026-09-17 还记了同型事故。所以光写规则没用，必须**把检查做成命令**——
+> 这就是 `scripts/git_guard.py` 存在的原因。**建分支后不跑它，等于没做复核。**
 
 ### 3.1 单人开发七步标准循环（**写死流程，顺序不可变**）
 > 本项目是**单人开发**（洋 + 芙蕾雅设计 / OpenCode 落码 / 小叽在服务器上改），但依然**每一处改动都走临时分支 + PR**。理由不是"要给谁看代码"，而是：① 半成品永远进不了 `main`；② 每次进生产都留一次可回退的记录；③ 本机和服务器两台机器同时干活时不会互相覆盖。
@@ -73,8 +84,12 @@ $SHA = git rev-parse main                       # ② 建临时分支：拿到 m
 git update-ref refs/heads/fix-xxx-yyy $SHA      # 扁平名（绝不用斜杠）！用 update-ref，不用 checkout -b（见上方红线）
 git checkout fix-xxx-yyy
 # 你会看到：Switched to branch 'fix-xxx-yyy'
-# 复核（必做）：ls .git/refs/heads/ 里要有 fix-xxx-yyy 这个文件
-#              git status 只应显示你改过的文件；若整仓都显示 A，立刻停下按 §3 救援步骤修
+# 🔴 复核（必做，绿了才许往下走）：
+python scripts/git_guard.py
+# 期望最后一行是：✅ 全部通过，可以继续
+# 若报 [BAD] HEAD 指向 …但 ref 不存在 / 分支名带斜杠 / 工作区大量「新增」
+#   → 立刻停下，按脚本给出的「→」提示修，或看 §3 救援步骤 / §10 故障表
+#   → 绝不在这个状态下 add/commit（会造出砸掉历史关系的 root commit）
 
 git add <你改的那几个文件>          # ③ 本地提交（勤做；定向 add，绝不用 git add .）
 git commit -m "fix: 一句话说清改了什么"
@@ -163,12 +178,17 @@ git push origin <你的临时分支名>
 > 为什么有这一节：本项目真实踩过的坑 —— 有人手改生产代码留下"幽灵改动"被顺手带进提交；一次 `git add .` 把十几个不相干的文件混成一个"大杂烩"提交；密钥/生产库文件差点入库。**提交只需要三步：看清 → 定向 add → 验过再提交。** 别图快。
 **第 0 步 · 先看清"要提交什么"（不看清单不 add）**
 ```powershell
+python scripts/git_guard.py # ★ 一条命令代替下面五项，全绿才继续（exit 1 = 必须停下修）
 git status --short          # 逐行看：哪些是改的（ M），哪些是新文件（??）
 git diff --stat             # 看改动量；某个文件行数异常大就单独看一眼
 git fetch origin            # 对齐远端
 git branch --show-current   # 必须是你自己拉的那条临时分支，绝不能是 main
 git symbolic-ref HEAD       # 看 HEAD 指向哪个分支
 ```
+> 🔴 **`git_guard.py` 是强制的**：它检查 HEAD 是否指向真实存在的 ref、分支名是否带斜杠、
+> `refs/heads` 是否完整、pack 是否配对、有无残留 lock、工作区有无异常批量 A/D ——
+> 全是本机 git 会**静默出错**的地方（详见 `scripts/git_guard.py` 头部注释与 §3 的两次事故记录）。
+> **它退出码 1 时，任何 add/commit/push 都是错的。**
 - ❌ 列表里出现 **`secrets.json` / `*.db` / `logs/` / `config_local.py` / 个人绝对路径** → **停下**：说明 `.gitignore` 漏了，先补忽略规则再提交。
 - ❌ **`git status --short` 里"整个仓库的文件都标成 `A`" → 立刻停下，绝不 add/commit**：这是 **HEAD 悬空**（最常见成因：拿带斜杠的分支名建过分支，见 §3）。按 §3 的救援步骤 `git symbolic-ref HEAD refs/heads/main` 修回来再继续；**在悬空状态下提交会造出 root commit，把历史关系砸掉**。
 - ❌ 出现**你根本没印象改过**的文件 → 逐个 `git diff <文件>` 看清楚；确认无关就 `git restore <文件>` 退回。**不要盲提交**（幽灵改动就是这么进库的）。
@@ -270,22 +290,31 @@ powershell -ExecutionPolicy Bypass -File scripts\rollback.ps1
 | deploy.ps1 报"生产目录有未提交的改动" | 有人直接改了生产代码 | **别急着丢弃**，先看是什么改动，有用的话在开发环境重做走 PR |
 | deploy.ps1 报"拉取失败，历史分叉了" | 生产目录被 commit 过 | 联系骁洋，别自己 reset |
 | `cannot lock ref 'refs/heads/xxx'` | 存在 `xxx/yyy` 这种带斜杠的分支 | 删掉那个分支（本地 `git branch -D`，远端 `git push origin --delete xxx/yyy`） |
-| `git status` 里整仓文件都显示成 `A`（新增） | HEAD 悬空（多半是拿带斜杠的分支名建过分支） | **绝不要 add/commit**，按 §3 的救援步骤修 HEAD |
+| `git status` 里整仓文件都显示成 `A`（新增） | HEAD 悬空（多半是拿带斜杠的分支名建过分支） | **绝不要 add/commit**。先跑 `python scripts/git_guard.py` 定位，按它的提示修；手册步骤见 §3 救援 |
+| `git status` 报 `fatal: not a git repository`，但 `.git` 目录明明在 | **`.git/refs/` 目录被抹掉了**（2026-11-06 实例） | 先跑 `python scripts/git_guard.py` 确认；修法见下面两行 |
+| `objects/pack/` 里只有 `*.idx` 没有 `*.pack` | pack 文件被安全软件误删，**对象数据丢失** | 本地已无法恢复。**重新 clone 只换 `.git`**：`git clone <url> ../_restore` → `mv .git .git-broken-<日期>` → `cp -r ../_restore/.git .git` → 跑 `git_guard.py`。**工作区文件不动，一个都不会丢** |
+| 换完 `.git` 后大量 `.eml` 显示"已修改" | `.gitattributes` 的 `*.eml -text` 保护了字节，但旧工作区被转成了 CRLF | `git checkout -- '*.eml'` 恢复成仓库里的 LF，md5 应与 `git show HEAD:<file>` 一致 |
 | PR 页面 commit 列表拖出一大串历史提交 | 那些是 squash 之前的原始提交，不是 main 的祖先 | 正常现象，**看 Files changed 的 diff 才算数** |
 | 页面 500 / 功能坏了（刚部署完） | 新代码有问题 | 立刻 `rollback.ps1`，先恢复业务 |
 | ⚠️ 用 PowerShell 改完 `.md`/代码后**中文变乱码**、或**行数突然变少** | 本机是 **Windows PowerShell 5.1**，`Get-Content` / `Set-Content` **默认按 GBK 解码 UTF-8** —— 会把「行尾汉字 + 换行」一起吞掉；**回写即损坏文件** | 一律用 `[System.IO.File]::ReadAllLines/WriteAllLines($绝对路径, [System.Text.Encoding]::UTF8)`（**必须绝对路径**）。**不要**用 `Set-Content -Encoding UTF8`（5.1 下会加 BOM） |
 
 ---
 ## 11. 速查卡
+**🩺 任何时候觉得 git 不对劲，先跑这一条**
+```powershell
+python scripts/git_guard.py          # 全绿 exit 0；exit 1 = 停下，按它给的「→」修
+```
+
 **开发（本机 / E 盘）**
 ```powershell
 # ① 开工：从 main 拉一条「扁平命名」的临时分支（绝不用斜杠）
 git checkout main && git pull --ff-only origin main
 git update-ref refs/heads/fix-xxx-yyy <main 的完整 SHA> && git checkout fix-xxx-yyy
+python scripts/git_guard.py          # ★ 必须全绿！本机 git 会"打印成功但 ref 没落盘"
 # ② 边改边存档（勤做；⚠️ 定向 add，绝不用 git add .）
-git add <你改的那几个文件> && git commit -m "fix: xxx"
+python scripts/git_guard.py && git add <你改的那几个文件> && git commit -m "fix: xxx"
 # ③ 自测通过后 push 你自己的临时分支（push 前要有骁洋点头）
-git push origin fix-xxx-yyy
+python scripts/git_guard.py && git push origin fix-xxx-yyy
 # ④ 申请合入 main
 gh pr create --base main --head fix-xxx-yyy --fill
 ```
