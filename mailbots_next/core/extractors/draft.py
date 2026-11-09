@@ -14,6 +14,7 @@ from mailbots_next.config import (
     NON_AUTO_DRAFT_CATEGORIES,
 )
 from mailbots_next.core.extract import BaseExtractor, ExtractedRow, parse_email
+from mailbots_next.core.sender_addr import normalize_sender_domain
 from mailbots_next.core.log import get_logger
 
 _log = get_logger(__name__)
@@ -34,7 +35,10 @@ class DraftExtractor(BaseExtractor):
             # 台账已移除（2026-09-21）；恒 A = 永不误标；重新启用需按 README 技术债 X4 的三项前置单独立项。
             category = DraftCategory.NEW
         else:
-            domain = sender.split("@")[-1].lower() if "@" in sender else ""
+            # sender 是 msg.get("From") 的 str()（完整 From 头），必须走共用
+            # 规范化函数取域：直接 split 会拿到 "yxologistics.com>" ⇒ 内部
+            # 回复被误判成 C2 留人工（任务 13）。
+            domain = normalize_sender_domain(sender)
             category = DraftCategory.UPSTREAM_FEEDBACK if domain == YXO_DOMAIN else DraftCategory.EXTERNAL_REPLY
 
         if category in NON_AUTO_DRAFT_CATEGORIES:

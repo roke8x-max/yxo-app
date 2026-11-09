@@ -21,7 +21,7 @@ from mailbots_next.core.routing import RoutingResult
 
 REJECT_SUBJECT = "单证审核驳回"
 REJECT_BODY = "您的编码为:CQWLJT260917002-Kol单证审核被拒."
-REJECT_FROM = "docwbfb@yxologistics.com"
+REJECT_FROM = "Docwbfb <docwbfb@yxologistics.com>"
 
 
 @pytest.fixture(autouse=True)

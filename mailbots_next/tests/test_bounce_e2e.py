@@ -107,7 +107,7 @@ def _draft_raw():
     # Attachment name carries the encrypted-draft marker (ENC) + box number.
     msg = MIMEMultipart()
     msg["Subject"] = "caodan " + CODE
-    msg["From"] = "youlia@yxologistics.com"
+    msg["From"] = "Youlia <youlia@yxologistics.com>"
     msg.attach(MIMEText("body", "plain"))
     att = MIMEBase("application", "pdf")
     att.set_payload(b"test")

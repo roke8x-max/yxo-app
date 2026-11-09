@@ -58,6 +58,9 @@ from mailbots_next.core import (
 )
 # 任务 12：复制归档 / 每日核对删除（独立模块，不参与 core 的 __init__ 汇总导出）
 from mailbots_next.core import archive
+# 任务 13：发件人域规范化 —— 与 core/extractors/draft.py 共用同一份实现，
+# 不许在本文件里再写一遍（两份实现早晚漂移，只改一处 = 白改）。
+from mailbots_next.core.sender_addr import normalize_sender_domain
 
 _log = EmailLogger("mailbots_next.serve")
 
@@ -345,6 +348,9 @@ class MailProcessor:
 
         sender_lower = sender.lower() if sender else ""
         subject = subject or ""
+        # 规范化后的发件人域：只有配置了 sender_domain_whitelist 的规则才用到，
+        # 惰性算一次（其它规则不受影响，现有 5 条行为 100% 不变）。
+        sender_domain = None
 
         for route in TYPE_ROUTES:
             # 停用的规则整条跳过（现有 5 条均为 enabled: True，行为不变）
@@ -367,6 +373,17 @@ class MailProcessor:
                 for wl in match["sender_whitelist"]:
                     if wl.lower() in sender_lower:
                         return route["type"].value
+            if "sender_domain_whitelist" in match:
+                # 与上面的子串匹配不同：域必须**精确相等**，
+                # 否则 notyxologistics.com 之类会误命中。
+                if sender_domain is None:
+                    sender_domain = normalize_sender_domain(sender)
+                whitelist = {
+                    (d or "").strip().strip("<>").strip().lower()
+                    for d in match["sender_domain_whitelist"]
+                }
+                if sender_domain and sender_domain in whitelist:
+                    return route["type"].value
             if "attachment_pattern" in match:
                 msg = email.message_from_bytes(raw_bytes, policy=email.policy.default)
                 att_names = []
