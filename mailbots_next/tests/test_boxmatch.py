@@ -329,7 +329,7 @@ def _atb_raw(subject, box="CICU1912468"):
 
     msg = MIMEMultipart()
     msg["Subject"] = subject
-    msg["From"] = "atb@yxologistics.com"
+    msg["From"] = "ATB <atb@yxologistics.com>"
     msg.attach(MIMEText("test", "plain"))
     att = MIMEBase("application", "pdf")
     att.set_payload(b"test")
@@ -363,7 +363,7 @@ def _dsk_raw(subject, html=None, filename=None):
 
     msg = MIMEMultipart()
     msg["Subject"] = subject
-    msg["From"] = "reex.mala@deutschebahn.com"   # 非 kasa：否则箱号改由 html 表格决定
+    msg["From"] = "Reex Mala <reex.mala@deutschebahn.com>"   # 非 kasa：否则箱号改由 html 表格决定
     msg.attach(MIMEText(html or "<html><body>no table</body></html>", "html"))
     if filename:
         att = MIMEBase("application", "pdf")

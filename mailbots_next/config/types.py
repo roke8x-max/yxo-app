@@ -125,9 +125,32 @@ _TYPE_ROUTES_NEW = [
     },
 ]
 
+# ---------------------------------------------------------------------------
+# 任务 13：回复类邮件识别入口（切换前必修）。
+# 回复邮件通常没有草单 PDF 附件 ⇒ 上面 priority 50 的 DRAFT 规则命中不了
+# （它只认 attachment_pattern），整封邮件在 _identify_type 里返回 None。
+# 这里补一条「完整客编 + yxo 域」入口：命中后进 DraftExtractor，由域判 C1/C2。
+#
+# 🔴 必须追加在**整个列表最后**：_identify_type 按列表顺序遍历、命中即停，
+#    插到前面会抢走 docwbfb / atb / tracing-system 这些白名单类型。
+# 🔴 不设 subject_exclude：全量核实「渝新欧放箱 / 取消放箱令 / 机器人日报 /
+#    系统通知」共 300 条对「完整客编」0 命中（见 02_TASK.md §4.2）。
+# 🔴 客编用 CQWLJT[0-9A-Za-z\-]+，不能是裸 CQWLJT（会吸进「CQWLJT 6柜」）。
+# priority 60：现最大 50，tests/test_core.py 断言整体升序。
+# ---------------------------------------------------------------------------
 TYPE_ROUTES = _TYPE_ROUTES_NEW + [
     r for r in TYPE_ROUTES
     if r["type"] not in (EmailType.RELEASE, EmailType.RELEASE_CANCEL, EmailType.RETBOX)
+] + [
+    {
+        "type": EmailType.DRAFT,
+        "enabled": True,
+        "priority": 60,
+        "match": {
+            "subject_pattern": r"CQWLJT[0-9A-Za-z\-]+",
+            "sender_domain_whitelist": ["yxologistics.com"],
+        },
+    },
 ]
 
 # 需要"留人工"的草单分类：不自动转发、不进错误队列、不标已读。

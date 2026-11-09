@@ -230,7 +230,7 @@ def test_is_ndr_false_for_normal_mail():
     from email.mime.text import MIMEText
     msg = MIMEText("Hello, please see attached.", "plain", "utf-8")
     msg["Subject"] = "daily hello"
-    msg["From"] = "customer@example.com"
+    msg["From"] = "Customer <customer@example.com>"
     assert is_ndr(BytesParser().parsebytes(msg.as_bytes())) is False
 
 
@@ -282,7 +282,7 @@ def test_poll_multi_account_only_ndr_account_requeues(monkeypatch):
     from email.mime.text import MIMEText
     normal = MIMEText("Daily hello.", "plain", "utf-8")
     normal["Subject"] = "hello"
-    normal["From"] = "friend@example.com"
+    normal["From"] = "Friend <friend@example.com>"
     ndr = _ndr_raw("postmaster@example.com",
                    ["Action: failed",
                     "Diagnostic-Code: smtp; 550 5.1.1",
@@ -363,7 +363,7 @@ def test_is_ndr_action_only_is_false():
     from email.mime.text import MIMEText
     msg = MIMEText("Action: follow up tomorrow", "plain", "utf-8")
     msg["Subject"] = "meeting notes"
-    msg["From"] = "colleague@example.com"
+    msg["From"] = "Colleague <colleague@example.com>"
     assert is_ndr(BytesParser().parsebytes(msg.as_bytes())) is False
 
 
@@ -447,7 +447,7 @@ def test_non_ndr_no_store_no_alert(monkeypatch):
     from email.mime.text import MIMEText
     normal = MIMEText("Daily hello.", "plain", "utf-8")
     normal["Subject"] = "hello"
-    normal["From"] = "friend@example.com"
+    normal["From"] = "Friend <friend@example.com>"
     calls = {"store": []}
 
     class _SpyIMAP:

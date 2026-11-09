@@ -54,7 +54,7 @@ def test_build_forward_message_has_x_header():
     from email.mime.text import MIMEText
     original = MIMEText("test body")
     original["Subject"] = "Test Subject"
-    original["From"] = "sender@example.com"
+    original["From"] = "Sender <sender@example.com>"
 
     msg = build_forward_message(original, ["to@example.com"], [], "sender@example.com",
                                 forward_id="a1b2c3d4e5f6a7b8-c0ffee12")
@@ -74,7 +74,7 @@ def test_send_smtp_uses_mail_from(monkeypatch):
     monkeypatch.setattr("smtplib.SMTP_SSL", lambda *a, **kw: mock_context)
 
     msg = MIMEText("test")
-    msg["From"] = "sender@example.com"
+    msg["From"] = "Sender <sender@example.com>"
     msg["To"] = "to@example.com"
 
     from mailbots_next.core.act import send_smtp

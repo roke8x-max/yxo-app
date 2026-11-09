@@ -84,7 +84,7 @@ def _smtp_spy():
 def _draft_raw(code, box):
     msg = MIMEMultipart()
     msg["Subject"] = f"草单 {code}"
-    msg["From"] = "youlia@yxologistics.com"
+    msg["From"] = "Youlia <youlia@yxologistics.com>"
     msg.attach(MIMEText("body", "plain"))
     att = MIMEBase("application", "pdf")
     att.set_payload(b"test")
@@ -182,7 +182,7 @@ class TestModeGates:
 def _waybill_msg():
     msg = MIMEMultipart()
     msg["Subject"] = "Waybill cover"
-    msg["From"] = "docwbfb@yxologistics.com"
+    msg["From"] = "Docwbfb <docwbfb@yxologistics.com>"
     msg.attach(MIMEText("cover text", "plain"))
     att = MIMEBase("application", "octet-stream")
     att.set_payload(b"info")
@@ -302,7 +302,7 @@ class TestSplitFanout:
                 "</table></body></html>")
         msg = MIMEMultipart()
         msg["Subject"] = "DSK notice"
-        msg["From"] = "kasa@rtsb.de"
+        msg["From"] = "Kasa <kasa@rtsb.de>"
         msg.attach(MIMEText(html, "html"))
         for fn, body in (("CICU1000001.PDF", b"a"), ("CICU1000002.PDF", b"b"),
                          ("readme.txt", b"r")):

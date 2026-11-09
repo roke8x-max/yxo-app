@@ -156,7 +156,8 @@ class TestConfigProvider:
         snap = snapshot()
         assert snap.mode in ("test", "live")
         assert isinstance(snap.type_routes, list)
-        assert len(snap.type_routes) == 8
+        # 任务 13：新增回复类 DRAFT 入口规则（priority 60）⇒ 8 → 9
+        assert len(snap.type_routes) == 9
         assert isinstance(snap.enabled_types, dict)
         assert "accounts" in snap.__dict__
 
@@ -388,7 +389,7 @@ class TestExtractors:
 
         msg = MIMEMultipart()
         msg["Subject"] = "运单草单 CQWLJT260810001"
-        msg["From"] = "youlia@yxologistics.com"
+        msg["From"] = "Youlia <youlia@yxologistics.com>"
         msg.attach(MIMEText("test body", "plain"))
 
         att = MIMEBase("application", "pdf")
@@ -428,7 +429,7 @@ class TestExtractors:
 
         msg = MIMEMultipart()
         msg["Subject"] = "运单号下发"
-        msg["From"] = "docwbfb@yxologistics.com"
+        msg["From"] = "Docwbfb <docwbfb@yxologistics.com>"
         msg.attach(MIMEText("test", "plain"))
 
         att = MIMEBase("application", "xls")
@@ -469,7 +470,7 @@ class TestExtractors:
 
         msg = MIMEMultipart()
         msg["Subject"] = "train 793 tracking"
-        msg["From"] = "tracing-system@yxologistics.com"
+        msg["From"] = "Tracing System <tracing-system@yxologistics.com>"
         msg.attach(MIMEText("test", "plain"))
 
         att = MIMEBase("application", "xls")
@@ -494,7 +495,7 @@ class TestExtractors:
 
         msg = MIMEMultipart()
         msg["Subject"] = "train 793 tracking"
-        msg["From"] = "tracing-system@yxologistics.com"
+        msg["From"] = "Tracing System <tracing-system@yxologistics.com>"
         msg.attach(MIMEText("test", "plain"))
 
         att = MIMEBase("application", "xls")
@@ -523,7 +524,7 @@ class TestExtractors:
 
         msg = MIMEMultipart()
         msg["Subject"] = "DSK notification"
-        msg["From"] = "kasa@rtsb.de"
+        msg["From"] = "Kasa <kasa@rtsb.de>"
         msg.attach(MIMEText(html, "html"))
 
         att = MIMEBase("application", "pdf")
@@ -548,7 +549,7 @@ class TestExtractors:
 
         msg = MIMEMultipart()
         msg["Subject"] = "ATB for YXO-2026-638 CQWLJT260722001-D CICU1912468"
-        msg["From"] = "atb@yxologistics.com"
+        msg["From"] = "ATB <atb@yxologistics.com>"
         msg.attach(MIMEText("test", "plain"))
 
         att = MIMEBase("application", "pdf")
@@ -616,7 +617,7 @@ class TestSplitRules:
 
         orig = MIMEMultipart()
         orig["Subject"] = "Tracing train 793"
-        orig["From"] = "tracing-system@yxologistics.com"
+        orig["From"] = "Tracing System <tracing-system@yxologistics.com>"
         orig.attach(MIMEText("track info", "plain"))
         for fn in ("CICU1000001.xls", "report.pdf"):
             att = MIMEBase("application", "octet-stream")
@@ -676,7 +677,7 @@ class TestSplitRules:
         )
         orig = MIMEMultipart()
         orig["Subject"] = "DSK notice"
-        orig["From"] = "kasa@rtsb.de"
+        orig["From"] = "Kasa <kasa@rtsb.de>"
         orig.attach(MIMEText("cover letter", "plain"))
         att = MIMEBase("application", "pdf")
         att.set_payload(b"x")
@@ -918,7 +919,7 @@ class TestDraftCategories:
 
     def test_draft_category_A_new_draft_goes_to_tiers(self):
         _, raw = _draft_mail(
-            "运单草单 CQWLJT260810001", "youlia@yxologistics.com",
+            "运单草单 CQWLJT260810001", "Youlia <youlia@yxologistics.com>",
             ["CICU1000001-260810-123456已加密.pdf"],
         )
         rows = extract_email(EmailType.DRAFT, raw)
@@ -943,7 +944,7 @@ class TestDraftCategories:
         finally:
             conn.close()
         _, raw = _draft_mail(
-            "运单草单 CQWLJT260810001", "youlia@yxologistics.com",
+            "运单草单 CQWLJT260810001", "Youlia <youlia@yxologistics.com>",
             ["CICU1000001-260810-123456已加密.pdf"],
         )
         rows = extract_email(EmailType.DRAFT, raw)
@@ -958,7 +959,7 @@ class TestDraftCategories:
 
         monkeypatch.setattr(_sqlite3, "connect", _boom)
         _, raw = _draft_mail(
-            "运单草单 CQWLJT260810001", "youlia@yxologistics.com",
+            "运单草单 CQWLJT260810001", "Youlia <youlia@yxologistics.com>",
             ["CICU1000001-260810-123456已加密.pdf"],
         )
         rows = extract_email(EmailType.DRAFT, raw)
@@ -972,7 +973,7 @@ class TestDraftCategories:
         monkeypatch.setenv("MAILBOT_MODE", "live")
         subject = "运单草单 CQWLJT260810001"
         _, raw = _draft_mail(
-            subject, "youlia@yxologistics.com",
+            subject, "Youlia <youlia@yxologistics.com>",
             ["CICU1000001-260810-123456已加密.pdf"],
         )
         proc = MailProcessor(snapshot())
@@ -982,7 +983,7 @@ class TestDraftCategories:
         with patch("mailbots_next.core.act.send_smtp") as mock_smtp:
             mock_smtp.return_value = {"success": True, "refused": {}}
             proc.process_email("t@t.com", "草单", "b-msg-1", 1,
-                               subject, "youlia@yxologistics.com", "", raw)
+                               subject, "Youlia <youlia@yxologistics.com>", "", raw)
         mock_smtp.assert_called_once()
         sent_msg = mock_smtp.call_args[0][0]
         assert str(sent_msg["Subject"]) == subject
@@ -996,7 +997,7 @@ class TestDraftCategories:
         monkeypatch.setenv("MAILBOT_MODE", "live")
         subject = "运单草单 CQWLJT260810001"
         _, raw = _draft_mail(
-            subject, "youlia@yxologistics.com",
+            subject, "Youlia <youlia@yxologistics.com>",
             ["CICU1000001-260810-123456已加密.pdf"],
         )
         proc = MailProcessor(snapshot())
@@ -1006,13 +1007,13 @@ class TestDraftCategories:
         with patch("mailbots_next.core.act.send_smtp") as mock_smtp:
             mock_smtp.return_value = {"success": True, "refused": {}}
             proc.process_email("t@t.com", "草单", "a-msg-1", 1,
-                               subject, "youlia@yxologistics.com", "", raw)
+                               subject, "Youlia <youlia@yxologistics.com>", "", raw)
         mock_smtp.assert_called_once()
         proc.notifier.send_forwarded.assert_called_once()
 
     def test_draft_C1_upstream_feedback_goes_to_tiers(self):
         _, raw = _draft_mail(
-            "关于CQWLJT260810001的反馈", "chenlong@yxologistics.com",
+            "关于CQWLJT260810001的反馈", '"chenlong@yxologistics.com" <chenlong@yxologistics.com>',
             ["report.pdf"], body="请帮忙看一下",
         )
         rows = extract_email(EmailType.DRAFT, raw)
@@ -1034,7 +1035,7 @@ class TestDraftCategories:
         from mailbots_next.core import get_pending_errors
         subject = "Re: 确认"
         _, raw = _draft_mail(
-            subject, "customer@gmail.com", ["箱号说明.txt"], body="收到",
+            subject, "Customer <customer@gmail.com>", ["箱号说明.txt"], body="收到",
         )
         rows = extract_email(EmailType.DRAFT, raw)
         assert rows[0].draft_category == "C2"
@@ -1045,7 +1046,7 @@ class TestDraftCategories:
         with patch("mailbots_next.core.act.send_smtp") as mock_smtp, \
              patch("mailbots_next.core.log.EmailLogger.log_manual_category") as mock_manual:
             proc.process_email("t@t.com", "草单", "c2-msg-1", 1,
-                               subject, "customer@gmail.com", "", raw)
+                               subject, "Customer <customer@gmail.com>", "", raw)
         mock_smtp.assert_not_called()
         proc.notifier.send_forwarded.assert_not_called()
         proc.notifier.send_alarm.assert_not_called()
@@ -1070,7 +1071,7 @@ class TestDraftCategories:
     def test_draft_subject_with_waybill_keyword_no_longer_yields_W(self):
         """主题含运单号 + 非白名单发件人 + 附件名含"箱号" ⇒ 落 C1/C2（不再有 W）。"""
         _, raw = _draft_mail(
-            "关于运单号的咨询", "customer@gmail.com", ["箱号说明.txt"], body="收到",
+            "关于运单号的咨询", "Customer <customer@gmail.com>", ["箱号说明.txt"], body="收到",
         )
         rows = extract_email(EmailType.DRAFT, raw)
         assert rows[0].draft_category in ("C1", "C2")

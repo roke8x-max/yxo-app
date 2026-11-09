@@ -67,7 +67,7 @@ def _draft_raw(code, box):
     from email import encoders
     msg = MIMEMultipart()
     msg["Subject"] = f"草单 {code}"
-    msg["From"] = "youlia@yxologistics.com"
+    msg["From"] = "Youlia <youlia@yxologistics.com>"
     msg.attach(MIMEText("body", "plain"))
     att = MIMEBase("application", "pdf")
     att.set_payload(b"test")

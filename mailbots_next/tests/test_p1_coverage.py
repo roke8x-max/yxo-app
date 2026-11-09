@@ -193,11 +193,11 @@ class TestTypeIdentification:
     def test_whitelist_per_type(self):
         proc = self._proc()
         cases = [
-            ("docwbfb@yxologistics.com", "waybill"),
-            ("atb@yxologistics.com", "atb"),
-            ("kasa@rtsb.de", "dsk"),
-            ("reex.mala@deutschebahn.com", "dsk"),
-            ("tracing-system@yxologistics.com", "tracing"),
+            ("Docwbfb <docwbfb@yxologistics.com>", "waybill"),
+            ("ATB <atb@yxologistics.com>", "atb"),
+            ("Kasa <kasa@rtsb.de>", "dsk"),
+            ("Reex Mala <reex.mala@deutschebahn.com>", "dsk"),
+            ("Tracing System <tracing-system@yxologistics.com>", "tracing"),
         ]
         for sender, want in cases:
             raw = _tiny_raw(sender, "subject")
@@ -206,21 +206,21 @@ class TestTypeIdentification:
     def test_draft_attachment_and_sender_exclude(self):
         proc = self._proc()
         # Non-system sender + 箱号 attachment -> draft.
-        raw = _tiny_raw("youlia@yxologistics.com", "s", ["清单箱号.pdf"])
-        assert proc._identify_type("youlia@yxologistics.com", "s", raw) == "draft"
+        raw = _tiny_raw("Youlia <youlia@yxologistics.com>", "s", ["清单箱号.pdf"])
+        assert proc._identify_type("Youlia <youlia@yxologistics.com>", "s", raw) == "draft"
         # System sender with the same attachment is NOT draft (whitelist wins,
         # sender_exclude keeps system mail out of the draft pipeline).
-        raw2 = _tiny_raw("atb@yxologistics.com", "s", ["清单箱号.pdf"])
-        got = proc._identify_type("atb@yxologistics.com", "s", raw2)
+        raw2 = _tiny_raw("ATB <atb@yxologistics.com>", "s", ["清单箱号.pdf"])
+        got = proc._identify_type("ATB <atb@yxologistics.com>", "s", raw2)
         assert got == "atb" and got != "draft"
 
     def test_unclassified_goes_config_missing_only(self):
         proc = self._proc()
-        raw = _tiny_raw("stranger@example.com", "hello")
+        raw = _tiny_raw("Stranger <stranger@example.com>", "hello")
         with patch("mailbots_next.serve.extract_email") as mock_extract, \
              patch("mailbots_next.core.act.send_smtp") as mock_smtp:
             ok = proc.process_email("t@t.com", "草单", "g6-unclassified-1", 1,
-                               "hello", "stranger@example.com", "", raw)
+                               "hello", "Stranger <stranger@example.com>", "", raw)
         assert ok is True
         proc.notifier.send_config_missing.assert_called_once()
         assert proc.notifier.send_config_missing.call_args[0][0] == OPS_OWNER_EMAIL
@@ -233,16 +233,16 @@ class TestTypeIdentification:
 
     def test_identification_ignores_folder(self):
         proc = self._proc()
-        raw = _tiny_raw("docwbfb@yxologistics.com", "s")
+        raw = _tiny_raw("Docwbfb <docwbfb@yxologistics.com>", "s")
         seen = []
         with patch("mailbots_next.serve.extract_email",
                    side_effect=lambda t, b: seen.append(t) or []):
             proc.process_email("t@t.com", "草单", "g6-f1", 1, "s",
-                               "docwbfb@yxologistics.com", "", raw)
+                               "Docwbfb <docwbfb@yxologistics.com>", "", raw)
             proc.process_email("t@t.com", "运单号", "g6-f2", 2, "s",
-                               "docwbfb@yxologistics.com", "", raw)
+                               "Docwbfb <docwbfb@yxologistics.com>", "", raw)
             proc.process_email("t@t.com", "INBOX", "g6-f3", 3, "s",
-                               "docwbfb@yxologistics.com", "", raw)
+                               "Docwbfb <docwbfb@yxologistics.com>", "", raw)
         assert seen == ["waybill", "waybill", "waybill"]
 
 
@@ -268,12 +268,12 @@ class TestRuntimeSwitches:
         try:
             assert get_enabled_types()["dsk"] is False
             proc = _harness([])
-            raw = _tiny_raw("kasa@rtsb.de", "s")
+            raw = _tiny_raw("Kasa <kasa@rtsb.de>", "s")
             with patch("mailbots_next.serve._log") as mock_log, \
                  patch("mailbots_next.serve.extract_email") as mock_extract, \
                  patch("mailbots_next.core.act.send_smtp") as mock_smtp:
                 proc.process_email("t@t.com", "DSK", "g7-dis-1", 1,
-                                   "s", "kasa@rtsb.de", "", raw)
+                                   "s", "Kasa <kasa@rtsb.de>", "", raw)
             mock_log.log_type_skipped.assert_called_once()
             mock_extract.assert_not_called()
             mock_smtp.assert_not_called()
@@ -290,10 +290,10 @@ class TestRuntimeSwitches:
             _set_runtime("dsk", True)
         assert get_enabled_types()["dsk"] is True
         proc = _harness([])
-        raw = _tiny_raw("kasa@rtsb.de", "s")
+        raw = _tiny_raw("Kasa <kasa@rtsb.de>", "s")
         with patch("mailbots_next.serve.extract_email", return_value=[]) as mock_extract:
             proc.process_email("t@t.com", "DSK", "g7-reen-1", 1,
-                               "s", "kasa@rtsb.de", "", raw)
+                               "s", "Kasa <kasa@rtsb.de>", "", raw)
         mock_extract.assert_called_once()
 
 
@@ -416,7 +416,7 @@ class TestCredentials:
             "company": "太平洋", "状态": "正常", "is_deleted": 0,
         }])
         proc.accounts = {}  # no SMTP passwords anywhere
-        raw = _tiny_raw("docwbfb@yxologistics.com",
+        raw = _tiny_raw("Docwbfb <docwbfb@yxologistics.com>",
                         "Waybill CQWLJT260810001 CICU1000001")
         # The responsible owner has no SMTP password configured: both the
         # owner lookup and the account fallback yield empty passwords.
@@ -424,7 +424,7 @@ class TestCredentials:
              patch("mailbots_next.core.act.send_smtp") as mock_smtp:
             proc.process_email("t@t.com", "运单号", "g9-nopwd-1", 1,
                                "Waybill CQWLJT260810001 CICU1000001",
-                               "docwbfb@yxologistics.com", "", raw)
+                               "Docwbfb <docwbfb@yxologistics.com>", "", raw)
         proc.notifier.send_config_missing.assert_called_once()
         assert proc.notifier.send_config_missing.call_args[0][0] == OPS_OWNER_EMAIL
         mock_smtp.assert_not_called()
@@ -759,7 +759,7 @@ def _draft_bytes(code, box):
     from email import encoders
     msg = MIMEMultipart()
     msg["Subject"] = f"运单草单 {code}"
-    msg["From"] = "youlia@yxologistics.com"
+    msg["From"] = "Youlia <youlia@yxologistics.com>"
     msg.attach(MIMEText("body", "plain"))
     att = MIMEBase("application", "pdf")
     att.set_payload(b"test")

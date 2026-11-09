@@ -38,7 +38,7 @@ def _dbs(tmp_path, monkeypatch):
         invalidate_cache()
 
 
-def _raw(msgid="<m1@x>", subject="草单 CQWLJT260810001", sender="youlia@yxologistics.com", date="Tue, 16 Sep 2026 10:00:00 +0000"):
+def _raw(msgid="<m1@x>", subject="草单 CQWLJT260810001", sender="Youlia <youlia@yxologistics.com>", date="Tue, 16 Sep 2026 10:00:00 +0000"):
     m = EmailMessage()
     m["Message-ID"] = msgid
     m["Subject"] = subject
