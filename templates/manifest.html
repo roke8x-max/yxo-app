@@ -78,6 +78,8 @@
   .import-group { border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px; }
   .import-group .gh { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
   .import-group input.dest { padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px; }
+  .import-group .gh .gclabel { font-size:12px; font-weight:600; color:var(--primary); }
+  .import-group .gh select.gcompsel { padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px; }
   .applybar { position:sticky; bottom:0; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); padding:12px 16px; display:flex; align-items:center; gap:14px; box-shadow:var(--shadow-sm); }
   .applybar .sum { font-size:13px; color:var(--text-secondary); }
   .applybar .sum b { color:var(--title); }
@@ -145,10 +147,12 @@
     <div class="card hidden" id="diffCard">
       <h3>② 差异清单（空跑，未写库）</h3>
       <!-- 两改：批量默认负责公司。选择后应用于本批所有尚未单独指定的新增行；
-           终态重现选 B 建行时同样取该值（终态区不另设下拉）。未选留空，不写死默认公司。 -->
+           终态重现选 B 建行时同样取该值（终态区不另设下拉）。未选留空，不写死默认公司。
+           本任务：本栏是「全局默认」，对所有专列生效；只想设某一趟，用下方该组组头的「本专列负责公司」。 -->
       <div id="companyBar" class="companybar hidden">
         <b>批量默认负责公司</b>
         <select id="companyBatch"><option value="">（未选，留空）</option></select>
+        <span class="muted">对所有待导入专列生效；只想设某一趟，请用下方各专列组头的「本专列负责公司」。</span>
         <span class="muted">选项复用「开票子公司名称」字段选项（选项维护里可增删），此处不另建清单。</span>
       </div>
       <div class="tabs">
@@ -342,9 +346,11 @@ function buildCompanyBatchOptions() {
   sel.onchange = () => {
     COMPANY_BATCH = sel.value || "";
     // 仅覆盖尚未单独指定的行（单行覆盖优先于批量默认）。
+    // 本任务：组头设过的组（g._gcomp）整组跳过，否则组级设置会被全局值覆写（§4 规则 3）。
+    // 这里保留「可覆盖非空值」的原行为，不加 !r["负责公司"]；那个条件只属于 renderImports 的兜底。
     const d = (LAST_DIFF && LAST_DIFF.diff) || {};
     (d.imports || []).forEach(g => (g.rows || []).forEach(r => {
-      if (!r._ctouched) r["负责公司"] = COMPANY_BATCH;
+      if (!g["_gcomp"] && !r._ctouched) r["负责公司"] = COMPANY_BATCH;
     }));
     if (LAST_DIFF) renderDiff(LAST_DIFF);
   };
@@ -605,17 +611,43 @@ function renderImports(imports) {
   imports.forEach(g => {
     destInputs[g.train_no] = g["目的站建议"] || "";
     // 两改：新到行继承当前批量默认（尚未单独指定且为空时）；单行改过的不动。
+    // 本任务：组头设过的组（g._gcomp）整组跳过 —— 已设值以 r["负责公司"] 现值为准，渲染时不重算。
     (g.rows || []).forEach(r => {
-      if (!r._ctouched && !r["负责公司"]) r["负责公司"] = COMPANY_BATCH;
+      if (!g["_gcomp"] && !r._ctouched && !r["负责公司"]) r["负责公司"] = COMPANY_BATCH;
     });
+    const nBox = g.rows ? g.rows.length : 0;
     const destInp = el("input", { class:"dest", placeholder:"目的站", value:g["目的站建议"] || "",
       oninput: e => { destInputs[g.train_no] = e.target.value; } });
+    // 本任务：组头「本专列负责公司」下拉。选项复用 COMPANIES，首项「（未选，留空）」= 清除组级设置。
+    // 组级值只存 LAST_DIFF.diff.imports[i]._group_company（不存 DOM）；重渲染时据此回填选中项。
+    const gSel = el("select", { class:"gcompsel", id:"compGroup_" + g.train_no },
+      [el("option", { value:"", text:"（未选，留空）" })].concat(
+        COMPANIES.map(c => el("option", { value:c, text:c }))));
+    gSel.value = g["_group_company"] || "";
+    gSel.onchange = () => {
+      const v = gSel.value || "";
+      if (!v) {
+        // 选「（未选，留空）」= 清除组级设置：删状态、整组行值清空并删 _ctouched，回落到全局默认。
+        delete g["_group_company"];
+        g["_gcomp"] = false;
+        (g.rows || []).forEach(r => { r["负责公司"] = ""; delete r._ctouched; });
+      } else {
+        // 组头变更：整组所有行设为所选值（含此前单行改过的行），清 _ctouched，并打组级标记。
+        g["_group_company"] = v;
+        (g.rows || []).forEach(r => { r["负责公司"] = v; delete r._ctouched; });
+        g["_gcomp"] = true;
+      }
+      if (LAST_DIFF) renderDiff(LAST_DIFF);
+    };
     const gh = el("div", { class:"gh" }, [
       el("span", { class:"tag tag-新", text:g["班列类型"] || "新专列" }),
       el("b", { text:g.train_no }),
-      el("span", { class:"muted", text:"口岸 " + (g["口岸"] || "—") + " · 发班 " + (g["发班时间"] || "—") + " · " + (g.rows ? g.rows.length : 0) + " 箱" }),
+      el("span", { class:"muted", text:"口岸 " + (g["口岸"] || "—") + " · 发班 " + (g["发班时间"] || "—") + " · " + nBox + " 箱" }),
       el("span", { class:"muted", text:"目的站：" }),
       destInp,
+      el("span", { class:"gclabel", text:"本专列负责公司：" }),
+      gSel,
+      el("span", { class:"muted", text:"一次设置本趟全部 " + nBox + " 箱" }),
     ]);
     const grp = el("div", { class:"import-group" }, [gh]);
     const t = el("table");
