@@ -64,7 +64,17 @@ from .act import (
     rewrite_xls_filtered,
 )
 from .bounce import poll_bounces
-from .notify import get_notifier, WeComNotifier, increment_counter, flush_counters
+from .notify import (
+    get_notifier,
+    WeComNotifier,
+    increment_counter,
+    flush_counters,
+    record_issue,
+    get_issues,
+    get_digest_snapshot,
+    get_counters_snapshot,
+    write_digest_snapshot,
+)
 
 __all__ = [
     "get_logger",
@@ -132,6 +142,11 @@ __all__ = [
     "WeComNotifier",
     "increment_counter",
     "flush_counters",
+    "record_issue",
+    "get_issues",
+    "get_digest_snapshot",
+    "get_counters_snapshot",
+    "write_digest_snapshot",
     "get_sender",
     "get_sender_by_email",
 ]

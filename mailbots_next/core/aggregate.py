@@ -43,7 +43,7 @@ from .extract import parse_email
 from .extractors.release import RE_VALID, build_attachments
 from .ingest import _server_folder, mark_seen
 from .log import get_logger
-from .notify import get_notifier, increment_counter
+from .notify import get_notifier, increment_counter, record_issue
 from .store import (
     find_forward_log_by_message_id,
     get_recipients,
@@ -335,11 +335,15 @@ def _load_pooled_items(batch_id: str) -> List[Dict[str, Any]]:
 
 
 def _alert(detail: str, kind: str = "program") -> None:
-    """告警走 OPS_OWNER_EMAIL。kind=config ⇒ E2 配置缺失语义，否则程序错误 E1。"""
+    """告警走 OPS_OWNER_EMAIL。kind=config ⇒ E2 配置缺失语义，否则程序错误 E1。
+
+    任务 16：配置缺失（kind=config）不再逐条弹企微，改为记进当日汇总项，
+    由 12:30 的每日邮件第三节列出；程序错误（E1）照旧实时发企微。
+    """
     try:
         notifier = get_notifier()
         if kind == "config":
-            notifier.send_config_missing(OPS_OWNER_EMAIL, "", detail)
+            record_issue("config_missing", detail, code="release_batch_config")
         else:
             notifier.send_program_error(OPS_OWNER_EMAIL, "", detail)
     except Exception as e:

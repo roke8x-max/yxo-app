@@ -7,7 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from ..config import DAILY_COUNTERS_PATH, DIGEST_HOUR, NOTIFY_COLLAPSE_WINDOW_SEC
+from ..config import (
+    DAILY_COUNTERS_PATH,
+    DAILY_DIGEST_PATH,
+    DAILY_ISSUES_PATH,
+    DIGEST_HOUR,
+    NOTIFY_COLLAPSE_WINDOW_SEC,
+)
 from .log import get_logger, mask_recipients
 
 _log = get_logger(__name__)
@@ -113,6 +119,122 @@ def flush_counters() -> Dict[str, int]:
     counts = data.get("counts", {})
     _save_counters({"date": datetime.now().strftime("%Y-%m-%d"), "counts": {}})
     return counts
+
+
+def get_counters_snapshot(date: Optional[str] = None) -> Dict[str, int]:
+    """取**指定日期**（默认今天）的计数；文件里是别的日期就返回空。
+
+    与 `get_counters()` 的区别：后者不看日期，跨天没写过就会把**昨天**的计数
+    当今天返回 —— 每日邮件不能用它（会把昨天的记账失败算到今天）。
+    """
+    data = _load_counters()
+    day = date or datetime.now().strftime("%Y-%m-%d")
+    if data.get("date") != day:
+        return {}
+    return {k: int(v or 0) for k, v in (data.get("counts") or {}).items()}
+
+
+# ---------------------------------------------------------------- 当日状态（任务 16）
+#
+# 任务 16 起，原来「逐封弹企微」的东西（未分类 / 配置缺失 / 待办 / 程序错误）
+# 改为**记账**，由 12:30 那封每日邮件统一列出。
+# 与 daily_counters.json 同目录、同「按自然日分桶」语义：跨天第一次写入自动清空
+# 旧日期，不需要任何定时清理任务。
+
+_ISSUES_MAX = 500        # 单日上限，防病态输入把文件写爆
+_issues_lock = threading.Lock()
+
+
+def _load_issues() -> Dict[str, Any]:
+    if DAILY_ISSUES_PATH.exists():
+        try:
+            with open(DAILY_ISSUES_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            _log.error(f"Failed to load daily issues: {type(e).__name__}: {e}")
+    return {}
+
+
+def _save_issues(data: Dict[str, Any]) -> None:
+    DAILY_ISSUES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _issues_lock:
+        with open(DAILY_ISSUES_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+
+
+def record_issue(kind: str, detail: str, code: str = "", at: Optional[datetime] = None) -> None:
+    """记一条要进每日邮件汇总的项（**只记账，不发任何通知**）。
+
+    kind: unclassified / config_missing / pending / program_error
+    code: 细分码（如 no_recipients / no_smtp_credentials），供邮件第三节计数
+    绝不抛异常：记账失败不能影响转发主链路。
+    """
+    try:
+        now = at or datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        data = _load_issues()
+        if data.get("date") != today:
+            data = {"date": today, "items": []}
+        items = data.setdefault("items", [])
+        items.append({
+            "kind": kind,
+            "code": code or "",
+            "at": now.strftime("%H:%M"),
+            "detail": str(detail or "")[:300],
+        })
+        if len(items) > _ISSUES_MAX:
+            del items[:len(items) - _ISSUES_MAX]
+        _save_issues(data)
+    except Exception as e:
+        _log.error(f"record_issue failed | kind={kind}: {type(e).__name__}: {e}")
+
+
+def get_issues(date: Optional[str] = None) -> List[Dict[str, Any]]:
+    """取指定日期（默认今天）记下的项；文件里是别的日期就返回空列表。"""
+    data = _load_issues()
+    day = date or datetime.now().strftime("%Y-%m-%d")
+    if data.get("date") != day:
+        return []
+    return list(data.get("items") or [])
+
+
+def clear_issues(date: Optional[str] = None) -> None:
+    """清空指定日期的项（测试隔离用；生产不需要定时清理）。"""
+    data = _load_issues()
+    day = date or datetime.now().strftime("%Y-%m-%d")
+    if data.get("date") == day:
+        _save_issues({"date": day, "items": []})
+
+
+def write_digest_snapshot(counts: Dict[str, int], date: Optional[str] = None) -> None:
+    """09:00 flush 之后把「这一段」的计数落地成当日快照。
+
+    flush_counters() 会把计数器清零；每日邮件 12:30 才发，所以必须先落地，
+    否则邮件读到的永远是空。**保留 flush 本身**（任务书 1.2）。
+    """
+    day = date or datetime.now().strftime("%Y-%m-%d")
+    DAILY_DIGEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(DAILY_DIGEST_PATH, "w", encoding="utf-8") as f:
+            json.dump({"date": day, "counts": dict(counts or {})}, f,
+                      ensure_ascii=False, indent=1)
+    except Exception as e:
+        _log.error(f"write_digest_snapshot failed: {type(e).__name__}: {e}")
+
+
+def get_digest_snapshot(date: Optional[str] = None) -> Dict[str, int]:
+    """读当日 digest 快照；日期不是当天就返回空（绝不拿昨天的充今天）。"""
+    day = date or datetime.now().strftime("%Y-%m-%d")
+    try:
+        if DAILY_DIGEST_PATH.exists():
+            with open(DAILY_DIGEST_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("date") == day:
+                return {k: int(v or 0) for k, v in (data.get("counts") or {}).items()}
+    except Exception as e:
+        _log.error(f"Failed to load digest snapshot: {type(e).__name__}: {e}")
+    return {}
 
 
 def _mask_addrs(addrs) -> list:
@@ -304,12 +426,26 @@ class WeComNotifier:
         content = f"📥 待办通知\n{detail}"
         return self.notify("pending", [responsible_person, admin_person], content, error_id)
 
-    def send_forwarded(self, responsible_person: str, admin_person: str, detail: str, error_id: Optional[str] = None) -> bool:
+    def send_forwarded(self, responsible_person: str, admin_person: str, detail: str,
+                       error_id: Optional[str] = None, cc_admin: bool = True) -> bool:
+        """转发成功通知。
+
+        `cc_admin=False` 时**只发负责人、不抄送管理员**（任务 16：运踪成功通知
+        不再发给洋）。🔴 必须是"少一个收件人"，不能拿空串/None/伪造邮箱去顶
+        管理员那一位 —— `_send_now` 对无企微映射的收件人会走 SMTP 降级邮件发给
+        运维负责人（`_fallback_owner_email`），那等于没停。
+        """
         content = f"✅ 已转发\n{detail}"
-        return self.notify("forwarded", [responsible_person, admin_person], content, error_id)
+        recipients = [responsible_person]
+        if cc_admin:
+            recipients.append(admin_person)
+        return self.notify("forwarded", recipients, content, error_id)
 
     def send_program_error(self, admin_person: str, error_id: str, detail: str) -> bool:
         content = f"❌ 程序错误 [error_id={error_id}]\n{detail}"
+        # 任务 16：程序错误仍实时发企微（行为不变），同时记账进每日邮件第三节
+        # —— 只在"发之前"记一笔，写文件失败也绝不影响企微发送。
+        record_issue("program_error", detail, code=str(error_id or ""))
         return self.notify("program_error", [admin_person], content, error_id)
 
     def send_config_missing(self, admin_person: str, error_id: str, detail: str) -> bool:

@@ -757,21 +757,11 @@ def run_dsk_robot():
                         except Exception:
                             pass
 
-                        # 通知负责人（微信客服通道，微信可收；失败回退企微应用消息）
-                        try:
-                            owner = company_to_name(company)
-                            if owner and not TEST_MODE:
-                                notice = (
-                                    f"📧 DSK 邮件已转发\n"
-                                    f"箱号：{box_no}\n"
-                                    f"公司：{company or '未知'}\n"
-                                    f"收件人：{','.join(to_list)}\n"
-                                    f"发件：{s_email}"
-                                )
-                                ok, ch = wecom_api.notify_by_name(owner, notice)
-                                log(f"     📲 通知 {owner}: {'成功(' + ch + ')' if ok else '失败'}")
-                        except Exception as e:
-                            log(f"     ⚠ 通知负责人失败: {e}")
+                        # 🔴 任务 16：转发成功**不再发企微**（企微只报异常/需人工介入）。
+                        # 洋是太平洋/港九港铁的负责人，按旧逻辑他每票都会收到一条成功通知。
+                        # 转发、时间戳回写、forward_log、本地缓存一律不动；成功信息由
+                        # 每日 12:30 那封汇总邮件承载。
+                        log(f"     ↳ [{box_no}] 已转发，成功类企微已停发（任务 16）")
 
                         # 回写时间戳到 yxo.db（不再写飞书总表）
                         if not TEST_MODE:

@@ -591,4 +591,10 @@ def test_21_empty_recipients_fails_batch(monkeypatch, ctx):
     assert _get_batch(b["batch_id"])["status"] == "failed"
     assert ctx.calls["smtp"] == []
     assert ctx.calls["seen"] == []
-    assert ctx.notifier.config_missing, "收件人为空要按 E2 配置缺失告警"
+    # 任务 16：E2 配置缺失不再逐条弹企微，改为记进当日汇总项（每日邮件第三节）
+    from mailbots_next.core.notify import get_issues
+    items = [i for i in get_issues()
+             if i["kind"] == "config_missing" and i["code"] == "release_batch_config"]
+    assert items, "收件人为空要按 E2 配置缺失记账（邮件第三节）"
+    assert "保时达" in items[0]["detail"]
+    assert ctx.notifier.config_missing == []

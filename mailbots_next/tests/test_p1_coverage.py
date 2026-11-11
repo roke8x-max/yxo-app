@@ -214,7 +214,9 @@ class TestTypeIdentification:
         got = proc._identify_type("ATB <atb@yxologistics.com>", "s", raw2)
         assert got == "atb" and got != "draft"
 
-    def test_unclassified_goes_config_missing_only(self):
+    def test_unclassified_recorded_not_wecom(self):
+        """任务 16：未分类不再逐封弹企微，改为记进当日汇总项（邮件第三节）。"""
+        from mailbots_next.core.notify import get_issues
         proc = self._proc()
         raw = _tiny_raw("Stranger <stranger@example.com>", "hello")
         with patch("mailbots_next.serve.extract_email") as mock_extract, \
@@ -222,8 +224,12 @@ class TestTypeIdentification:
             ok = proc.process_email("t@t.com", "草单", "g6-unclassified-1", 1,
                                "hello", "Stranger <stranger@example.com>", "", raw)
         assert ok is True
-        proc.notifier.send_config_missing.assert_called_once()
-        assert proc.notifier.send_config_missing.call_args[0][0] == OPS_OWNER_EMAIL
+        # 企微不再弹，且没有被"换个收件人"变相发出
+        proc.notifier.send_config_missing.assert_not_called()
+        proc.notifier.notify.assert_not_called()
+        items = [i for i in get_issues() if i["kind"] == "unclassified"]
+        assert len(items) == 1
+        assert "stranger@example.com" in items[0]["detail"]
         mock_extract.assert_not_called()
         mock_smtp.assert_not_called()
         # 新契约：单封级失败内部入队（带 raw）并返回 True，水位可推进
@@ -361,22 +367,30 @@ class TestSweeper:
             assert mock_get.return_value.send_program_error.call_count == 2
 
     def test_flush_and_notify(self):
+        """任务 16：flush 仍要跑（计数留给邮件读），但**不再发企微 digest**。"""
         from mailbots_next.serve import flush_and_notify
-        from mailbots_next.core.notify import increment_counter, get_counters
+        from mailbots_next.core.notify import (
+            increment_counter, get_counters, get_digest_snapshot,
+        )
         increment_counter("g8k", 2)
         with patch("mailbots_next.serve.get_notifier") as mock_get:
             mock_get.return_value = Mock()
             assert flush_and_notify() is True
-        args = mock_get.return_value.send_digest.call_args[0]
-        assert args[0] == OPS_OWNER_EMAIL and args[1] == {"g8k": 2}
+        # 企微 digest 一次都不能发
+        mock_get.return_value.send_digest.assert_not_called()
+        mock_get.return_value.notify.assert_not_called()
+        # 计数冲平了，但已落地成当日快照（12:30 的邮件要读它）
         assert get_counters() == {}
+        assert get_digest_snapshot().get("g8k") == 2
 
     def test_flush_and_notify_empty(self):
         from mailbots_next.serve import flush_and_notify
+        from mailbots_next.core.notify import get_digest_snapshot
         with patch("mailbots_next.serve.get_notifier") as mock_get:
             mock_get.return_value = Mock()
             assert flush_and_notify() is False
         mock_get.return_value.send_digest.assert_not_called()
+        assert get_digest_snapshot() == {}
 
 
 # ------------------------------------------------------- G9 凭证
@@ -411,6 +425,7 @@ class TestCredentials:
             sec_mod._SECRETS_CACHE = None
 
     def test_missing_password_goes_E2(self):
+        from mailbots_next.core.notify import get_issues
         proc = _harness([{
             "id": 1, "客户编码": "CQWLJT260810001", "箱号": "CICU1000001",
             "company": "太平洋", "状态": "正常", "is_deleted": 0,
@@ -425,8 +440,10 @@ class TestCredentials:
             proc.process_email("t@t.com", "运单号", "g9-nopwd-1", 1,
                                "Waybill CQWLJT260810001 CICU1000001",
                                "Docwbfb <docwbfb@yxologistics.com>", "", raw)
-        proc.notifier.send_config_missing.assert_called_once()
-        assert proc.notifier.send_config_missing.call_args[0][0] == OPS_OWNER_EMAIL
+        proc.notifier.send_config_missing.assert_not_called()
+        items = [i for i in get_issues()
+                 if i["kind"] == "config_missing" and i["code"] == "no_smtp_credentials"]
+        assert len(items) == 1 and "SMTP" in items[0]["detail"]
         mock_smtp.assert_not_called()
         queued = [e for e in get_pending_errors(100) if e["message_id"] == "g9-nopwd-1"]
         assert len(queued) == 1 and queued[0]["error_type"] == "MISSING_CREDENTIALS"

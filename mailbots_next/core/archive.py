@@ -956,14 +956,14 @@ def _purge_source_group(conn, account: str, src_folder: str,
 
 
 def _notify_summary(stats: Dict[str, int]) -> None:
-    """汇总一条通知：核过 N / 已删 N / 核对失败 M / 补记已删 K / 终止 T。"""
+    """汇总（核过 N / 已删 N / 核对失败 M / 补记已删 K / 终止 T）。
+
+    任务 16：**不再发企微 `archive_summary`** —— 改为落地成当日快照，
+    由 12:30 的每日邮件第四节列出（见 `daily_report.write_archive_stats`）。
+    归档失败告警 `_alert()` 是**异常**，仍然走企微、本函数不碰。
+    """
     try:
-        get_notifier().notify(
-            "archive_summary", [OPS_OWNER_EMAIL],
-            "🗂 归档核对完成\n"
-            f"核过 {stats.get('verified', 0)} / 已删 {stats.get('deleted', 0)} / "
-            f"核对失败 {stats.get('failed', 0)} / 补记已删 {stats.get('recovered_deleted', 0)} / "
-            f"终止 {stats.get('terminated', 0)}",
-        )
+        from . import daily_report
+        daily_report.write_archive_stats(stats)
     except Exception as e:
-        _log.error(f"archive summary notify failed: {type(e).__name__}: {e}")
+        _log.error(f"archive summary snapshot failed: {type(e).__name__}: {e}")
