@@ -755,10 +755,14 @@ class TestSplitRules:
         assert n == 0
 
     def test_missing_recipients_goes_E2(self):
-        """命中公司缺收件人配置 → E2（日志 + 告警），不静默跳过."""
+        """命中公司缺收件人配置 → E2（日志 + 入队 + 记进当日汇总项），不静默跳过.
+
+        任务 16：不再逐封弹企微，改为记账，由每日邮件第三节列出。
+        """
         from unittest.mock import Mock, patch
         from mailbots_next.core.extract import ExtractedRow
         from mailbots_next.core import get_connection, get_pending_errors
+        from mailbots_next.core.notify import get_issues
         import mailbots_next.serve as serve_mod
 
         processor = serve_mod.MailProcessor.__new__(serve_mod.MailProcessor)
@@ -772,10 +776,10 @@ class TestSplitRules:
                 routing, row, "dsk", "e2-msg-1", "0:CICU1000001", b"raw",
                 "a@x.com", "INBOX", 7, "s", "subj", "",
             )
-        processor.notifier.send_config_missing.assert_called_once()
-        from mailbots_next.config.settings import OPS_OWNER_EMAIL
-        args = processor.notifier.send_config_missing.call_args[0]
-        assert args[0] == OPS_OWNER_EMAIL and "太平洋" in args[2]
+        processor.notifier.send_config_missing.assert_not_called()
+        issues = [i for i in get_issues()
+                  if i["kind"] == "config_missing" and i["code"] == "no_recipients"]
+        assert len(issues) == 1 and "太平洋" in issues[0]["detail"]
         mock_smtp.assert_not_called()
         pending = [e for e in get_pending_errors(100) if e["message_id"] == "e2-msg-1"]
         assert len(pending) == 1

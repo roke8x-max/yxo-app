@@ -10,6 +10,21 @@ YXO_DB_PATH = os.environ.get("YXO_DB_PATH", r"\\10.0.199.184\yxo_data\yxo_app\da
 BOT_CONFIG_DB_PATH = Path(os.environ.get("BOT_CONFIG_DB_PATH", str(DATA_DIR / "bot_config.db")))
 DEDUP_DB_PATH = Path(os.environ.get("DEDUP_DB_PATH", str(DATA_DIR / "dedup.db")))
 DAILY_COUNTERS_PATH = Path(os.environ.get("DAILY_COUNTERS_PATH", str(DATA_DIR / "daily_counters.json")))
+
+# ---- 每日一封汇总邮件（任务 16）：四份「当天」状态文件 ----
+# 全是运行期产物（data/ 已 gitignore），不进包、不进库：数据库表/列结构一律不动。
+# 09:00 flush 后的计数快照（原企微 digest 的全部计数改由邮件第四节承载）
+DAILY_DIGEST_PATH = Path(os.environ.get("DAILY_DIGEST_PATH", str(DATA_DIR / "daily_digest.json")))
+# 当日待汇总项：未分类 / 配置缺失 / 待办 / 程序错误（原逐封弹企微的改记这里）
+DAILY_ISSUES_PATH = Path(os.environ.get("DAILY_ISSUES_PATH", str(DATA_DIR / "daily_issues.json")))
+# 12:00 归档核对 stats 快照（原企微 archive_summary 的内容）
+ARCHIVE_STATS_PATH = Path(os.environ.get("ARCHIVE_STATS_PATH", str(DATA_DIR / "archive_stats.json")))
+# 「今天这封已发」标记 —— 「每天恰好一封」的执行依据
+DAILY_REPORT_SENT_PATH = Path(os.environ.get("DAILY_REPORT_SENT_PATH", str(DATA_DIR / "daily_report_sent.json")))
+# 旧系统转发明细库：草单/运单号/ATB/DSK 只写这张表（运踪写 yxo.db 的 tracing_log）
+LEGACY_FORWARD_LOG_PATH = Path(os.environ.get(
+    "LEGACY_FORWARD_LOG_PATH", str(BASE_DIR.parent / "mailbots" / "data" / "forward_log.db")))
+
 SECRETS_PATH = Path(os.environ.get("MAILBOT_SECRETS_PATH", str(BASE_DIR / "secrets.json")))
 
 SMTP_SERVER = "smtp.qiye.aliyun.com"
@@ -37,6 +52,10 @@ INBOUND_SHARED_SECRET = os.environ.get("INBOUND_SHARED_SECRET", "")
 SWEEP_INTERVAL_SEC = int(os.environ.get("SWEEP_INTERVAL_SEC", "300"))
 SWEEP_MAX_RETRY = int(os.environ.get("SWEEP_MAX_RETRY", "3"))
 DIGEST_HOUR = int(os.environ.get("DIGEST_HOUR", "9"))
+# 每日一封汇总邮件的固定发送时点（12:30 —— 等 12:00 归档核对跑完，数据才齐）。
+# 见任务 16 / 06_EMAIL-DESIGN.md「发送规则（写死）」。
+DAILY_REPORT_HOUR = int(os.environ.get("DAILY_REPORT_HOUR", "12"))
+DAILY_REPORT_MINUTE = int(os.environ.get("DAILY_REPORT_MINUTE", "30"))
 
 # Raw mail kept per error-queue entry is hex-encoded (~2x). Entries whose raw
 # bytes exceed this cap store no payload (WARN + counter instead of silent

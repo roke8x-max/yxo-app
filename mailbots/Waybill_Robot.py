@@ -360,22 +360,13 @@ def wecom_notify_person(real_name, text):
 
 
 def wecom_summary_to_admin(notified):
-    """规则 #118: 仅当本轮有实际处理(notified 非空)才给管理员(毛骁洋)发微信/企微摘要;
-    空跑(无处理)绝不发。返回 (ok, channel)。"""
-    if not (_notify_by_name and notified):
-        return False, ""
-    n = len(notified)
-    lines = [f"📋 运单号机器人 · 正式汇总 {datetime.now().strftime('%H:%M')}",
-             f"本次实际处理 {n} 单"]
-    for p in notified[:8]:
-        lines.append(f"· [{p['category']}] {p.get('code') or '-'} → {p.get('owner') or '-'}")
-    if n > 8:
-        lines.append(f"…其余 {n - 8} 单")
-    try:
-        return _notify_by_name(ADMIN_NAME, "\n".join(lines))
-    except Exception as e:
-        log(f"  ⚠ 毛骁洋微信/企微汇总异常: {e}")
-        return False, ""
+    """【任务 16 已停用】每轮运行汇总不再发给洋。
+
+    原来规则 #118：本轮有实际处理就给毛骁洋发一条企微摘要。洋已拍板
+    「企微只报异常/需人工介入」，成功类汇总整体停掉，函数保留为空壳是为了
+    让任何残留调用都变成 no-op 而不是报错（真正的信息走 12:30 的每日汇总邮件）。
+    """
+    return False, ""
 
 
 # ---------- SMTP ----------
@@ -842,12 +833,9 @@ def run():
                                 note=f"WAY_A 拆分转发({(_src or '?')}, {len(g['rows'])}行)", test=False)
                         except Exception:
                             pass
-                        # 企微告知「已按公司拆分自动转发」(不含确认/跳过按钮)
-                        wecom_notify_person(g["owner"],
-                            f"✅ 运单号已按公司拆分自动转发（{len(g['rows'])}行，无需确认）\n"
-                            f"主题: {p['subject'][:60]}\n"
-                            f"客编: {_codes}\n"
-                            f"已发往: {', '.join(g['to'])}")
+                        # 🔴 任务 16：转发成功**不再发企微**（企微只报异常/需人工介入）。
+                        # 转发本身、台账、forward_log 一律不动；成功信息由每日 12:30
+                        # 那封汇总邮件承载（转发明细按负责人分组）。
                         log(f"  🚀 [WAY_A拆分] {_codes} → {g['owner']} 收件人={g['to']} ({len(g['rows'])}行)")
                     except Exception as _e:
                         log(f"  ⚠ [WAY_A拆分] 发送失败({_e}), 该行组回退待确认")
@@ -927,36 +915,18 @@ def run():
 
 
 def _send_summary_email(plan, notified):
-    try:
-        lines = [f"运单号转发机器人 · {'测试' if TEST_MODE else '正式'}运行汇总",
-                 f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                 f"扫描去重后待处理 {len(plan)} 单",
-                 ""]
-        for p in plan:
-            lines.append(f"[{p['category']}] {p['subject'][:60]}")
-            lines.append(f"    客编:{p.get('code') or '-'} 箱号:{p.get('box') or '-'} 负责:{p['owner']} 匹配:{p['level']}")
-            if p["category"] == "WAY_A" and p.get("rows"):
-                for r in p["rows"][:5]:
-                    lines.append(f"      箱 {r.get('箱号') or '-'} → 运单 {r.get('运单号') or '-'}")
-        summary = MIMEMultipart()
-        summary.attach(MIMEText("\n".join(lines), "plain", "utf-8"))
-        summary["Subject"] = f"[{'测试' if TEST_MODE else '正式'}] 运单号机器人运行汇总 {datetime.now().strftime('%H:%M')}"
-        admin_pwd = ACCOUNTS.get(ADMIN_MAILBOX)
-        _has_action = bool(notified)
-        if TEST_MODE:
-            # 测试期: 汇总发验证邮箱(原行为), 不骚扰毛骁洋
-            smtp_send(summary, ADMIN_MAILBOX, admin_pwd, [VERIFY_MAILBOX])
-            log("  📧 测试汇总已发验证邮箱(不通知毛骁洋)")
-        elif _has_action:
-            # 正式期且有实际处理: 邮件发毛骁洋 + 微信/企微摘要
-            smtp_send(summary, ADMIN_MAILBOX, admin_pwd, [ADMIN_MAILBOX])
-            log("  📧 正式汇总已发毛骁洋邮箱")
-            ok, ch = wecom_summary_to_admin(notified)
-            log(f"  📲 毛骁洋微信/企微汇总: {'✅' if ok else '❌'} 通道={ch or '-'}")
-        else:
-            log("  ⏭ LIVE 空跑(无实际处理), 跳过毛骁洋所有通知")
-    except Exception as e:
-        log(f"  ⚠ 汇总邮件发送失败: {e}")
+    """本轮回执 —— **只写日志，不再发邮件/企微给洋**（任务 16）。
+
+    洋已拍板：企微只报异常；邮件每天恰好一封（12:30 的每日汇总）。
+    所以「每轮运行汇总」这条渠道整体停掉，但信息不许丢 —— 仍然逐条打到运行日志，
+    且每票的转发明细都会进当天/次日那封汇总邮件的第五节。
+    """
+    log(f"  汇总(仅日志，不发邮件/企微): 待处理 {len(plan)} 单 | 实际通知负责同事 {len(notified)} 单")
+    for p in plan[:20]:
+        log(f"    [{p['category']}] 客编:{p.get('code') or '-'} 箱号:{p.get('box') or '-'} "
+            f"负责:{p['owner']} 匹配:{p['level']}")
+    if len(plan) > 20:
+        log(f"    …其余 {len(plan) - 20} 单见日志/每日汇总邮件")
 
 
 if __name__ == "__main__":

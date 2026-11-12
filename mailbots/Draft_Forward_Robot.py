@@ -455,23 +455,13 @@ def wecom_notify_person(real_name, text):
 
 
 def wecom_summary_to_admin(sent_report, stats):
-    """规则 #118: 仅当本轮有实际转发(sent_report 非空)才给管理员(毛骁洋)发微信/企微摘要;
-    空跑(无转发)绝不发。返回 (ok, channel)。"""
-    if not (_notify_by_name and sent_report):
-        return False, ""
-    n = len(sent_report)
-    lines = [f"📋 草单转发机器人 · 正式汇总 {datetime.now().strftime('%H:%M')}",
-             f"本次实际转发 {n} 封"]
-    for p in sent_report[:8]:
-        dst = ",".join(p.get("to") or []) or (p.get("company") or "-")
-        lines.append(f"· [{p['category']}] {p.get('code') or '-'} → {p.get('notify_to') or dst}")
-    if n > 8:
-        lines.append(f"…其余 {n - 8} 封")
-    try:
-        return _notify_by_name(ADMIN_NAME, "\n".join(lines))
-    except Exception as e:
-        log(f"  ⚠ 毛骁洋微信/企微汇总异常: {e}")
-        return False, ""
+    """【任务 16 已停用】每轮运行汇总不再发给洋。
+
+    原来规则 #118：本轮有实际转发就给毛骁洋发一条企微摘要。洋已拍板
+    「企微只报异常/需人工介入」，成功类汇总整体停掉；函数保留为空壳是为了让
+    残留调用变成 no-op 而不是报错（信息走 12:30 的每日汇总邮件）。
+    """
+    return False, ""
 
 
 def build_notify_text(p, test_mode):
@@ -761,14 +751,12 @@ def run():
             except Exception:
                 pass
 
-            # 企微通知对应负责同事：仅 LIVE 正式模式真实发送；TEST/停止态不通知同事（避免误打扰）
+            # 🔴 任务 16：转发成功**不再发企微**（企微只报异常/需人工介入）。
+            # 转发本身、台账、forward_log 一律不动；成功信息由每日 12:30 那封
+            # 汇总邮件承载。channel 保持空 ⇒ 台账里该列回落成 "email"。
             channel = ""
             responsible = company_to_name(p["company"]) if p["company"] else None
-            if responsible and not TEST_MODE:
-                ok, channel = wecom_notify_person(responsible, build_notify_text(p, TEST_MODE))
-                log(f"  📲 企微通知 {responsible}: {'✅' if ok else '❌'} 通道={channel or '-'}")
-            else:
-                log(f"  ⚠ 无法定位负责人(公司={p['company']}), 跳过企微通知")
+            log(f"  ↳ 已转发 {responsible or '-'}（任务 16：成功类企微已停发）")
             p["notify_to"] = responsible
             p["notify_channel"] = channel
 
@@ -922,52 +910,25 @@ def run():
 
     # LIVE 模式下若本轮无任何实际动作(空跑, 如午夜前的历史护栏期), 不发摘要避免刷屏
     _anything = bool(sent_report) or bool(new_senders) or bool(stats) or any(x["action"] == "pending" for x in plan)
-    # 6) 汇总邮件（发验证邮箱 / 正式期发管理员）
+    # 6) 本轮回执 —— **只写日志，不再发邮件/企微给洋**（任务 16）
+    #    洋已拍板：企微只报异常；邮件每天恰好一封（12:30 的每日汇总）。
+    #    信息不丢：逐条打日志，且转发明细都会进那封汇总邮件第五节。
     try:
-        lines = [f"草单转发机器人 · {'测试' if TEST_MODE else '正式'}运行汇总",
-                 f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                 f"扫描: 4邮箱共 {len(all_items)} 封, 去重后 {len(items)} 封, 待处理 {len(plan)} 封",
-                 f"分类: " + " / ".join(f"{k}:{v}" for k, v in sorted(stats.items())),
-                 ""]
-        lines.append("— 本次实际发送 —")
-        for p in sent_report:
-            lines.append(f"[{p['category']}|{p['level']}] {p['subject'][:60]}")
-            lines.append(f"    客编:{p['code'] or '-'} 箱号:{p['box'] or '-'} 公司:{p['company'] or '-'} 原收件人:{','.join(p['to']) or '(待确认)'}")
-            lines.append(f"    企微通知:{p.get('notify_to') or '-'} 通道:{p.get('notify_channel') or '未发出'}")
-        lines.append("")
-        lines.append("— C2 确认回复(按规则不转发, 仅记录) 样例 —")
-        for p in [x for x in plan if x["category"] == "C2"][:5]:
-            lines.append(f"[C2] {p['subject'][:60]}  发件人:{p['sender']}")
-        wcount = len([x for x in plan if x["category"] == "W"])
-        if wcount:
-            lines.append(f"\n— W 运单号通知 {wcount} 封(本期只记录, 留给运单号模块) —")
-        if new_senders:
-            lines.append("\n— 新发件人(首次出现, 单证部人员变动监测) —")
-            for s in sorted(new_senders):
-                lines.append(f"  {s}")
+        log(f"  汇总(仅日志，不发邮件/企微): 扫描 4 邮箱 {len(all_items)} 封 / 去重后 "
+            f"{len(items)} 封 / 待处理 {len(plan)} 封 / 实际发送 {len(sent_report)} 封 | "
+            f"分类 {dict(sorted(stats.items()))}")
+        for p in sent_report[:20]:
+            log(f"    [{p['category']}|{p['level']}] 客编:{p['code'] or '-'} "
+                f"箱号:{p['box'] or '-'} 公司:{p['company'] or '-'} "
+                f"原收件人:{','.join(p['to']) or '(待确认)'}")
+        if len(sent_report) > 20:
+            log(f"    …其余 {len(sent_report) - 20} 封见日志/每日汇总邮件")
         pend = [x for x in plan if x["action"] == "pending"]
-        lines.append(f"\n待确认队列(正式运行时将走企微确认流程): {len(pend)} 封")
-        for p in pend[:10]:
-            lines.append(f"  [{p['category']}|{p['level']}] {p['subject'][:55]}")
-        summary = MIMEMultipart()
-        summary.attach(MIMEText("\n".join(lines), "plain", "utf-8"))
-        summary["Subject"] = f"[{'测试' if TEST_MODE else '正式'}] 草单转发机器人运行汇总 {datetime.now().strftime('%H:%M')}"
-        # 规则 #118: 仅当本轮有实际转发(sent_report 非空)才给毛骁洋发通知; 空跑绝不发
-        _has_forward = bool(sent_report)
-        if TEST_MODE:
-            # 测试期: 汇总发验证邮箱(原行为), 不骚扰毛骁洋
-            smtp_send(summary, ADMIN_MAILBOX, admin_pwd, [VERIFY_MAILBOX])
-            log("  📧 测试汇总已发验证邮箱(不通知毛骁洋)")
-        elif _has_forward:
-            # 正式期且有实际转发: 邮件发毛骁洋 + 微信/企微摘要
-            smtp_send(summary, ADMIN_MAILBOX, admin_pwd, [ADMIN_MAILBOX])
-            log("  📧 正式汇总已发毛骁洋邮箱")
-            ok, ch = wecom_summary_to_admin(sent_report, stats)
-            log(f"  📲 毛骁洋微信/企微汇总: {'✅' if ok else '❌'} 通道={ch or '-'}")
-        else:
-            log("  ⏭ LIVE 空跑(无实际转发 sent_report 为空), 跳过毛骁洋所有通知")
+        log(f"    待确认队列 {len(pend)} 封（正式运行时走企微确认流程）")
+        if new_senders:
+            log(f"    新发件人 {len(new_senders)} 个: {', '.join(sorted(new_senders))}")
     except Exception as e:
-        log(f"  ⚠ 汇总邮件发送失败: {e}")
+        log(f"  ⚠ 汇总日志输出失败: {e}")
 
     # 7) 记录新发件人
     for s in new_senders:

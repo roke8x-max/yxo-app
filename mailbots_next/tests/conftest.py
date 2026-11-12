@@ -57,6 +57,12 @@ os.environ.setdefault("INBOUND_SHARED_SECRET", "test_secret_123")
 os.environ.setdefault("BOT_CONFIG_DB_PATH", str(_TEST_DATA_DIR / "bot_config.db"))
 os.environ.setdefault("DEDUP_DB_PATH", str(_TEST_DATA_DIR / "dedup.db"))
 os.environ.setdefault("DAILY_COUNTERS_PATH", str(_TEST_DATA_DIR / "daily_counters.json"))
+# 任务 16：每日一封汇总邮件的四份「当天」状态 + 旧系统转发明细库
+os.environ.setdefault("DAILY_DIGEST_PATH", str(_TEST_DATA_DIR / "daily_digest.json"))
+os.environ.setdefault("DAILY_ISSUES_PATH", str(_TEST_DATA_DIR / "daily_issues.json"))
+os.environ.setdefault("ARCHIVE_STATS_PATH", str(_TEST_DATA_DIR / "archive_stats.json"))
+os.environ.setdefault("DAILY_REPORT_SENT_PATH", str(_TEST_DATA_DIR / "daily_report_sent.json"))
+os.environ.setdefault("LEGACY_FORWARD_LOG_PATH", str(_TEST_DATA_DIR / "legacy_forward_log.db"))
 os.environ.setdefault("LOGS_DIR", str(_TEST_DATA_DIR / "logs"))
 
 # Fake credentials file: tests must never touch the real secrets.json.
@@ -86,9 +92,15 @@ import pytest
 @pytest.fixture(autouse=True)
 def reset_notifier():
     """Reset the notifier singleton before each test to ensure isolation."""
-    from mailbots_next.core.notify import reset_notifier as _reset_notifier, get_notifier as _get_notifier
+    from mailbots_next.core.notify import (
+        reset_notifier as _reset_notifier,
+        get_notifier as _get_notifier,
+        clear_issues as _clear_issues,
+    )
     from unittest.mock import Mock
     _reset_notifier()
+    # 任务 16：当日待汇总项（未分类/配置缺失/待办/程序错误）也是全局状态，逐测清空
+    _clear_issues()
     n = _get_notifier()
     n._notify_by_name = Mock(return_value=(True, "wxwork"))
     yield

@@ -1,100 +1,62 @@
 # -*- coding: utf-8 -*-
-"""
-每日转发汇总日报（2026-07-31 毛骁洋定规则）
+"""每日转发汇总 —— 现在**只有一封**（任务 16）。
 
-规则:
-  DSK / ATB / 草单 / 运单号 统一 ——
-    · 转发了就企微通知（实时，各机器人内部完成）
-    · 每天早上 8:00 给对应同事邮箱发一份汇总邮件备查，说明「昨天」的转发情况
+历史（已废止）：原来是「每位同事一份个人版 + 毛骁洋一份全局总表」两批邮件，
+每天早上 8:00 由计划任务拉起。
 
-行为:
-  · 按同事分组，只给「昨天确实有转发」的同事发（0 条不打扰，与毛骁洋"有转发再发"的一贯要求一致）
-  · 毛骁洋额外收一份全局总表（只要全公司昨天有任何转发）
-  · 测试记录(test=1)默认不计入
+任务 16 起（洋已拍板，方向不再讨论）：
+  · 个人版**停发** —— 洋因负责太平洋/港九港铁才会收到其中一封，那封正是"两封"的
+    来源之一；它包含的信息本来就在总表「按同事分组 + 全部明细」里，停发不丢信息。
+  · 全局总表是**唯一那一封**，但正文**从头重写**为五节结构
+    （唯一真相源：任务包 `06_EMAIL-DESIGN.md`），并把原企微 09:00 digest、
+    12:00 归档汇总、未分类/配置缺失逐封告警、待办汇总、程序错误全部并入。
+  · 收件人只有洋；**每天 12:30**（等 12:00 归档核对跑完）；当日 0 转发 0 异常也发短报。
+
+`build_admin_body()` / `build_person_body()` 已不再是邮件文本骨架：
+`build_admin_body()` 保留仅作**取数/对照**（任务书 2.2：旧函数只作为取数来源），
+**不要**把它接回发送路径。真正的正文生成在
+`mailbots_next/core/daily_report.py`（唯一实现）。
 
 用法:
-  python daily_forward_report.py              # 汇总昨天，正常发送
-  python daily_forward_report.py --day 2026-07-30
-  python daily_forward_report.py --dry        # 只打印不发送
-  python daily_forward_report.py --to-admin-only   # 全部只发毛骁洋（灰度/试运行用）
+  python daily_forward_report.py                    # 到点（>=12:30）才发；未到点直接退出
+  python daily_forward_report.py --dry              # 只打印正文，不发、不写"已发"标记
+  python daily_forward_report.py --day 2026-11-09   # 转发明细改取指定日期（人工补查）
+  python daily_forward_report.py --force            # 立刻发（人工补发；覆盖当天"已发"标记）
 """
 import os
 import sys
 import json
 import argparse
-import smtplib
-from datetime import datetime, timedelta
-from email.mime.text import MIMEText
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(ROOT, "WeComBot"))
 
-import forward_log  # noqa: E402
-from config import ACCOUNTS, USER_EMAILS  # noqa: E402
+# 每日邮件的唯一实现在 mailbots_next 里。🔴 必须 **append** 仓库根，不能用
+# insert(0)：仓库根也有 config.py，插到最前面会把 `mailbots/config.py` 顶掉。
+if ROOT not in sys.path:
+    sys.path.append(ROOT)
 
-SMTP_SERVER = "smtp.qiye.aliyun.com"
-SMTP_PORT = 465
-ADMIN_NAME = "毛骁洋"
-ADMIN_MAILBOX = USER_EMAILS.get(ADMIN_NAME, "maoxiaoyang@cqtransit.com")
-ROBOT_ORDER = ["DSK", "ATB", "草单", "运单号"]
+# 不再 import WeComBot/config：那会把「读企微 secrets.json」变成本脚本的启动硬依赖
+# （缺文件直接 RuntimeError），而发信早已交给 mailbots_next（读它自己的凭证）。
 
 
 def log(m):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {m}")
 
 
-def smtp_send(subject, body, to_list):
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = ADMIN_MAILBOX
-    msg["To"] = ", ".join(to_list)
-    pwd = ACCOUNTS.get(ADMIN_MAILBOX)
-    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as s:
-        s.login(ADMIN_MAILBOX, pwd)
-        s.sendmail(ADMIN_MAILBOX, to_list, msg.as_string())
-
+# ---------------------------------------------------------------- 旧正文（仅取数/对照）
+#
+# 🔴 任务 16：`build_admin_body()` 不再是邮件文本骨架（新正文是五节的
+# `mailbots_next/core/daily_report.py`）。保留它是因为验收要拿旧输出做对照，
+# 也便于运维核对"按同事分组 + 全部明细"的口径没变。**不要接回发送路径。**
 
 def _group_by_robot(rows):
     g = {}
     for r in rows:
         g.setdefault(r["robot"] or "?", []).append(r)
     return g
-
-
-def build_person_body(owner, rows, day):
-    by_robot = _group_by_robot(rows)
-    lines = [f"{owner} 你好，",
-             f"以下是 {day} （昨天）系统自动转发给你的邮件汇总，供你核对备查。", "",
-             f"合计 {len(rows)} 封：" + "、".join(
-                 f"{k} {len(v)} 封" for k, v in by_robot.items()), ""]
-    for robot in ROBOT_ORDER:
-        rs = by_robot.get(robot)
-        if not rs:
-            continue
-        lines.append("=" * 46)
-        lines.append(f"【{robot}】{len(rs)} 封")
-        for r in rs:
-            t = (r["ts"] or "")[11:16]
-            seg = [f"  {t}"]
-            if r["box"]:
-                seg.append(f"箱号 {r['box']}")
-            if r["code"]:
-                seg.append(f"客编 {r['code']}")
-            if r["company"]:
-                seg.append(r["company"])
-            lines.append("  ".join(seg))
-            if r["subject"]:
-                lines.append(f"        主题：{r['subject'][:70]}")
-            if r["to_list"]:
-                lines.append(f"        收件：{r['to_list'][:80]}")
-            if r["note"]:
-                lines.append(f"        备注：{r['note']}")
-    lines += ["", "=" * 46,
-              "本邮件由订舱助手每天 08:00 自动发送，仅作备查，无需回复。",
-              "如发现漏转/错转，请在企微或微信里告诉订舱助手。"]
-    return "\n".join(lines)
 
 
 def build_admin_body(grouped, day, total, by_robot):
@@ -128,61 +90,40 @@ def build_admin_body(grouped, day, total, by_robot):
     except Exception:
         pass
 
-    lines.append("本邮件由订舱助手每天 08:00 自动发送。")
+    lines.append("（本函数自任务 16 起仅作取数/对照，不再作为邮件文本骨架；正式正文见 mailbots_next/core/daily_report.py）")
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- 发送（唯一那一封）
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--day", help="汇总哪一天 YYYY-MM-DD，默认昨天")
-    ap.add_argument("--dry", action="store_true", help="只打印不发送")
-    ap.add_argument("--to-admin-only", action="store_true",
-                    help="全部只发毛骁洋（灰度/试运行）")
-    ap.add_argument("--include-test", action="store_true", help="把测试记录也算进来")
+    ap.add_argument("--day", help="转发明细取哪一天 YYYY-MM-DD，默认昨天")
+    ap.add_argument("--dry", action="store_true", help="只打印正文，不发送")
+    ap.add_argument("--force", action="store_true",
+                    help="立刻发送（不等到 12:30、忽略当天已发标记；人工补发用）")
     args = ap.parse_args()
 
-    day = args.day or (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    grouped = forward_log.fetch_day(day, include_test=args.include_test)
-    total, by_robot = forward_log.stats_day(day, include_test=args.include_test)
+    from mailbots_next.config import OPS_OWNER_EMAIL
+    from mailbots_next.core.daily_report import send_daily_report
 
-    log(f"汇总日期 {day} | 共 {total} 条 | {by_robot or '无'}")
-    if not total:
-        log("昨天没有任何转发，按规则不发送任何邮件。")
-        return
-
-    # 1) 逐个同事
-    for owner, rows in grouped.items():
-        addr = USER_EMAILS.get(owner)
-        if not addr:
-            log(f"  ⏭ {owner} 无邮箱映射，其 {len(rows)} 条并入毛骁洋总表")
-            continue
-        target = ADMIN_MAILBOX if args.to_admin_only else addr
-        subject = f"[转发日报] {day} 你共收到 {len(rows)} 封自动转发邮件"
-        if args.to_admin_only:
-            subject = f"[代收·{owner}] " + subject
-        body = build_person_body(owner, rows, day)
-        if args.dry:
-            log(f"  （演练）→ {owner} <{target}> {len(rows)} 条")
-            continue
-        try:
-            smtp_send(subject, body, [target])
-            log(f"  ✅ {owner} → {target}（{len(rows)} 条）")
-        except Exception as e:
-            log(f"  ❌ {owner} 发送失败: {e}")
-
-    # 2) 毛骁洋全局总表
-    subject = f"[转发日报·总表] {day} 全公司共转发 {total} 封"
-    body = build_admin_body(grouped, day, total, by_robot)
+    res = send_daily_report(day=args.day, force=args.force, dry=args.dry)
+    reason = res.get("reason")
     if args.dry:
-        log(f"  （演练）→ 总表 <{ADMIN_MAILBOX}>")
-        print("\n" + "-" * 60 + "\n" + body[:1500])
-        return
-    try:
-        smtp_send(subject, body, [ADMIN_MAILBOX])
-        log(f"  ✅ 总表 → {ADMIN_MAILBOX}")
-    except Exception as e:
-        log(f"  ❌ 总表发送失败: {e}")
+        print(res.get("body") or "")
+        return 0
+    if reason == "not_due":
+        log("未到 12:30，今日汇总邮件不在此刻发送（要立即发请加 --force）。")
+        return 0
+    if reason == "already_sent":
+        log("今天这封已经发过了（每天恰好一封），本次跳过。")
+        return 0
+    if reason == "sent":
+        log(f"✅ 已发送 → {OPS_OWNER_EMAIL} | {res.get('subject')}")
+        return 0
+    log(f"❌ 发送失败：{reason}（详见日志）")
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

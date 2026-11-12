@@ -25,6 +25,8 @@ from mailbots_next.config import (
     FORWARD_SINCE,
     BOUNCE_MONITOR_ENABLED,
     BOUNCE_POLL_SEC,
+    DAILY_REPORT_HOUR,
+    DAILY_REPORT_MINUTE,
     EmailType,
     get_accounts,
     is_type_enabled,
@@ -55,6 +57,8 @@ from mailbots_next.core import (
     EmailLogger,
     get_connection,
     poll_bounces,
+    record_issue,
+    write_digest_snapshot,
 )
 # 任务 12：复制归档 / 每日核对删除（独立模块，不参与 core 的 __init__ 汇总导出）
 from mailbots_next.core import archive
@@ -122,7 +126,12 @@ class MailProcessor:
                           account=account, folder=folder, uid=uid,
                           subject=subject, sender=sender, date_hdr=date_hdr,
                           raw_bytes=raw_bytes)
-            self.notifier.send_config_missing(OPS_OWNER_EMAIL, error_id, f"Unclassified email: {subject[:100]}")
+            # 任务 16：未分类不再逐封弹企微，改为记进当日汇总项（每日邮件第三节）；
+            # 逐条 add_error / 日志保持不变。
+            record_issue(
+                "unclassified",
+                f"来自 {sender}「{subject[:60]}」",
+            )
             self._set_last_outcome({"queued": 1})
             return True
 
@@ -428,13 +437,13 @@ class MailProcessor:
                       raw_bytes=raw_bytes)
             increment_counter("routing_failed")
             # E2 config-missing: company resolved but no recipients configured —
-            # log + alert the ops owner instead of silently skipping.
+            # log + queue，并记进当日汇总项（任务 16：不再逐封弹企微）。
             if routing.company:
-                self.notifier.send_config_missing(
-                    OPS_OWNER_EMAIL,
-                    error_id,
-                    f"E2 missing recipients for company {routing.company} "
-                    f"(type={email_type} source={routing.route_source} subject={subject[:100]})",
+                record_issue(
+                    "config_missing",
+                    f"无收件人：公司 {routing.company} 未配置收件人"
+                    f"（type={email_type} source={routing.route_source} subject={subject[:60]}）",
+                    code="no_recipients",
                 )
             return "queued"
 
@@ -496,11 +505,12 @@ class MailProcessor:
                       subject=subject, sender=sender, date_hdr=date_hdr,
                       raw_bytes=raw_bytes)
             increment_counter("missing_credentials")
-            self.notifier.send_config_missing(
-                OPS_OWNER_EMAIL,
-                eid,
-                f"E2 missing SMTP credentials for {sender_email or account} "
-                f"(type={email_type} subject={subject[:100]})",
+            # 任务 16：不再逐封弹企微，改记进当日汇总项（每日邮件第三节）
+            record_issue(
+                "config_missing",
+                f"无 SMTP 密码：发信账号 {sender_email or account} 缺密码"
+                f"（type={email_type} subject={subject[:60]}）",
+                code="no_smtp_credentials",
             )
             return "queued"
 
@@ -531,10 +541,13 @@ class MailProcessor:
             # Group-covered rows ride on their company's group mail: no
             # extra notify, no extra send.
             if detail == "forwarded" and decision.action == "forward":
+                # 任务 16：运踪成功通知不再发给洋（只发负责同事）；其它类型不变。
+                # 🔴 只信任 boolean 形参，绝不用空串/None/伪造邮箱顶管理员那一位。
                 self.notifier.send_forwarded(
                     routing.responsible_person or "",
                     OPS_OWNER_EMAIL,
-                    f"Email forwarded: {subject[:100]}"
+                    f"Email forwarded: {subject[:100]}",
+                    cc_admin=(email_type != EmailType.TRACING),
                 )
             elif decision.action == "alarm":
                 self.notifier.send_alarm(
@@ -543,10 +556,18 @@ class MailProcessor:
                     f"Alarm: {decision.reason} | {subject[:100]}"
                 )
             elif decision.action == "pending":
+                # 待办仍实时发企微给洋（判据 8），同时记进当日汇总项（邮件第三节）
+                detail_text = f"Pending: {decision.reason} | {subject[:100]}"
                 self.notifier.send_pending(
                     routing.responsible_person or "",
                     OPS_OWNER_EMAIL,
-                    f"Pending: {decision.reason} | {subject[:100]}"
+                    detail_text
+                )
+                record_issue(
+                    "pending",
+                    f"{decision.reason} | {email_type} "
+                    f"客编{row.customer_code or '-'} 箱{row.container_no or '-'}"
+                    f" | {subject[:60]}",
                 )
             # NB: outcome vocabulary uses "forwarded" (past) while
             # Decision.action uses "forward" — map explicitly.
@@ -896,11 +917,18 @@ def run_sweeper():
 
 
 def flush_and_notify() -> bool:
-    """Flush the daily counters and send the digest. Returns True iff a
-    digest was sent (non-empty counters), False when there was nothing."""
+    """09:00：冲平当日计数器，并落地成当日 digest 快照。
+
+    任务 16：**不再发企微 digest**（原计数改由 12:30 那封每日邮件第四节承载）。
+    `flush_counters()` 仍然要调用 —— 但计数器被清零，所以必须先把这一段落地，
+    否则邮件 12:30 读到的是空的。
+
+    返回值语义保留：True = 这一段有计数，False = 空。
+    """
     counts = flush_counters()
+    write_digest_snapshot(counts)
     if counts:
-        get_notifier().send_digest(OPS_OWNER_EMAIL, counts)
+        _log.info(f"Daily counters flushed to digest snapshot for the 12:30 report: {counts}")
         return True
     return False
 
@@ -972,6 +1000,55 @@ def run_archive_purge():
             _log.info(f"Archive purge done: {stats}")
         except Exception as e:
             _log.error(f"Archive purge failed: {type(e).__name__}: {e}")
+
+
+# 每日一封汇总邮件的发送时点（12:30 —— 12:00 归档核对跑完之后，数据才齐）。
+# 常量在 config/settings.py（DAILY_REPORT_HOUR / DAILY_REPORT_MINUTE），此处不重复写死。
+
+
+def _next_daily_report_time(now: datetime) -> datetime:
+    """下一个 12:30（当天还没到就是今天，否则明天）。照 _next_digest_time 的算法。"""
+    next_run = now.replace(hour=DAILY_REPORT_HOUR, minute=DAILY_REPORT_MINUTE,
+                           second=0, microsecond=0)
+    if next_run <= now:
+        next_run = next_run + timedelta(days=1)
+    return next_run
+
+
+def run_daily_report():
+    """每天 12:30 发**当天唯一那封**汇总邮件（任务 16 / 06_EMAIL-DESIGN.md）。
+
+    「一天一封」由三层保证：① 本线程每天只触发一次；② 发送函数内部有 12:30
+    时点闸；③ 发完写当日「已发」标记 —— 旧系统的 8:00 计划任务若还没改时点，
+    撞上来也只会被这个标记挡掉，不会出现第二封。
+    """
+    from mailbots_next.core import daily_report
+
+    while not _shutdown_event.is_set():
+        now = datetime.now()
+        next_run = _next_daily_report_time(now)
+        wait_secs = (next_run - now).total_seconds()
+        if wait_secs > 86400:
+            wait_secs = 86400
+
+        for _ in range(int(wait_secs)):
+            if _shutdown_event.is_set():
+                break
+            time.sleep(1)
+
+        if _shutdown_event.is_set():
+            break
+
+        mode = os.environ.get("MAILBOT_MODE", "test").lower()
+        if mode != "live":
+            _log.info("Daily report skipped (test mode): 不发真实邮件")
+            continue
+        try:
+            res = daily_report.send_daily_report()
+            _log.info(f"Daily report: {res.get('reason')} | {res.get('subject')}")
+        except Exception as e:
+            # 邮件发不出去绝不能把线程打死（明天还要跑）
+            _log.error(f"Daily report failed: {type(e).__name__}: {e}")
 
 
 def main():
@@ -1073,6 +1150,10 @@ def main():
     # 任务 12：每天 12:00 核对副本确实存在后，才删源邮件（当天复制、次日再删）
     purge_thread = threading.Thread(target=run_archive_purge, daemon=True)
     purge_thread.start()
+
+    # 任务 16：每天 12:30 发唯一那封汇总邮件（12:00 归档线程之后才起算，数据才齐）
+    daily_report_thread = threading.Thread(target=run_daily_report, daemon=True)
+    daily_report_thread.start()
 
     try:
         while not _shutdown_event.is_set():
