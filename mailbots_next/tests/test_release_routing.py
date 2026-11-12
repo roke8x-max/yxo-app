@@ -132,40 +132,35 @@ def test_03_cancel_stem_match_r1n_warns(caplog):
     assert any("R1N stem match" in rec.message for rec in caplog.records)
 
 
-# ---------------------------------------------------------------- 4~5 还箱令箱号兜底
+# ------------------------------------------------- 4~5 还箱令：箱号不再单判
 
-def test_04_retbox_box_unique_pool_warns(caplog):
-    """还箱令无客编：箱号唯一定位 → B2 + pool，且必须打 WARN。
+def test_04_retbox_without_code_is_no_route():
+    """还箱令无客编：箱号即使唯一也不许定位公司（任务 17 删掉 box_unique 兜底）。
 
-    customer_code 与 customer_code_num 必须同时为 None，否则先走 ② 数字段档，
-    根本到不了 ③ 箱号兜底。
+    基线名 test_04_retbox_box_unique_pool_warns（箱号唯一 ⇒ B2 pool）。
     """
     row = _row(EmailType.RETBOX, box="XHCU5271865")
     assert row.customer_code is None and row.customer_code_num is None
 
     r = routing.route_row(EmailType.RETBOX, row, REAL)
-    assert r.company == "同程配"
-    assert r.route_source == "box_unique"
-    assert r.success is True
-    assert row.train_no == "WB957"
-    assert row.raw_data["train_type"] == "专列"
+    assert r.success is False
+    assert r.company == ""
+    assert r.route_source == "no_route"
 
-    with caplog.at_level(logging.WARNING, logger=DECIDE_LOGGER):
-        d = decide(EmailType.RETBOX, row, r, REAL)
-
-    # WB957 是专列
-    assert (d.tier, d.action) == ("B2", "pool")
-    assert any("B2 box-only match" in rec.message for rec in caplog.records)
+    # 失败在 routing 层就 return "queued"（serve 报警分支），decide 侧只做兜底：
+    # B2 已删除，落到 B0 告警。
+    d = decide_retbox(row, r, REAL)
+    assert (d.tier, d.action) == ("B0", "alarm")
 
 
 def test_05_retbox_same_train_other_company():
-    """同班列 WB957 的另一个箱 → 另一家公司（联运），不是第一个命中的同程配。"""
+    """同班列 WB957 的另一个箱：同样不按箱号定公司（不是「联运」，也不是「同程配」）。"""
     row = _row(EmailType.RETBOX, box="XHCU5030934")
     r = routing.route_row(EmailType.RETBOX, row, REAL)
 
-    assert r.company == "联运"
-    assert r.route_source == "box_unique"
-    assert r.success is True
+    assert r.success is False
+    assert r.company == ""
+    assert r.route_source == "no_route"
 
 
 # ---------------------------------------------------------------- 6 查无 + R0
@@ -200,10 +195,14 @@ def test_07_train_type_splits_action():
     assert decide(EmailType.RELEASE, fwd_row, r_fwd, REAL).action == "forward"
 
 
-# ---------------------------------------------------------------- 8 箱号复用 → B6
+# ------------------------------------------------- 8 箱号复用：不再 B6，直接失败
 
-def test_08_box_reuse_b6():
-    """同一箱号命中多票：box_reuse（失败），decide → B6 告警，不许取第一个。"""
+def test_08_box_reuse_without_code_is_no_route():
+    """同一箱号命中多票且邮件没有客编：routing 层直接失败，decide 侧落 B0。
+
+    基线名 test_08_box_reuse_b6（box_reuse ⇒ B6）；任务 17 起 route_retbox
+    不再返回 box_reuse，B6 分支因此端到端不可达（代码保留，见 02_TASK 1.0）。
+    """
     records = [
         _rec("CQWLJT261015003-DMZ", "同程配", "WB957", box="XHCU9000001", train_type="专列"),
         _rec("CQWLJT261015004-DMZ", "联运", "WB957", box="XHCU9000001", train_type="专列"),
@@ -211,12 +210,12 @@ def test_08_box_reuse_b6():
     row = _row(EmailType.RETBOX, box="XHCU9000001")
     r = routing.route_row(EmailType.RETBOX, row, records)
 
-    assert r.route_source == "box_reuse"
+    assert r.route_source == "no_route"
     assert r.success is False
     assert r.company == ""
 
     d = decide_retbox(row, r, records)
-    assert (d.tier, d.action) == ("B6", "alarm")
+    assert (d.tier, d.action) == ("B0", "alarm")
 
 
 # ---------------------------------------------------------------- 9 数字段跨公司
@@ -345,8 +344,12 @@ def test_14_train_type_trailing_space_stripped():
 # ---------------------------------------------------------------- 15 B0 区分 No recipients
 
 def test_15_retbox_no_recipients_b0(monkeypatch):
-    """还箱令 company 非空但收件人为空：B0 + reason 含 No recipients（不是 No route）。"""
-    row = _row(EmailType.RETBOX, box="XHCU5271865")
+    """还箱令 company 非空但收件人为空：B0 + reason 含 No recipients（不是 No route）。
+
+    任务 17：路由入口从「只给箱号」改成「客编+箱号」组合键（箱号单判已删除）。
+    """
+    row = _row(EmailType.RETBOX, code="CQWLJT261015003-DMZ", num="261015003",
+               box="XHCU5271865")
     r = routing.route_retbox(row, REAL)
     assert r.company == "同程配"
 
@@ -379,3 +382,42 @@ def test_16_stem_ambiguous_reason_not_no_route():
     assert d.action == "alarm"
     assert "Stem ambiguous" in d.reason
     assert "No route" not in d.reason
+
+
+# ------------------------------------------------- 17~18 放箱令/还箱令：箱号组合复核
+
+def test_17_release_code_hit_but_box_mismatch_fails():
+    """放箱令：客编精确命中，但邮件箱号与该记录不一致 ⇒ success=False（判据 6）。"""
+    records = [_rec("CQWLJT261108051-VXN", "保时达", "WB943", box="XHCU1111111")]
+    row = _row(EmailType.RELEASE, code="CQWLJT261108051-VXN", num="261108051",
+               box="XHCU9999999")
+    r = routing.route_release(row, records)
+
+    assert r.success is False
+    assert r.company == ""
+    assert r.route_source == "no_route"
+
+
+def test_18_retbox_code_hit_but_box_mismatch_fails():
+    """还箱令：同上，序号段档有箱号时也必须与箱号同记录命中（判据 6）。"""
+    records = [_rec("CQWLJT261108051-VXN", "保时达", "WB943", box="XHCU1111111")]
+    # 序号段命中但后缀不同 ⇒ 走 ② 档；箱号不一致 ⇒ 失败
+    row = _row(EmailType.RETBOX, code="CQWLJT261108051-Kol", num="261108051",
+               box="XHCU9999999")
+    r = routing.route_retbox(row, records)
+
+    assert r.success is False
+    assert r.company == ""
+    assert r.route_source == "no_route"
+
+
+def test_19_release_code_and_box_both_match_succeeds():
+    """正例：客编+箱号同记录命中 ⇒ 照常路由（组合复核不是一律拒）。"""
+    records = [_rec("CQWLJT261108051-VXN", "保时达", "WB943", box="XHCU1111111")]
+    row = _row(EmailType.RELEASE, code="CQWLJT261108051-VXN", num="261108051",
+               box="XHCU1111111")
+    r = routing.route_release(row, records)
+
+    assert r.success is True
+    assert r.company == "保时达"
+    assert r.route_source == "code_exact"

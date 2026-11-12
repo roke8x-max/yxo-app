@@ -9,24 +9,35 @@ records 每条形如：
 ⚠️ 本模块与老系统 `mailbots/core/atbroute.py` / `dskroute.py` / `nummatch.py`
    是**两份同源实现**（老系统最终要删，所以不跨包 import）。改一处要改另一处，
    并用同一张测试表对齐结果。
+   ⚠️ 唯一例外（任务 17）：班列号 3/4 位支持只改新系统，老系统仍只认 3 位，
+      两边**刻意不一致**，详见下方 `TRAIN_PATTERNS` 上方注释。
 """
 import re
 
 from ..config import CODE_NUM_RE      # settings.py:147 = r'CQWLJT(\d+)'，不本地定义
 
-# 班列号三种写法，统一归一到 "WB<3位>"（与老系统 mailbots/core/dskroute.py 逐字相同）
+# 班列号三种写法，统一归一到 "WB<3 或 4 位>"（与 records.班列号 精确相等）。
+#
+# 🔴 刻意与老系统不一致：新系统已支持 3 位与 4 位班列号（生产库确有 WB10xx 四位），
+#    老系统 `mailbots/core/dskroute.py` 仍只认 3 位。本任务只改新系统，老系统一行不动，
+#    所以这条差异**只写在这里**，不要回写到老系统文件里。
+#
+# 🔴 匹配优先级写死（顺序即优先级）：① 括号老格式 (773) → ② YXO-... → ③ 裸 WB...
+#    ① 必须最先，否则 `WB0808-ATD0809(773)` 会被 ③ 的 4 位规则抢成 WB0808。
+#    ③ 的负向断言 `(?!\s*[-/]?\s*ATD)`：`WB0821 ATD0823 ...` 这种「箱号+ATD 日期」对
+#    在基线里就**不是**班列号（老规则只有带括号时才认），保持取不到，避免放宽。
 TRAIN_PATTERNS = (
-    re.compile(r"YXO[- ]?(?:20\d{2}[- ]?)?(\d{3})(?!\d)"),       # YXO-223 / YXO 2026-223
-    re.compile(r"WB\d{4}\s*[-/]?\s*ATD\d{4}\s*\((\d{3})\)"),     # WB0808-ATD0809(773)
-    re.compile(r"\((\d{3})\)"),                                   # 兜底 (773)
+    re.compile(r"\((\d{3})\)"),                                   # ① 老格式 (773)
+    re.compile(r"YXO[- ]?(?:20\d{2}[- ]?)?(\d{3,4})(?!\d)"),      # ② YXO-919 / YXO-2026-1032
+    re.compile(r"WB(\d{3,4})(?!\d)(?!\s*[-/]?\s*ATD)"),           # ③ 裸 WB1032 / WB919
 )
 
 LV_CODE_BOX = "code_box"      # 客编+箱号唯一命中
+LV_CODE_ONLY = "code_only"    # 只按客编唯一命中（邮件没提取到箱号时才有此档）
 LV_TRAIN_BOX = "train_box"    # 箱号+班列号唯一命中
-LV_BOX_ONLY = "box_only"      # 只能按箱号唯一命中（兜底）
 LV_NUM_UNIQUE = "num_unique"  # 草单：数字段命中且公司唯一
-LV_MULTI = "multi"            # 命中多条
-LV_MISS = "miss"              # 查不到
+LV_MULTI = "multi"            # 命中多条（现存唯一用途：match_draft_num 跨公司）
+LV_MISS = "miss"              # 查不到 / 组合键不成立
 
 
 def extract_train_number(subject):
@@ -55,56 +66,47 @@ def _train(r):
     return (r.get("班列号") or "").strip()
 
 
-def by_box(records, box):
-    return [r for r in records if box and _box(r) == box]
-
-
 def match_atb(records, code, box):
-    """ATB：客编为权威，箱号必需。返回 (level, record, candidates)。
+    """ATB：客编+箱号 组合键复核。返回 (level, record, candidates)。
 
-    🔴 多条时 record 返回 hits[0]（**不是 None**）——与基线 route_dsk 的
-       `company = matches[0]` 一致，否则 box_reuse 的 company 会变成空串。
+    三个分支（任务 17 写死，禁止任何「只按箱号」的放行）：
+      A 无客编               ⇒ LV_MISS，不看箱号；
+      B 有客编、邮件无箱号   ⇒ 客编精确唯一命中 ⇒ LV_CODE_ONLY；
+      C 有客编、邮件有箱号   ⇒ 客编+箱号 同一条记录唯一命中 ⇒ LV_CODE_BOX，否则 LV_MISS。
+
+    🔴 分支 C 优先于「客编可单独判定」：邮件提取到箱号就必须双键对上，
+       否则「复核判定」形同虚设。
+    🔴 不再有多条时「猜第一条」的档位：多命中按失败处理。
     """
     code = (code or "").strip()
     box = (box or "").strip()
-    if code:
-        hits = [r for r in records if _box(r) == box and _code(r) == code]
+    if not code:
+        return LV_MISS, None, []                     # 分支 A
+    if not box:
+        hits = [r for r in records if _code(r) == code]
         if len(hits) == 1:
-            return LV_CODE_BOX, hits[0], hits
-        if hits:
-            return LV_MULTI, hits[0], hits
-        # 有客编但组合查不到 → miss，不静默回退到箱号
-        return LV_MISS, None, by_box(records, box)
-    hits = by_box(records, box)
+            return LV_CODE_ONLY, hits[0], hits       # 分支 B
+        return LV_MISS, None, hits
+    hits = [r for r in records if _code(r) == code and _box(r) == box]
     if len(hits) == 1:
-        return LV_BOX_ONLY, hits[0], hits
-    if hits:
-        return LV_MULTI, hits[0], hits
-    return LV_MISS, None, []
+        return LV_CODE_BOX, hits[0], hits            # 分支 C
+    return LV_MISS, None, hits
 
 
 def match_dsk(records, box, train):
-    """DSK：班列号为权威标识，箱号必需。多条时同样返回 hits[0]。"""
+    """DSK：箱号+班列号 双键唯一命中，只返回 LV_TRAIN_BOX / LV_MISS。
+
+    🔴 不许退化成只按箱号（任务 17）：缺班列号、双键 0 条、双键多条
+       一律 LV_MISS ⇒ 上层 success=False ⇒ 报警，不猜、不取第一条。
+    """
     box = (box or "").strip()
     train = (train or "").strip()
-    if train:
-        hits = [r for r in records if _box(r) == box and _train(r) == train]
-        if len(hits) == 1:
-            return LV_TRAIN_BOX, hits[0], hits
-        if hits:
-            return LV_MULTI, hits[0], hits
-        only = by_box(records, box)
-        if len(only) == 1:
-            return LV_BOX_ONLY, only[0], only
-        if only:
-            return LV_MULTI, only[0], only
+    if not box or not train:
         return LV_MISS, None, []
-    only = by_box(records, box)
-    if len(only) == 1:
-        return LV_BOX_ONLY, only[0], only
-    if only:
-        return LV_MULTI, only[0], only
-    return LV_MISS, None, []
+    hits = [r for r in records if _box(r) == box and _train(r) == train]
+    if len(hits) == 1:
+        return LV_TRAIN_BOX, hits[0], hits
+    return LV_MISS, None, hits
 
 
 def match_draft_num(records, code_num):

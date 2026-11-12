@@ -314,7 +314,26 @@ class TestRouting:
         assert result.company == "太平洋"
         assert result.route_source == "full_match"
 
-    def test_route_dsk_box_match(self):
+    def test_route_dsk_train_box_match(self):
+        """DSK 双键（箱号+班列号）唯一命中才成功（任务 17：不再按箱号单判）。"""
+        from mailbots_next.core.extract import ExtractedRow
+        row = ExtractedRow(
+            row_idx=0,
+            email_type=EmailType.DSK,
+            container_no="CICU1234567",
+            train_no="WB1",
+        )
+        records = [{
+            "id": 1, "客户编码": "CQWLJT260810001", "箱号": "CICU1234567",
+            "班列号": "WB1", "company": "太平洋", "状态": "正常", "is_deleted": 0,
+        }]
+        result = route_row(EmailType.DSK, row, records)
+        assert result.success is True
+        assert result.company == "太平洋"
+        assert result.route_source == "box_match"
+
+    def test_route_dsk_without_train_no_fails(self):
+        """只有箱号、没有班列号 ⇒ no_train_no / 失败（判据 1）。"""
         from mailbots_next.core.extract import ExtractedRow
         row = ExtractedRow(
             row_idx=0,
@@ -323,12 +342,12 @@ class TestRouting:
         )
         records = [{
             "id": 1, "客户编码": "CQWLJT260810001", "箱号": "CICU1234567",
-            "company": "太平洋", "状态": "正常", "is_deleted": 0,
+            "班列号": "WB1", "company": "太平洋", "状态": "正常", "is_deleted": 0,
         }]
         result = route_row(EmailType.DSK, row, records)
-        assert result.success is True
-        assert result.company == "太平洋"
-        assert result.route_source == "box_match"
+        assert result.success is False
+        assert result.route_source == "no_train_no"
+        assert result.company == ""
 
     def test_route_tracing_multi_company(self):
         from mailbots_next.core.extract import ExtractedRow
@@ -833,27 +852,47 @@ class TestEightTiers:
         d = decide(EmailType.DRAFT, row, _NO_ROUTE, recs)
         assert (d.tier, d.action) == ("T4", "alarm")
 
-    def test_decide_T5_unique_box_no_code_alarm(self):
+    def test_decide_no_code_with_box_is_T0_alarm(self):
+        """任务 17：无客编 ⇒ 箱号不再参与判定，原先的 T5/T6 两档已随判定段删除。
+
+        （基线名 test_decide_T5_unique_box_no_code_alarm；箱号唯一也不放行，
+          端到端在 routing 层就 success=False，走 serve 的报警分支。）
+        """
         row = _tier_row(None, "CICU1000001")
         recs = [_tier_rec("CQWLJT260810001-SPB", "CICU1000001")]
         d = decide(EmailType.DRAFT, row, _NO_ROUTE, recs)
-        assert (d.tier, d.action) == ("T5", "alarm")
+        assert (d.tier, d.action) == ("T0", "alarm")
 
-    def test_decide_T6_reused_box_pending(self):
+    def test_decide_no_code_reused_box_is_T0_alarm(self):
+        """任务 17：箱号被多条复用也不再是 T6 pending —— 箱号判定段已删除。
+
+        （基线名 test_decide_T6_reused_box_pending；无客编一律 T0 alarm，
+          且端到端不可达。）
+        """
         row = _tier_row(None, "CICU1000001")
         recs = [_tier_rec("CQWLJT260810001-SPB", "CICU1000001"),
                 _tier_rec("CQWLJT260810002-VXN", "CICU1000001", "东盟")]
         d = decide(EmailType.DRAFT, row, _NO_ROUTE, recs)
-        assert (d.tier, d.action) == ("T6", "pending")
+        assert (d.tier, d.action) == ("T0", "alarm")
 
     def test_decide_dsk_reused_box_alarms_T6(self):
-        """DSK 甲方案偏差锁定：箱号复用≥2 → T6 但处置为报警."""
+        """T6 档位保留：路由层报到 box_reuse 时仍报警，绝不转发给第一个公司。
+
+        任务 17 变更：基线用「records 里同箱号 ≥2 条」触发 T6，那是 `decide_dsk`
+        内部按箱号重扫（判据 9 要归零的「只按箱号判定」），该段已删除。现在 T6
+        只由 `route_source == "box_reuse"` 触发 —— 档位语义与处置不变，触发条件
+        改为路由层显式上报。
+        """
         from mailbots_next.core.extract import ExtractedRow
         row = ExtractedRow(row_idx=0, email_type=EmailType.DSK, container_no="CICU1000001")
         recs = [_tier_rec("CQWLJT260810001-SPB", "CICU1000001"),
                 _tier_rec("CQWLJT260810002-VXN", "CICU1000001", "东盟")]
-        d = decide(EmailType.DSK, row, _NO_ROUTE, recs)
+        box_reuse = RoutingResult("", None, [], [], "box_reuse", False)
+        d = decide(EmailType.DSK, row, box_reuse, recs)
         assert (d.tier, d.action) == ("T6", "alarm")
+        # 反过来：同一批 records、路由层没报 box_reuse ⇒ 落 T0，不再靠箱号数命中数
+        d2 = decide(EmailType.DSK, row, _NO_ROUTE, recs)
+        assert (d2.tier, d2.action) == ("T0", "alarm")
 
     def test_decide_waybill_T2_shared_engine(self):
         """运单号共享草单八档引擎：同序号同箱号异后缀 → T2 待办."""

@@ -293,15 +293,26 @@ class TestSplitFanout:
         assert "CICU1000001" in flat and "CICU1000002" not in flat
 
     def test_dsk_split_per_box_no_leak(self, monkeypatch):
-        """同公司双箱 DSK → 逐箱 2 封：标题/正文/附件均按箱隔离."""
+        """同公司双箱 DSK → 逐箱 2 封：标题/正文/附件均按箱隔离.
+
+        任务 17：DSK 必须「箱号+班列号」双键命中，所以这里显式给 records 带
+        班列号，并让主题能提取出同一个班列号（原用例主题里没有班列号，
+        在新口径下会被 no_train_no 拦下，邮件不再发出）。
+        """
         monkeypatch.setenv("MAILBOT_MODE", "live")
         proc = _harness()
+        proc.records = [
+            {"客户编码": "CQWLJT260810001-SPB", "箱号": "CICU1000001", "班列号": "WB101",
+             "company": "太平洋", "状态": "正常", "is_deleted": 0},
+            {"客户编码": "CQWLJT260810002-VXN", "箱号": "CICU1000002", "班列号": "WB101",
+             "company": "东盟", "状态": "正常", "is_deleted": 0},
+        ]
         html = ("<html><body><table>"
                 "<tr><td>CICU1000001</td><td>A</td></tr>"
                 "<tr><td>CICU1000002</td><td>B</td></tr>"
                 "</table></body></html>")
         msg = MIMEMultipart()
-        msg["Subject"] = "DSK notice"
+        msg["Subject"] = "DSK YXO-101 notice"
         msg["From"] = "Kasa <kasa@rtsb.de>"
         msg.attach(MIMEText(html, "html"))
         for fn, body in (("CICU1000001.PDF", b"a"), ("CICU1000002.PDF", b"b"),
@@ -380,20 +391,40 @@ class TestNotifyFallback:
         cls.assert_not_called()
 
 
-# ------------------------------------------------- Sec 6 DSK-T6
-class TestDskReuseTier:
-    def test_decide_dsk_reused_box_triggers_T6(self):
+# ------------------------------------------------- Sec 6 DSK 双键收紧
+class TestDskCombinationKey:
+    """任务 17：DSK 只认「箱号+班列号」双键唯一，箱号复用不再走 T6。"""
+
+    def _recs(self):
+        return [
+            {"id": 1, "客户编码": "CQWLJT260810001-SPB", "箱号": "CICU1000001",
+             "班列号": "WB1", "company": "太平洋", "状态": "正常", "is_deleted": 0},
+            {"id": 2, "客户编码": "CQWLJT260810002-VXN", "箱号": "CICU1000001",
+             "班列号": "WB1", "company": "东盟", "状态": "正常", "is_deleted": 0},
+        ]
+
+    def test_decide_dsk_reused_box_without_train_is_no_train_no(self):
+        """箱号复用但邮件没有班列号：routing 层失败（no_train_no），不进 decide。
+
+        基线名 test_decide_dsk_reused_box_triggers_T6（box_reuse ⇒ T6 alarm）。
+        """
         from mailbots_next.core.extract import ExtractedRow
         from mailbots_next.core.routing import route_dsk
-        from mailbots_next.core.decide import decide_dsk
-        recs = [
-            {"id": 1, "客户编码": "CQWLJT260810001-SPB", "箱号": "CICU1000001",
-             "company": "太平洋", "状态": "正常", "is_deleted": 0},
-            {"id": 2, "客户编码": "CQWLJT260810002-VXN", "箱号": "CICU1000001",
-             "company": "东盟", "状态": "正常", "is_deleted": 0},
-        ]
+        recs = self._recs()
         row = ExtractedRow(row_idx=0, email_type=EmailType.DSK, container_no="CICU1000001")
         routing = route_dsk(row, recs)
-        assert routing.route_source == "box_reuse"
-        d = decide_dsk(row, routing, recs)
-        assert d.tier == "T6" and d.action == "alarm"
+        assert routing.route_source == "no_train_no"
+        assert routing.success is False
+        assert routing.company == ""
+
+    def test_decide_dsk_combo_multi_is_no_route(self):
+        """班列号齐了但双键命中两条：仍失败（不猜第一条，判据 2）。"""
+        from mailbots_next.core.extract import ExtractedRow
+        from mailbots_next.core.routing import route_dsk
+        recs = self._recs()
+        row = ExtractedRow(row_idx=0, email_type=EmailType.DSK, container_no="CICU1000001",
+                           train_no="WB1")
+        routing = route_dsk(row, recs)
+        assert routing.route_source == "no_route"
+        assert routing.success is False
+        assert routing.company == ""
