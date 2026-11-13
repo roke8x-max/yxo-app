@@ -319,13 +319,27 @@ def init_forward_log():
             # 这是启动期代码（本函数在模块底部被调用），不许抛异常。
             try:
                 cols = {r[1] for r in conn.execute("PRAGMA table_info(forward_log)")}
+                # 任务 18：日报改读新表后要的 5 列。sent_local 是**本地**时间
+                # （日报按它分天/取时分）；sent_at 保持 UTC 语义不动（send_check 与
+                # 下面的 SKIP_LEGACY 迁移都按 UTC 比）。迁移**不回填**历史行：
+                # sent_local 的定义是「写入时刻的本地时间」，+8h 推算是伪造观测值。
                 for _col, _ddl in (
                     ("company", "ALTER TABLE forward_log ADD COLUMN company TEXT DEFAULT ''"),
                     ("checked_at", "ALTER TABLE forward_log ADD COLUMN checked_at TEXT DEFAULT ''"),
                     ("check_result", "ALTER TABLE forward_log ADD COLUMN check_result TEXT DEFAULT ''"),
+                    ("robot", "ALTER TABLE forward_log ADD COLUMN robot TEXT DEFAULT ''"),
+                    ("sent_local", "ALTER TABLE forward_log ADD COLUMN sent_local TEXT DEFAULT ''"),
+                    ("code", "ALTER TABLE forward_log ADD COLUMN code TEXT DEFAULT ''"),
+                    ("box", "ALTER TABLE forward_log ADD COLUMN box TEXT DEFAULT ''"),
+                    ("train_no", "ALTER TABLE forward_log ADD COLUMN train_no TEXT DEFAULT ''"),
                 ):
                     if _col not in cols:
                         conn.execute(_ddl)
+                conn.commit()
+                # 日报按 sent_local 前缀分天，给它一条索引（幂等，独立于上面是否加过列）。
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_fl_sent_local ON forward_log(sent_local)"
+                )
                 conn.commit()
                 # 独立、幂等、可自愈：只标「一天前就存在、且从未核对过」的行。
                 # 不依赖「本次是否加过列」，所以上一次启动半途失败也能在这一次补标。
@@ -348,13 +362,22 @@ def init_forward_log():
 
 def write_forward_log(forward_id, message_id, row_key, account, folder, uid,
                       subject, sender, date_hdr, raw_bytes, to_list, cc_list,
-                      sent_by="", company="", no_fid=False):
+                      sent_by="", company="", no_fid=False,
+                      robot="", code="", box="", train_no=""):
     import json
     from datetime import datetime, timezone
     if not config.is_live():
         return
-    # UTC，与 SQLite datetime('now') 同基准（不要用已弃用的 datetime.utcnow()）。
+    # 🔴 两个时间变量并存，语义不同，不许互相替换：
+    #   now_str  —— UTC，与 SQLite datetime('now') 同基准（write 时的 checked_at / 自检窗口用）。
+    #   local_str —— 本地时间（东八区），只进 sent_local，供日报分天/取时分（任务 18）。
+    # 不要用已弃用的 datetime.utcnow()；也不要把 sent_at 的写入语义改成本地时间。
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    local_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _s(v):
+        return "" if v is None else str(v)
+
     with _bot_config_lock:
         conn = get_bot_config_connection()
         try:
@@ -362,14 +385,16 @@ def write_forward_log(forward_id, message_id, row_key, account, folder, uid,
                 "INSERT OR REPLACE INTO forward_log "
                 "(forward_id, message_id, row_key, account, folder, uid, "
                 "subject, sender, date_hdr, raw_hex, to_list, cc_list, sent_by, "
-                "company, checked_at, check_result, sent_at, bounced) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),0)",
+                "company, checked_at, check_result, sent_at, bounced, "
+                "robot, sent_local, code, box, train_no) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),0,?,?,?,?,?)",
                 (forward_id, message_id, row_key, account, folder, uid, subject, sender,
                  date_hdr, raw_bytes.hex() if raw_bytes else "",
                  json.dumps(to_list, ensure_ascii=False),
                  json.dumps(cc_list, ensure_ascii=False), sent_by, company,
                  now_str if no_fid else "",
-                 "SKIP_NO_ID" if no_fid else ""))
+                 "SKIP_NO_ID" if no_fid else "",
+                 _s(robot), local_str, _s(code), _s(box), _s(train_no)))
             conn.commit()
         finally:
             conn.close()

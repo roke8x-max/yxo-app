@@ -40,12 +40,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import (
     ARCHIVE_STATS_PATH,
+    BOT_CONFIG_DB_PATH,
     DAILY_DIGEST_PATH,
     DAILY_REPORT_HOUR,
     DAILY_REPORT_MINUTE,
     DAILY_REPORT_SENT_PATH,
     LEGACY_FORWARD_LOG_PATH,
     OPS_OWNER_EMAIL,
+    EmailType,
+    ROBOT_LABELS,
     SMTP_PORT,
     SMTP_SERVER,
     YXO_DB_PATH,
@@ -56,7 +59,10 @@ from .notify import get_counters_snapshot, get_digest_snapshot, get_issues
 _log = get_logger(__name__)
 
 # 与邮件正文第二节固定列顺序一致（0 票也要列出来，见设计稿）。
-ROBOT_ORDER = ("运踪", "草单", "运单号", "ATB", "DSK")
+# 任务 18：改为从 ROBOT_LABELS 派生（中文名只有一处定义），但**顺序写死**，
+# 必须仍等于 ("运踪", "草单", "运单号", "ATB", "DSK")。
+ROBOT_ORDER = tuple(ROBOT_LABELS[t] for t in (
+    EmailType.TRACING, EmailType.DRAFT, EmailType.WAYBILL, EmailType.ATB, EmailType.DSK))
 
 # 正文分隔线（设计稿用的是 20 个全角粗横线）
 _SEP = "━" * 20
@@ -111,6 +117,26 @@ def _write_json(path: Path, data: Dict[str, Any]) -> None:
         os.replace(tmp, path)
 
 
+def _to_list_text(raw: str) -> str:
+    """to_list 归一化：新表是 JSON 数组、旧表是逗号串；空数组归一成空串。
+
+    新表 `to_list` 是 `json.dumps(list)`（`["a@x.com", "b@y.com"]`），旧表是逗号串
+    （`a@x.com,b@y.com`）。这层不归一，`"[]"` 是非空字符串 ⇒ collect() 里
+    `failed`（to_list 为空的行数）永远算 0。
+    """
+    text = (raw or "").strip()
+    if not text.startswith("["):
+        return text                      # 旧表逗号串 / 已损坏的串：原样返回，不抛
+    try:
+        arr = json.loads(text)
+    except Exception:
+        return text
+    if not isinstance(arr, list):
+        return text
+    # x 为 None（JSON null）时直接跳过：正文里出现 "None" 是验收判据 6 明确禁止的。
+    return ", ".join(str(x).strip() for x in arr if x is not None and str(x).strip())
+
+
 def _ro_connect(path: str):
     """只读打开（绝不在缺文件时新建空库，也不改 WAL）。
 
@@ -151,6 +177,25 @@ def get_archive_stats(day: Optional[str] = None) -> Dict[str, int]:
 
 # ---------------------------------------------------------------- 转发明细（昨天）
 
+def _owner_display(company: str) -> str:
+    """公司 → 负责人中文姓名（bot_config scope='owner' + 邮箱→姓名映射）。查不到回退公司名。
+
+    任务 18 抽出来的唯一实现：`_tracing_rows` 与 `_next_forward_rows` **必须**共用，
+    各写一份必然漂移。惰性导入保持原样（避免 import 期写库），异常一律回退公司名。
+    """
+    company = (company or "").strip()
+    if not company:
+        return ""
+    try:
+        from .notify import WeComNotifier        # 邮箱 → 企微姓名：全仓唯一映射表
+        from .store import get_responsible_person  # 惰性导入：避免 import 期写库
+
+        email = get_responsible_person(company) or ""
+        return WeComNotifier._WECOM_NAME_BY_EMAIL.get(email, "") or company
+    except Exception:
+        return company
+
+
 def _legacy_forward_rows(day: str) -> List[Dict[str, Any]]:
     """旧系统 `mailbots/data/forward_log.db`（草单/运单号/ATB/DSK）。
 
@@ -177,11 +222,59 @@ def _legacy_forward_rows(day: str) -> List[Dict[str, Any]]:
                 "code": d.get("code") or "",
                 "box": d.get("box") or "",
                 "subject": d.get("subject") or "",
-                "to_list": d.get("to_list") or "",
+                "to_list": _to_list_text(d.get("to_list") or ""),
                 "note": d.get("note") or "",
             })
     except Exception as e:
         _log.warning(f"daily report: legacy forward_log read failed: {type(e).__name__}: {e}")
+    finally:
+        conn.close()
+    return rows
+
+
+def _next_forward_rows(day: str) -> List[Dict[str, Any]]:
+    """新系统 `mailbots_next/data/bot_config.db` → forward_log（五类机器人）。
+
+    任务 18：旧系统一停，`forward_log.db` 不再增长、`tracing_log` 也没人写
+    （新系统运踪走单发路径落**新表**）⇒ 日报必须能读出这张表，否则切换后
+    每天 12:30 会发一封「转发 0 票」的假报。
+
+    🔴 按 `sent_local`（本地时间，写入侧新加）分天，**不许用 `sent_at`**：
+    `sent_at` 是 UTC（`datetime('now')`），本地 00:00–08:00 的转发会被算进前一天。
+    容错与旧源完全对齐：文件不存在 / 打不开 / 表不存在 / 没有 sent_local 列
+    （未迁移的老库）⇒ WARNING + 返回 `[]`，绝不抛异常。
+    """
+    rows: List[Dict[str, Any]] = []
+    conn = _ro_connect(BOT_CONFIG_DB_PATH)
+    if conn is None:
+        return rows
+    try:
+        conn.row_factory = sqlite3.Row
+        for r in conn.execute(
+            "SELECT robot, sent_local, company, code, box, train_no, subject, to_list"
+            " FROM forward_log WHERE sent_local LIKE ? ORDER BY sent_local",
+            (f"{day}%",),
+        ):
+            d = dict(r)
+            company = d.get("company") or ""
+            robot = (d.get("robot") or "").strip() or "?"
+            subject = d.get("subject") or ""
+            train_no = d.get("train_no") or ""
+            if robot == ROBOT_LABELS[EmailType.TRACING] and train_no:
+                subject = f"班列{train_no}"     # 与 _tracing_rows 的展示一致
+            rows.append({
+                "robot": robot,
+                "time": (d.get("sent_local") or "")[11:16],
+                "owner": _owner_display(company),
+                "company": company,
+                "code": d.get("code") or "",
+                "box": d.get("box") or "",
+                "subject": subject,
+                "to_list": _to_list_text(d.get("to_list") or ""),
+                "note": "",
+            })
+    except Exception as e:
+        _log.warning(f"daily report: next forward_log read failed: {type(e).__name__}: {e}")
     finally:
         conn.close()
     return rows
@@ -197,11 +290,6 @@ def _tracing_rows(day: str) -> List[Dict[str, Any]]:
     `tracing_log`），而任务 16 同时把运踪成功通知从企微撤掉了 —— 不在这里补上，
     「转发概览/明细」里运踪会永远是 0，等于把当天几十票运踪从所有渠道弄丢。
     """
-    from .notify import WeComNotifier  # 邮箱 → 企微姓名：全仓唯一映射表
-
-    from .store import get_responsible_person  # 惰性导入：避免 import 期写库
-
-    name_by_email = WeComNotifier._WECOM_NAME_BY_EMAIL
     rows: List[Dict[str, Any]] = []
     conn = _ro_connect(YXO_DB_PATH)
     if conn is None:
@@ -219,11 +307,7 @@ def _tracing_rows(day: str) -> List[Dict[str, Any]]:
             if "发至:" in detail:
                 to_list = detail.split("发至:", 1)[1].split("|", 1)[0].strip()
             company = d.get("company") or ""
-            owner = ""
-            try:
-                owner = name_by_email.get(get_responsible_person(company) or "", "")
-            except Exception:
-                owner = ""
+            owner = _owner_display(company)   # 与 _next_forward_rows 共用（任务 18）
             rows.append({
                 "robot": "运踪",
                 "time": (d.get("log_date") or "")[11:16],
@@ -243,8 +327,13 @@ def _tracing_rows(day: str) -> List[Dict[str, Any]]:
 
 
 def collect_forward_rows(day: str) -> List[Dict[str, Any]]:
-    """昨天全部转发行（旧 4 类 + 运踪），按时间升序。"""
-    rows = _legacy_forward_rows(day) + _tracing_rows(day)
+    """全部转发行：旧库四类 + 新库五类 + 运踪历史（tracing_log），按时间升序。
+
+    🔴 **不做任何去重**（任务书 1.4）：旧表没有 message_id，跨表去重本就无从下手；
+    新表一封邮件拆 N 家公司 = N 行同一个 message_id ⇒ 按 message_id 去重会把 N 票压成 1 票。
+    票数口径就是「实际发出的一封转发邮件算 1 票」。
+    """
+    rows = _legacy_forward_rows(day) + _next_forward_rows(day) + _tracing_rows(day)
     rows.sort(key=lambda r: (r.get("time") or "", r.get("robot") or ""))
     return rows
 

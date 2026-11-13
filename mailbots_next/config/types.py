@@ -15,6 +15,33 @@ class EmailType(str, Enum):
     RETBOX = "retbox"
 
 
+# ---------------------------------------------------------------------------
+# 任务 18：机器人类型 → 中文名（全仓唯一一处定义，别在别处再写一张表）。
+# 取值必须逐字保持：旧表 `forward_log.robot` 的实际取值就是 草单/运单号/ATB/DSK，
+# 日报第二节 ROBOT_ORDER 也认这几个词 —— 改字 = 整列归零。
+# ---------------------------------------------------------------------------
+ROBOT_LABELS = {
+    EmailType.DRAFT: "草单",
+    EmailType.WAYBILL: "运单号",
+    EmailType.TRACING: "运踪",
+    EmailType.DSK: "DSK",
+    EmailType.ATB: "ATB",
+    EmailType.RELEASE: "放箱令",
+    EmailType.RELEASE_CANCEL: "还箱令",
+    EmailType.RETBOX: "还箱",
+}
+
+
+def robot_label(email_type) -> str:
+    """email_type 可能是 EmailType 枚举、也可能是裸字符串 'dsk'；统一取中文名。未映射的原样返回。
+
+    ⚠️ 实测 `str(EmailType.DSK)` == 'EmailType.DSK'（不是 'dsk'）⇒ 先用 `str()` 再查表
+    必然查不到。EmailType 是 (str, Enum)，只有 `.value` 才拿到 'dsk'。
+    """
+    et = getattr(email_type, "value", email_type) or ""
+    return ROBOT_LABELS.get(et, et)
+
+
 class DraftCategory(StrEnum):
     """草单分类。⚠️ 值一律保持历史字符串（A/B/C1/C2/OTHER），不要改值 ——
     老系统台账 (draft_forward_ledger.processed_mails.category 271 行) 与

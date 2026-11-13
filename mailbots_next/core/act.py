@@ -18,13 +18,17 @@ from typing import List, Optional, Tuple, Dict, Any
 
 from bs4 import BeautifulSoup
 
-from ..config import SMTP_SERVER, SMTP_PORT, settings
+from ..config import SMTP_SERVER, SMTP_PORT, settings, robot_label, ROBOT_LABELS, EmailType
 from .. import config
 from .log import get_logger
 from .store import write_dsk_timestamp, write_tracing_log, write_tracing_snapshot, write_forward_log
 from mailbots_next.core.extractors.waybill import XLS_SUFFIXES
 
 _log = get_logger(__name__)
+
+# 任务 18：运踪行的中文名（单一来源 = config/types.ROBOT_LABELS）。
+# 单发路径要用它判断「是不是运踪行」（运踪的 code/box 必须留空）。
+_TRACING_LABEL = ROBOT_LABELS[EmailType.TRACING]
 
 
 def decode_header_safe(raw: str) -> str:
@@ -174,12 +178,15 @@ def send_smtp(
 
 
 def _record_forward(forward_id, message_id, row, send_ctx, to_list, cc_list,
-                    original_raw, sent_by="", company="", no_fid=False):
+                    original_raw, sent_by="", company="", no_fid=False,
+                    robot="", code="", box="", train_no=""):
     """成功转发后写 forward_log（仅 is_live 落库）。元数据取自 send_ctx['_meta']；
     sent_by 为本封 SMTP 发信账号（NDR 次键关联用）。row_key 优先取 serve 侧
     注入的 send_ctx['_row_key']（单一来源），缺失才用 serve_row_key(row) 兜底。
     company 供发送后自检按公司找负责人；no_fid=信上没带 X-YXO-Forward-Id
-    ⇒ 该行直接标 SKIP_NO_ID，永远不进核对（否则会被误判成 NONE 报给公司负责人）。"""
+    ⇒ 该行直接标 SKIP_NO_ID，永远不进核对（否则会被误判成 NONE 报给公司负责人）。
+    robot/code/box/train_no 由调用点算好传进来（任务 18，写入侧补字段），本函数原样透传；
+    这里**不许**写 `row.xxx` —— aggregate.flush_batch 会用 row=None 调用（1.8）。"""
     from mailbots_next.core.rowkey import serve_row_key
     if not config.is_live():
         return
@@ -192,6 +199,7 @@ def _record_forward(forward_id, message_id, row, send_ctx, to_list, cc_list,
         meta.get("subject", ""), meta.get("sender", ""), meta.get("date_hdr", ""),
         original_raw, to_list, cc_list, sent_by,
         company=company, no_fid=no_fid,
+        robot=robot, code=code, box=box, train_no=train_no,
     )
 
 
@@ -505,7 +513,11 @@ def _forward_split(decision, row, routing, original_msg, sender_email: str,
             try:
                 _record_forward(sub_fid, message_id, row, send_ctx,
                                 part["to"], part["cc"], original_raw, sender_email,
-                                company=company, no_fid=part_no_fid)
+                                company=company, no_fid=part_no_fid,
+                                robot=robot_label(email_type),
+                                code=getattr(row, "customer_code", "") or "",
+                                box=getattr(row, "container_no", "") or "",
+                                train_no="")
             except Exception as e:
                 _log.error(f"Post-send bookkeeping failed (mail already sent) | msg={message_id}: {e}")
                 from mailbots_next.core.notify import increment_counter
@@ -528,6 +540,7 @@ def _forward_split(decision, row, routing, original_msg, sender_email: str,
                 subject = build_dsk_subject(
                     decode_header_safe(original_msg.get("Subject", "")), box, code)
             else:
+                code = ""            # 任务 18：旧表 ATB 的 code 实测就是空
                 subject = decode_header_safe(original_msg.get("Subject", ""))
             msg = build_forward_message(original_msg, to_list, cc_list, sender_email,
                                         html_override=cropped,
@@ -546,7 +559,11 @@ def _forward_split(decision, row, routing, original_msg, sender_email: str,
                                         datetime.now().strftime("%m/%d %H:%M"))
                 _record_forward(sub_fid, message_id, row, send_ctx,
                                 to_list, cc_list, original_raw, sender_email,
-                                company=company, no_fid=dsk_no_fid)
+                                company=company, no_fid=dsk_no_fid,
+                                robot=robot_label(email_type),
+                                code=code,          # dsk=箱号反查客编；atb=''
+                                box=box,            # 拆分键里的箱号（不是 row.container_no）
+                                train_no="")
             except Exception as e:
                 _log.error(f"Post-send bookkeeping failed (mail already sent) | msg={message_id}: {e}")
                 from mailbots_next.core.notify import increment_counter
@@ -615,10 +632,19 @@ def execute_action(
             return False, f"SMTP failed: {result.get('error')}"
         # 邮件已发出：此后任何失败都不得翻转结论，否则重放会导致重复发信
         single_no_fid = not msg.get("X-YXO-Forward-Id")
+        # 任务 18：robot 走唯一取名函数；运踪分支的 code/box 必须留空（日报运踪行只显示
+        # 班列号 + 公司 + 发至），train_no 反过来只有运踪有消费者，非运踪留 ""。
+        # row 字段一律 getattr 取（row 可能缺属性）。
+        single_robot = robot_label(getattr(row, "email_type", ""))
+        single_is_tracing = single_robot == _TRACING_LABEL
         try:
             _record_forward(forward_id, message_id, row, send_ctx,
                             to_list, cc_list, original_raw, sender_email,
-                            company=(routing.company or ""), no_fid=single_no_fid)
+                            company=(routing.company or ""), no_fid=single_no_fid,
+                            robot=single_robot,
+                            code="" if single_is_tracing else (getattr(row, "customer_code", "") or ""),
+                            box="" if single_is_tracing else (getattr(row, "container_no", "") or ""),
+                            train_no=(getattr(row, "train_no", "") or "") if single_is_tracing else "")
             if row.email_type in ("dsk", "atb") and row.container_no:
                 write_dsk_timestamp(row.container_no, row.email_type.upper(),
                                     datetime.now().strftime("%m/%d %H:%M"))

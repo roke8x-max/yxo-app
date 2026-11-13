@@ -57,6 +57,8 @@ from .settings import (
 from .types import (
     EmailType,
     DraftCategory,
+    ROBOT_LABELS,
+    robot_label,
     EXTRACTION_KEYS,
     TYPE_ROUTES,
     NON_AUTO_DRAFT_CATEGORIES,
@@ -135,6 +137,8 @@ __all__ = [
     "CODE_NUM_RE",
     "EmailType",
     "DraftCategory",
+    "ROBOT_LABELS",
+    "robot_label",
     "EXTRACTION_KEYS",
     "TYPE_ROUTES",
     "NON_AUTO_DRAFT_CATEGORIES",
