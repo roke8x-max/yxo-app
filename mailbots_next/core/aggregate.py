@@ -33,7 +33,8 @@ import zipfile
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..config import IMAP_PORT, IMAP_SERVER, OPS_OWNER_EMAIL, EmailType, settings
+from ..config import (IMAP_PORT, IMAP_SERVER, OPS_OWNER_EMAIL, EmailType, settings,
+                      robot_label)
 from ..config.secrets import get_accounts, get_sender_by_email
 from .act import _record_forward, build_forward_message, make_forward_id, send_smtp
 from . import archive
@@ -933,6 +934,12 @@ def flush_batch(batch: Dict[str, Any]) -> bool:
             original_raw=msg.as_bytes(),
             sent_by=sender_email,
             company=bd.get("company") or "",
+            # 任务 18：合并发送也要落机器人名（放箱令/还箱令当前 enabled=False，
+            # 照写不改开关）。code/box/train_no 合并场景没有单行，留空。
+            robot=robot_label(bd.get("email_type")),
+            code="",
+            box="",
+            train_no="",
         )
     except Exception as e:
         _log.error(f"record_forward failed (mail already sent) | batch={batch_id} |"

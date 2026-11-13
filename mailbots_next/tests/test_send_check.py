@@ -617,11 +617,15 @@ def test_collect_qq_queries_only_enumerated_folders(fake_imap):
 
 
 def test_write_forward_log_roundtrip_all_columns(db):
+    from datetime import datetime
+
     write_forward_log(
         "fid-rt", "msg-rt", "row-7", ACCT_A, "&j9BTVYNJU1U-", 42, "subj-rt",
         "sender-rt@example.com", "Tue, 02 Sep 2026 01:02:03 +0000", b"\x00\x01",
         ["to-rt@example.com"], ["cc-rt@example.com"], ACCT_B,
         company="\u4e1c\u76df",
+        robot="DSK", code="CQWLJT261109001", box="CICU1000001",
+        train_no="968",
     )
     row = get_forward_log("fid-rt")
 
@@ -640,6 +644,16 @@ def test_write_forward_log_roundtrip_all_columns(db):
     assert row["company"] == "\u4e1c\u76df"
     assert row["checked_at"] == ""
     assert row["bounced"] == 0
+    # ---- 任务 18：5 个新列
+    assert row["robot"] == "DSK"
+    assert row["code"] == "CQWLJT261109001"
+    assert row["box"] == "CICU1000001"
+    assert row["train_no"] == "968"
+    # sent_local 是**本地**时间（日报按它分天）：只断言非空 + 与今天同日，不断言精确秒
+    assert row["sent_local"]
+    assert row["sent_local"][:10] == datetime.now().strftime("%Y-%m-%d")
+    # sent_at 仍是 UTC（判据 5：两个时间变量并存，语义没被改）
+    assert row["sent_at"]
 
 
 def test_init_forward_log_twice_is_idempotent(db):
