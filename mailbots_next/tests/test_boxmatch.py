@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
-"""`core/boxmatch.py` 判定对齐测试（任务 06）。
+"""`core/boxmatch.py` 判定对齐测试（任务 06 建立，任务 17 收紧口径）。
 
 契约来源：#45/#46/#47 已验收的老系统测试表，同一张表喂新系统，结果必须一致。
     - match_atb   ← mailbots/tests/unit/test_atbroute.py RESOLVE_CASES
     - match_dsk   ← mailbots/tests/unit/test_dskroute.py RESOLVE_CASES / TRAIN_CASES
     - match_draft_num ← mailbots/tests/unit/test_nummatch.py NUM_CASES（8 个数字段）
 
-⚠️ 与老系统唯一有意的差异：多条命中时本模块返回 hits[0]（老系统返回 None）。
-   理由：基线 `routing.py:100` 是 `company = matches[0]`，box_reuse 的 company
-   必须与基线一致，否则 act 拿到的数据会变。见 SPEC §九 意见 1。
+⚠️ 与老系统**刻意**不同的地方（任务 17「禁止只用箱号判定」）：
+    1. 无客编/缺班列号/双键未唯一命中 ⇒ 一律 LV_MISS，老系统还会退化成 box_only；
+    2. 多条命中不再返回 hits[0]（等于「猜第一条」），也不再有 LV_MULTI 档；
+    3. 新增 LV_CODE_ONLY（邮件没箱号时的客编单判），老系统无此档。
+   班列号 3/4 位支持同样只在新系统（见 boxmatch.TRAIN_PATTERNS 上方注释）。
 """
 import json
 
@@ -56,9 +58,10 @@ def _rec(rid, code, box, company, train=""):
     return {"id": rid, "客户编码": code, "箱号": box, "班列号": train, "company": company}
 
 
-# ---------------------------------------------------------------- match_atb（8）
+# ---------------------------------------------------------------- match_atb（10）
 # (用例名, records, 来信客编, 箱号, 期望 level, 期望 record id)
-# 多条命中期望 record id 是 hits[0]（本模块契约），不是 None。
+# 任务 17 起：无客编 ⇒ 一律 LV_MISS（不再有 box_only 兜底）；
+#             有客编无箱号 ⇒ LV_CODE_ONLY；有客编有箱号 ⇒ 双键唯一才命中。
 ATB_CASES = [
     ("combo_unique",
      [_rec(11, "CQWLJT1-MA", "A", "保时达")],
@@ -67,26 +70,36 @@ ATB_CASES = [
     ("combo_miss_but_box_has_other",
      [_rec(12, "CQWLJT9-ZZ", "A", "同程配")],
      "CQWLJT1-MA", "A", boxmatch.LV_MISS, None),
-    ("box_only_unique",
+    # 无客编 + 箱号在库里唯一：仍然 miss（禁止只用箱号判定）
+    ("no_code_box_unique_is_miss",
      [_rec(13, "CQWLJT2-BB", "A", "东盟")],
-     "", "A", boxmatch.LV_BOX_ONLY, 13),
-    ("box_only_multi",
+     "", "A", boxmatch.LV_MISS, None),
+    # 无客编 + 箱号命中多条：同样 miss
+    ("no_code_box_multi_is_miss",
      [_rec(14, "CQWLJT2-BB", "A", "东盟"), _rec(15, "CQWLJT3-CC", "A", "保时达")],
-     "", "A", boxmatch.LV_MULTI, 14),
-    # 客编+箱号组合命中两条（同组合的重复行）⇒ multi，record = hits[0]
+     "", "A", boxmatch.LV_MISS, None),
+    # 组合键命中两条（同组合的重复行）⇒ 不再是「取第一条」，按失败处理
     ("combo_multi",
      [_rec(16, "CQWLJT1-MA", "A", "保时达"), _rec(17, "CQWLJT1-MA", "A", "中欧木业")],
-     "CQWLJT1-MA", "A", boxmatch.LV_MULTI, 16),
+     "CQWLJT1-MA", "A", boxmatch.LV_MISS, None),
     ("box_not_found",
      [],
      "", "ZZZZ", boxmatch.LV_MISS, None),
-    # 纯箱号有 2 条会 multi，但带客编时组合唯一 ⇒ 客编把歧义消掉了（ATB 改造的核心）
+    # 纯箱号有 2 条会歧义，但带客编时组合唯一 ⇒ 客编把歧义消掉了（ATB 改造的核心）
     ("code_disambiguates_reused_box",
      [_rec(18, "CQWLJT1-MA", "A", "保时达"), _rec(19, "CQWLJT2-BB", "A", "东盟")],
      "CQWLJT1-MA", "A", boxmatch.LV_CODE_BOX, 18),
-    ("empty_box",
+    ("empty_code_and_box",
      [],
      "", "", boxmatch.LV_MISS, None),
+    # 分支 B：邮件没箱号 + 客编唯一命中 ⇒ code_only（任务 17 新增档）
+    ("code_only_unique",
+     [_rec(20, "CQWLJT1-MA", "", "保时达")],
+     "CQWLJT1-MA", "", boxmatch.LV_CODE_ONLY, 20),
+    # 分支 B 但客编命中两条（重复行）⇒ 不唯一 ⇒ miss
+    ("code_only_multi",
+     [_rec(21, "CQWLJT1-MA", "", "保时达"), _rec(22, "CQWLJT1-MA", "", "保时达")],
+     "CQWLJT1-MA", "", boxmatch.LV_MISS, None),
 ]
 
 
@@ -95,33 +108,34 @@ def test_match_atb(name, records, code, box, exp_level, exp_id):
     level, rec, cands = boxmatch.match_atb(records, code, box)
     assert level == exp_level, name
     assert (rec["id"] if rec else None) == exp_id, name
-    if exp_level == boxmatch.LV_MULTI:
-        # 多条时 record 必须落在既有候选里，且候选数 >= 2
-        assert len(cands) >= 2, name
-        assert rec in cands, name
+    if exp_level == boxmatch.LV_MISS:
+        assert rec is None, name
 
 
-# ---------------------------------------------------------------- match_dsk（8）
-# (班列号, 箱号, records, 期望 level) —— 逐条抄老系统 RESOLVE_CASES
+# ---------------------------------------------------------------- match_dsk（9）
+# (班列号, 箱号, records, 期望 level)
+# 任务 17：双键未唯一命中一律 LV_MISS，不再有 box_only / multi 兜底。
 DSK_CASES = [
     ("WB223", "A", [_rec(1, "", "A", "中欧木业", "WB223")], boxmatch.LV_TRAIN_BOX),
-    # 组合查不到、箱号唯一 ⇒ 兜底 box_only
-    ("WB223", "A", [_rec(2, "", "A", "同程配", "WB881")], boxmatch.LV_BOX_ONLY),
-    # 组合查不到、箱号两条 ⇒ multi
+    # 组合查不到、箱号唯一 ⇒ miss（不退化）
+    ("WB223", "A", [_rec(2, "", "A", "同程配", "WB881")], boxmatch.LV_MISS),
+    # 组合查不到、箱号两条 ⇒ miss
     ("WB223", "A", [_rec(3, "", "A", "同程配", "WB881"), _rec(4, "", "A", "保时达", "WB883")],
-     boxmatch.LV_MULTI),
-    # 组合键命中两条 ⇒ multi
+     boxmatch.LV_MISS),
+    # 组合键命中两条 ⇒ miss（不再「猜第一条」）
     ("WB223", "A", [_rec(5, "", "A", "中欧木业", "WB223"), _rec(6, "", "A", "中欧木业", "WB223")],
-     boxmatch.LV_MULTI),
-    # 无班列号、箱号唯一
-    ("", "A", [_rec(7, "", "A", "同程配", "WB881")], boxmatch.LV_BOX_ONLY),
-    # 无班列号、箱号两条
+     boxmatch.LV_MISS),
+    # 无班列号、箱号唯一 ⇒ miss
+    ("", "A", [_rec(7, "", "A", "同程配", "WB881")], boxmatch.LV_MISS),
+    # 无班列号、箱号两条 ⇒ miss
     ("", "A", [_rec(8, "", "A", "同程配", "WB881"), _rec(9, "", "A", "保时达", "WB883")],
-     boxmatch.LV_MULTI),
+     boxmatch.LV_MISS),
     # 箱号在库内查不到
     ("", "ZZZZ", [], boxmatch.LV_MISS),
-    # 班列号不在组合里、箱号只有一条 ⇒ 兜底 box_only
-    ("WB999", "A", [_rec(10, "", "A", "同程配", "WB777")], boxmatch.LV_BOX_ONLY),
+    # 班列号不在组合里、箱号只有一条 ⇒ miss（不兜底）
+    ("WB999", "A", [_rec(10, "", "A", "同程配", "WB777")], boxmatch.LV_MISS),
+    # 4 位班列号（任务 17 修缺口）：归一后与库里 WB1032 精确相等
+    ("WB1032", "A", [_rec(23, "", "A", "保时达", "WB1032")], boxmatch.LV_TRAIN_BOX),
 ]
 
 
@@ -129,11 +143,8 @@ DSK_CASES = [
 def test_match_dsk(train, box, records, exp_level):
     level, rec, _c = boxmatch.match_dsk(records, box, train)
     assert level == exp_level
-    if exp_level in (boxmatch.LV_TRAIN_BOX, boxmatch.LV_BOX_ONLY):
+    if exp_level == boxmatch.LV_TRAIN_BOX:
         assert rec is not None and rec["箱号"] == box
-    elif exp_level == boxmatch.LV_MULTI:
-        # 多条时同样返回 hits[0]（不是 None）
-        assert rec is not None and rec is records[0]
     else:
         assert rec is None
 
@@ -187,11 +198,21 @@ TRAIN_CASES = [
     ("DSK / AGROSTOP / YXO-219 - 13.04.2026 - FWRU0197560 x 1", "WB219"),
     ("YXO-219/DSK/AGROSTOP 13.04.2025", "WB219"),
     ("DSK YXO WB0808-ATD0809(773) / 1 x Ready for pick-up from Agrostop", "WB773"),
-    # ID507 不是班列号 ⇒ 必须取不到，走箱号兜底
+    # ID507 不是班列号；`WB0821 ATD0823` 是「箱号+ATD 日期」对，基线与本任务都判取不到
     ("DSK YXO WB0821 ATD0823 ID507 CICU2690998 x 1 / Ready for pick-up", None),
     ("YXO-2026-864 / DSK / AGROSTOP - 01.05.2026", "WB864"),
     ("DSK/AGROSTOP 01.01.2026", None),
     (None, None),
+    # ---- 任务 17：4 位班列号（生产库确有 WB10xx）
+    ("YXO-2026-1032 DSK", "WB1032"),
+    ("WB1032 / DSK", "WB1032"),
+    ("WB1032/DSK/AGROSTOP", "WB1032"),
+    # 负例：4 位不得被截成 WB202 / WB032
+    ("YXO-2026-1032", "WB1032"),
+    ("YXO-919/ DSK / AGROSTOP 13.04.2025", "WB919"),
+    # 括号老格式优先级最高，不能被 4 位的 WB0808 抢走
+    ("WB0808-ATD0809(773)", "WB773"),
+    ("(773)", "WB773"),
 ]
 
 
@@ -212,27 +233,83 @@ def test_route_dsk_unique_is_box_match():
     assert r.to_list == ["tp@test.com"]
 
 
-def test_route_dsk_reuse_keeps_success_and_hits0_company():
-    """box_reuse：success 仍为 True，company 取 hits[0]（与基线 route_dsk 一致）。"""
+def test_route_dsk_reuse_without_train_is_no_train_no():
+    """箱号被两家复用、邮件又没班列号：不允许「猜第一条」⇒ no_train_no / 失败。"""
     recs = [
         _rec(1, "", "CICU1000001", "太平洋", "WB1"),
         _rec(2, "", "CICU1000001", "东盟", "WB2"),
     ]
     row = ExtractedRow(row_idx=0, email_type=EmailType.DSK, container_no="CICU1000001")
     r = route_dsk(row, recs)
-    assert r.route_source == "box_reuse"
-    assert r.success is True
-    assert r.company == recs[0]["company"]
-    assert r.to_list == ["tp@test.com"]
+    assert r.route_source == "no_train_no"
+    assert r.success is False
+    assert r.company == ""
+    assert r.to_list == []
+
+
+def test_route_dsk_combo_multi_is_no_route():
+    """双键命中两条 ⇒ 不取 first、不转发（任务 17 判据 2）。"""
+    recs = [
+        _rec(1, "", "CICU1000001", "太平洋", "WB1"),
+        _rec(2, "", "CICU1000001", "东盟", "WB1"),
+    ]
+    row = ExtractedRow(row_idx=0, email_type=EmailType.DSK, container_no="CICU1000001",
+                       train_no="WB1")
+    r = route_dsk(row, recs)
+    assert r.route_source == "no_route"
+    assert r.success is False
+    assert r.company == ""
 
 
 def test_route_dsk_miss_is_no_route():
-    row = ExtractedRow(row_idx=0, email_type=EmailType.DSK, container_no="CICU9999999")
+    row = ExtractedRow(row_idx=0, email_type=EmailType.DSK, container_no="CICU9999999",
+                       train_no="WB1")
     r = route_dsk(row, [])
     assert r.route_source == "no_route"
     assert r.success is False
     assert r.company == ""
     assert r.to_list == []
+
+
+def test_route_dsk_without_train_no_is_no_train_no():
+    """有箱号没班列号：单独给 no_train_no，告警里能分清原因（判据 1）。"""
+    recs = [_rec(1, "", "CICU1000001", "太平洋", "WB1")]
+    row = ExtractedRow(row_idx=0, email_type=EmailType.DSK, container_no="CICU1000001")
+    r = route_dsk(row, recs)
+    assert r.route_source == "no_train_no"
+    assert r.success is False
+
+
+def test_route_atb_without_box_uses_code_only():
+    """分支 B：邮件没箱号、客编唯一命中 ⇒ code_only 且可转发（任务 17 判据 8）。"""
+    recs = [_rec(1, "CQWLJT1-MA", "", "太平洋")]
+    row = ExtractedRow(row_idx=0, email_type=EmailType.ATB,
+                       customer_code="CQWLJT1-MA", container_no=None)
+    r = route_atb(row, recs)
+    assert r.route_source == "code_only"
+    assert r.success is True
+    assert r.company == "太平洋"
+
+
+def test_route_atb_no_code_does_not_use_box():
+    """分支 A：无客编 + 箱号在库里唯一命中 ⇒ 仍然失败（判据 3 的核心）。"""
+    recs = [_rec(1, "CQWLJT1-MA", "CICU1000001", "太平洋")]
+    row = ExtractedRow(row_idx=0, email_type=EmailType.ATB,
+                       customer_code=None, container_no="CICU1000001")
+    r = route_atb(row, recs)
+    assert r.route_source == "no_route"
+    assert r.success is False
+    assert r.company == ""
+
+
+def test_route_atb_combo_mismatch_is_no_route():
+    """分支 C：客编对上但箱号对不上 ⇒ 失败，不退回只按客编/只按箱号。"""
+    recs = [_rec(1, "CQWLJT1-MA", "CICU1000001", "太平洋")]
+    row = ExtractedRow(row_idx=0, email_type=EmailType.ATB,
+                       customer_code="CQWLJT1-MA", container_no="CICU9999999")
+    r = route_atb(row, recs)
+    assert r.route_source == "no_route"
+    assert r.success is False
 
 
 def test_route_atb_uses_code_not_box_only():

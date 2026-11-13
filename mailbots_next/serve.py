@@ -445,6 +445,29 @@ class MailProcessor:
                     f"（type={email_type} source={routing.route_source} subject={subject[:60]}）",
                     code="no_recipients",
                 )
+            # 任务 17：判定失败 = 告诉负责人、等人工处理 ⇒ 补一条企微 alarm。
+            # 🔴 报警点必须在这里（routing.success=False 不会进 decide），
+            #    写进 decide_* 是无效的。
+            # 🔴 只对走组合键路由的花名册发；TRACING 零命中已在上方 return "skipped"，
+            #    其余 TRACING 失败、以及不经过路由的类型（ALARM/PROGRAM_ERROR/
+            #    BOUNCE/SEND_CHECK）不新增告警。
+            # 🔴 收件人必须过滤空值：success=False 时 responsible_person 必为空，
+            #    空串会落进 notify._send_now 的「无映射收件人」分支 ⇒ 走
+            #    _fallback_owner_email 多发一封 SMTP 降级邮件。这里只传洋一人，
+            #    等价于 send_alarm 但收件人列表可控（send_alarm 的两个位置参数
+            #    无法表达「过滤掉空的那一位」，传空串反而会触发降级邮件）。
+            if email_type in (EmailType.DSK, EmailType.ATB, EmailType.DRAFT,
+                              EmailType.WAYBILL, EmailType.RELEASE,
+                              EmailType.RELEASE_CANCEL, EmailType.RETBOX):
+                recipients = [x for x in (routing.responsible_person, OPS_OWNER_EMAIL) if x]
+                self.notifier.notify(
+                    "alarm", recipients,
+                    "🚨 报警通知\n"
+                    f"路由失败（{routing.route_source}），未转发，需人工处理 | "
+                    f"type={email_type} | 客编{row.customer_code or '-'} "
+                    f"箱{row.container_no or '-'} 班列{getattr(row, 'train_no', '') or '-'} | "
+                    f"{subject[:100]}",
+                )
             return "queued"
 
         _log.log_routing(message_id, row.row_idx, routing.company, routing.responsible_person or "", routing.to_list, routing.cc_list)

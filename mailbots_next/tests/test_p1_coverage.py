@@ -106,8 +106,13 @@ def _rec(code, box, company="太平洋"):
 
 # ---------------------------------------------------------------- G3 按行独立
 class TestPerRowIndependence:
-    def test_multi_row_one_forward_one_alarm_one_pending(self, monkeypatch):
-        """一封三行：T1 照常转发，不被报警行/待办行阻断；队列按行键隔离."""
+    def test_multi_row_one_forward_two_queued_isolated(self, monkeypatch):
+        """一封三行：T1 照常转发，不被失败行阻断；错误队列按行键隔离。
+
+        任务 17：无客编的行不再有 T6/T5 兜底（箱号单判已删除），两行失败都
+        在 routing 层 return "queued" 并各发一条企微 alarm（只发洋）。
+        基线名 test_multi_row_one_forward_one_alarm_one_pending。
+        """
         monkeypatch.setenv("MAILBOT_MODE", "live")
         proc = _harness([
             _rec("CQWLJT260810001", "CICU1000001"),
@@ -129,12 +134,17 @@ class TestPerRowIndependence:
                                "subj", "docwbfb@yxologistics.com", "", b"raw")
         assert mock_smtp.call_count == 1
         queued = [e for e in get_pending_errors(100) if e["message_id"] == "g3-multi-1"]
-        assert len(queued) == 1
-        # row_key prefers container_no: row2's key is its (unknown) box.
-        assert queued[0]["row_key"] == "1:NOBOX9999"
+        assert len(queued) == 2
+        # row_key prefers container_no: 失败两行各自独立入队，互不覆盖
+        assert {e["row_key"] for e in queued} == {"1:NOBOX9999", "2:REUSEDBOX"}
         proc.notifier.send_forwarded.assert_called_once()
-        proc.notifier.send_pending.assert_called_once()
-        proc.notifier.send_alarm.assert_not_called()
+        proc.notifier.send_pending.assert_not_called()
+        # 两个失败行各发一条企微 alarm，收件人只有洋（不触发 SMTP 降级）
+        alarms = [c for c in proc.notifier.notify.call_args_list
+                  if c.args and c.args[0] == "alarm"]
+        assert len(alarms) == 2
+        for c in alarms:
+            assert c.args[1] == [OPS_OWNER_EMAIL]
 
     def test_row_exception_isolated_continues_next_rows(self):
         """某行 execute_action 抛异常 → 该行进 error_queue，后续行继续处理."""

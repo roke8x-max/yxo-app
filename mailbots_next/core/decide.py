@@ -74,15 +74,14 @@ def decide_draft(row, routing, records) -> Decision:
         # T3: stem hit but box mismatch/empty
         return Decision("T3", "pending", "Stem hit but box mismatch or empty")
 
-    # Codeless branch: never enters T1-T3
+    # Codeless branch: never enters T1-T3.
+    # 🔴 任务 17：箱号不再参与任何公司判定，原先「无客编 ⇒ 按箱号命中 0/1/多条
+    #    分 T0/T5/T6」的判定段已整段删除。无客编的邮件在 routing 层就
+    #    success=False（MATCH_ATB/route_draft 都不认箱号），端到端进不到这里；
+    #    保留兜底只是防直接调用 decide 时返回 None。
     if not box:
         return Decision("T0", "alarm", "No customer code and no box")
-    box_matches = [r for r in records if (r.get("箱号") or "") == box]
-    if len(box_matches) == 0:
-        return Decision("T0", "alarm", "No customer code and box has no hit")
-    if len(box_matches) == 1:
-        return Decision("T5", "alarm", "No customer code but unique box match")
-    return Decision("T6", "pending", "Box number reused by multiple records")
+    return Decision("T0", "alarm", "No customer code")
 
 
 def decide_waybill(row, routing, records) -> Decision:
@@ -95,20 +94,23 @@ def decide_waybill(row, routing, records) -> Decision:
 
 
 def decide_dsk(row, routing, records) -> Decision:
-    # Reused box (route_dsk marks box_reuse) alarms instead of forwarding
+    """DSK：成功即 T1（双键唯一命中），否则告警。
+
+    🔴 任务 17：`box_matches = [r for r in records if r["箱号"] == ...]` 那段
+       「箱号命中 >=2 ⇒ T6」已删除 —— 它正是判据 9 要归零的「只按箱号判定」。
+       删掉后本函数再无「仅以箱号为条件」的判定，只按 route_source / success 处置。
+       T6 这一档本身保留：route_dsk 若仍产生 box_reuse（本任务后不会，属防御），
+       依旧报警、绝不把信转发给第一个命中的公司。
+    """
+    # Reused box (route_dsk 曾标记 box_reuse) alarms instead of forwarding
     # to the first company it happens to hit.
     if getattr(routing, "route_source", "") == "box_reuse":
         return Decision("T6", "alarm", "Box number reused by multiple records (>=2)")
 
     if routing.success:
-        return Decision("T1", "forward", "Unique box match")
+        return Decision("T1", "forward", "Unique train+box match")
 
-    if row.container_no:
-        box_matches = [r for r in records if r["箱号"] == row.container_no]
-        if len(box_matches) >= 2:
-            return Decision("T6", "alarm", "Box number reused by multiple records (>=2)")
-
-    return Decision("T0", "alarm", "Box not found in active records")
+    return Decision("T0", "alarm", "Train+box combination not found in active records")
 
 
 def decide_atb(row, routing, records) -> Decision:
@@ -218,13 +220,9 @@ def decide_retbox(row, routing, records) -> Decision:
         )
         return Decision("B1N", action, f"Stem match | train_type={train_type}")
 
-    # B2：老模板没有客编，只能靠箱号唯一定位。箱号的语义比客编弱（同一箱会跑多趟），
-    # 单看箱子就对上了必须留痕，方便事后核对。
-    _log.warning(
-        f"B2 box-only match | box={row.container_no} "
-        f"company={routing.company} src={src} train={getattr(row, 'train_no', '')}"
-    )
-    return Decision("B2", action, f"Box-only match | train_type={train_type}")
+    # B2（只按箱号命中）已删除（任务 17）：route_retbox 不再产生「箱号唯一」这一档，
+    # 箱号只允许作为「客编/序号段 + 箱号」组合键的一部分。
+    return Decision("B1", action, f"Code/stem+box match | train_type={train_type}")
 
 
 def decide(email_type, row, routing, records) -> Decision:
