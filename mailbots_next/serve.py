@@ -90,6 +90,28 @@ class MailProcessor:
     def _get_last_outcome(self):
         return getattr(self._outcome_local, "value", None)
 
+    @staticmethod
+    def _rows_to_send(email_type, rows):
+        """本封邮件真正进入「claim → 路由 → 发送」的行。
+
+        运踪口径（任务 19 / 旧系统 Tracing_Robot_IMAP.py）：一封运踪邮件 =
+        **命中公司数封整封副本**，箱号完全不参与拆分。但提取层带 XLS 附件时按
+        箱号一行一箱（TracingExtractor），行循环又是每行独立 claim、独立发送
+        ⇒ 20 个箱号会变成 20 封、20 行 forward_log、日报 20 票。
+        所以对运踪只放**一个固定的代表行**进去，其余行不 claim、不发信；
+        多公司仍由 route_tracing 返回 list 扇出（N 家公司 = N 封，不受影响）。
+
+        为什么代表行取 rows[0]（而不是「随便挑一行」）：rows 由同一份 raw_bytes
+        经确定性解析得到，重扫时 rows[0] 恒是同一行 ⇒ 去重键
+        `message_id|row_key` 不漂移。代表行一旦漂移，重扫就会被当成新票再发一封。
+
+        其余类型原样返回：按行处理是它们本来的口径（waybill/draft/dsk/atb 走
+        _forward_split 分组、release 走聚合池），不许在这里顺手改。
+        """
+        if email_type == EmailType.TRACING and len(rows) > 1:
+            return rows[:1]
+        return rows
+
     def process_email(self, account: str, folder: str, message_id: str, uid: int, subject: str, sender: str, date_hdr: str, raw_bytes: bytes) -> bool:
         """统一契约：返回布尔，True = 该封已纳入持久化流程（全成功 或 至少已入 error_queue）。
 
@@ -185,7 +207,7 @@ class MailProcessor:
         outcome = {"forwarded": 0, "alarm": 0, "pending": 0, "queued": 0,
                    "manual": 0, "duplicate": 0, "skipped": 0,
                    "pooled": 0}
-        for row in rows:
+        for row in self._rows_to_send(email_type, rows):
             from mailbots_next.core.rowkey import serve_row_key
             row_key = serve_row_key(row)
             if send_ctx is not None:

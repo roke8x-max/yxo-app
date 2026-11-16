@@ -551,3 +551,107 @@ def test_poll_secs_failsafe_and_topology_count():
             assert mock_p.call_count == 12
         finally:
             serve_mod.stop_pollers()
+
+
+# ============ 任务 19（A）：增量 UID 守卫 ============
+# 三条用例都自带夹具（tmp_path 下的 imap_state.json + Mock conn），不连生产库 / 生产邮箱。
+
+def _write_imap_state(tmp_path, last_uid, validity=2001, account="a@x", folder="运单草单"):
+    p = tmp_path / "imap_state.json"
+    p.write_text(json.dumps({f"{account}|{folder}": {"uidvalidity": validity,
+                                                    "last_uid": last_uid}}),
+                 encoding="utf-8")
+    return p
+
+
+def _mock_conn_returning(uids, mails=None, validity=2001):
+    """SEARCH **原样**返回给定 uid（不按 start 过滤）。
+
+    专为「服务器把 `UID n:*` 退化理解成返回最后一封」而写：这里要让它真的把
+    uid <= last_uid 的那些邮件返回回来，否则根本测不到守卫。
+    """
+    mails = mails or {}
+    conn = Mock()
+    conn.select.return_value = ("OK", [b"1"])
+    conn.untagged_responses = {"UIDVALIDITY": [str(validity).encode()]}
+    conn._searched = []
+    conn._fetched = []
+
+    def _uid(cmd, *args):
+        if cmd == "SEARCH":
+            conn._searched.append(" ".join(str(a) for a in args if a))
+            return ("OK", [" ".join(str(u) for u in uids).encode()])
+        if cmd == "FETCH":
+            uid = int(args[0])
+            conn._fetched.append(uid)
+            raw = mails.get(uid)
+            if raw is None:
+                return ("OK", [])
+            return ("OK", [(f"{uid} (UID {uid} BODY[] {{{len(raw)}}})".encode(), raw)])
+        raise AssertionError(cmd)
+
+    conn.uid.side_effect = _uid
+    conn.close.return_value = ("OK", [])
+    conn.logout.return_value = ("OK", [])
+    return conn
+
+
+def test_incremental_uid_search_ignores_le_watermark(tmp_path):
+    """A①：水位已等于最大 UID，SEARCH 仍返回 uid <= last_uid ⇒ 不处理、不 FETCH、水位不变。
+
+    ⚠️ 这里**不用** `_mock_conn`：它按 start 把 5 过滤掉了，那样等于替测试把退化结果
+       藏起来，测不出东西。改用 `_mock_conn_returning`，让服务器真的把已处理过的
+       UID 5 返回一次 —— 这正是 `UID 6:*` 在水位=5 且最大 UID=5 时的实际行为。
+    """
+    state = _write_imap_state(tmp_path, last_uid=5)
+    conn = _mock_conn_returning(uids=(5,), mails={5: _raw("<dup5@x>")}, validity=2001)
+    p = _poller(tmp_path, on_raw=Mock(return_value=True))
+
+    p._process_new_messages(conn, "运单草单", "F1")
+    p._flush_watermark()
+
+    assert conn._searched and "UID 6:*" in conn._searched[0].upper(), "夹具前提：走增量分支"
+    assert p.on_raw.call_count == 0, "退化返回的 uid <= last_uid 不得进入处理"
+    assert conn._fetched == [], "被守卫拦下的 uid 不许 FETCH"
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["a@x|运单草单"]["last_uid"] == 5
+
+
+def test_rescan_keeps_uid_le_watermark(tmp_path):
+    """A②：UIDVALIDITY 变化触发重扫，返回集含 uid <= last_uid ⇒ 仍被回调（守卫没误伤重扫）。
+
+    不设 forward_since：重扫走 `UID 1:*`（同样是重扫分支）。这样既验证守卫没误伤
+    重扫，又不会让日期门禁（historical_skip）抢在前头把邮件拦掉 —— 否则用例挂了
+    却与守卫无关。下面对 increment_counter 的断言即用来确认「不是日期门禁拦的」。
+    """
+    _write_imap_state(tmp_path, last_uid=5, validity=111)
+    conn = _mock_conn_returning(uids=(3,), mails={3: _raw("<rescan3@x>")}, validity=222)
+    p = _poller(tmp_path, on_raw=Mock(return_value=True))
+    assert p.forward_since == "", "夹具前提：未设 FORWARD_SINCE，日期门禁不参与"
+
+    with patch("mailbots_next.core.ingest.increment_counter") as mock_inc:
+        p._process_new_messages(conn, "运单草单", "F1")
+
+    assert conn._searched and "SINCE" not in conn._searched[0].upper(), "夹具前提：走 UID 1:* 重扫"
+    assert p.on_raw.call_count == 1, "重扫分支不许被增量守卫误伤"
+    assert p.on_raw.call_args[0][4] == 3
+    assert conn._fetched == [3]
+    assert not any(c.args and c.args[0] == "historical_skip" for c in mock_inc.call_args_list), \
+        "被拦原因必须是日期门禁以外的东西"
+
+
+def test_new_uid_above_watermark_still_fetched(tmp_path):
+    """A③：正常新增 uid > last_uid ⇒ 仍处理、仍推水位（回归）。"""
+    state = _write_imap_state(tmp_path, last_uid=5)
+    conn = _mock_conn_returning(uids=(6,), mails={6: _raw("<new6@x>")}, validity=2001)
+    p = _poller(tmp_path, on_raw=Mock(return_value=True))
+
+    p._process_new_messages(conn, "运单草单", "F1")
+    p._flush_watermark()
+
+    assert conn._searched and "UID 6:*" in conn._searched[0].upper()
+    assert conn._fetched == [6]
+    assert p.on_raw.call_count == 1
+    assert p.on_raw.call_args[0][4] == 6
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["a@x|运单草单"]["last_uid"] == 6

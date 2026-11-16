@@ -420,6 +420,14 @@ class Poller:
                 if typ != "OK":
                     return
                 uids = _parse_uid_search(data)
+                # 任务 19（A）增量守卫 —— 只加在本分支。
+                # IMAP 的 `*` 指当前最大 UID：水位已等于 max 时，服务器会把这个
+                # 区间反向理解成「返回最后一封」，返回集里带回了 uid <= last_uid
+                # 的邮件。不拦，每轮「没有新邮件」都会重扫最后一封（去重表里没记录
+                # 时就是重发）。重扫分支（上面的 need_rescan）返回集本来就允许含
+                # uid <= last_uid（首次启动 / UIDVALIDITY 变化），故绝不能图省事在
+                # for uid in uids 循环开头统一 continue —— 那会把该处理的邮件整批跳过。
+                uids = [u for u in uids if u > last_uid]
         except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError, socket.timeout):
             # 连接已死必须向上传播触发重连 —— 绝不能当成"这轮没有新邮件"吞掉。
             raise
