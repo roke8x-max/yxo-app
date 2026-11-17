@@ -1,3 +1,5 @@
+import importlib.util
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -11,6 +13,49 @@ from .log import get_logger
 _log = get_logger(__name__)
 _yxo_lock = threading.Lock()
 _bot_config_lock = threading.Lock()
+
+
+# ==================== 负责人映射的单一真相源（任务 21）====================
+# 口径真相源 = `D:\YXO_DATA\WeComBot\config.py` 的 USER_COMPANIES / USER_EMAILS。
+# 该文件是历史形成的配置中心（不在任何 git 仓库），旧系统 5 个机器人与
+# WeComBot(5001) 都是 sys.path 指过去 `from config import`。
+#
+# 本模块**不再自带**一份会覆盖数据库的写死口径：旧版 seed 用无条件
+# INSERT OR REPLACE 把内置字典刷进 bot_config，导致运维在库里手改负责人必被
+# 覆盖、且每次 import（影子任务每 30 分钟一次）都重置回旧人。现在改为每次启动
+# 跟随真相源，内置字典降级为 fallback。
+#
+# 路径探测：本文件在 <代码根>/mailbots_next/core/ ⇒ parents[2] 即代码根
+# （生产 D:\YXO_DATA\yxo_app），其父目录（D:\YXO_DATA）下的 WeComBot\config.py。
+# 硬契约（洋 2026-11-17 拍板）：
+#   ① 暴露模块常量 WECOMBOT_CONFIG_PATH（pathlib.Path）；
+#   ② 同名环境变量 WECOMBOT_CONFIG_PATH 在 import 期覆盖默认值；
+#   ③ seed_owner_mapping() 只读该常量、绝不重新探测 —— 测试因此可以
+#      「改常量后显式重调 seed_owner_mapping()」或「先设 env 再 importlib.reload(store)」。
+def _detect_wecombot_config_path() -> Path:
+    return Path(__file__).resolve().parents[2].parent / "WeComBot" / "config.py"
+
+
+_ENV_WECOMBOT_CONFIG_PATH = os.environ.get("WECOMBOT_CONFIG_PATH")
+WECOMBOT_CONFIG_PATH = (
+    Path(_ENV_WECOMBOT_CONFIG_PATH)
+    if _ENV_WECOMBOT_CONFIG_PATH
+    else _detect_wecombot_config_path()
+)
+
+# 内置 fallback（2026-11-17 业务口径）：**仅**在真相源不可用时兜底。
+# ⚠️ 这不是真相源；改负责人请改 D:\YXO_DATA\WeComBot\config.py 的 USER_COMPANIES。
+# 若这里不同步，真相源不可用时系统会退回旧人 —— 故每次人事变更要连同此处一起看。
+_FALLBACK_OWNER_EMAILS = {
+    "太平洋": "maoxiaoyang@cqtransit.com",
+    "港九港铁": "maoxiaoyang@cqtransit.com",
+    "东盟": "yangyawen@cqtransit.com",
+    "同程配": "yangyawen@cqtransit.com",
+    "中欧木业": "yangyawen@cqtransit.com",   # 2026-11-17 韩文豪 → 杨雅雯
+    "沙坪坝": "fengqian@cqtransit.com",      # 2026-11-17 韩文豪 → 冯茜
+    "保时达": "fengqian@cqtransit.com",
+    "联运": "fengqian@cqtransit.com",
+}
 
 
 def _is_unc_path(path) -> bool:
@@ -241,17 +286,58 @@ def write_tracing_snapshot(
             conn.close()
 
 
+def _load_owner_mapping_from_wecombot(path: Path) -> Dict[str, str]:
+    """从 WeComBot config.py 反向生成 `{公司关键词: 邮箱}`。失败一律抛给调用方。
+
+    该文件是 .py 不是 JSON，故用 importlib 按路径加载。注意它在 import 期就会读同目录
+    `secrets.json`，缺失/损坏直接 `RuntimeError` —— 这就是调用方必须 try/except 的原因
+    （不加的话整个服务 import 不起来）。键缺失、映射为空同理抛出。
+    """
+    spec = importlib.util.spec_from_file_location("_wecombot_config_owner_source", str(path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法为 {path} 构造 module spec")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)          # ← secrets.json 缺失在这里 RuntimeError
+    user_companies = getattr(module, "USER_COMPANIES")
+    user_emails = getattr(module, "USER_EMAILS")
+    mapping: Dict[str, str] = {}
+    for real_name, keywords in dict(user_companies).items():
+        for kw in keywords or []:
+            email = dict(user_emails).get(real_name)
+            if not email:
+                raise KeyError(f"USER_EMAILS 缺「{real_name}」的邮箱，无法归属关键词「{kw}」")
+            mapping[str(kw)] = str(email)
+    if not mapping:
+        raise ValueError("USER_COMPANIES 未生成任何 公司→邮箱 映射")
+    return mapping
+
+
+def _owner_mapping() -> Dict[str, str]:
+    """真相源优先、内置 fallback 兜底。**永不抛异常**（服务必须起得来）。"""
+    path = WECOMBOT_CONFIG_PATH          # 只读模块常量，不重新探测（硬契约）
+    try:
+        return _load_owner_mapping_from_wecombot(Path(path))
+    except Exception as e:
+        _log.warning(
+            f"WeComBot config 不可用（{path}）→ 负责人映射回退内置 fallback："
+            f"{type(e).__name__}: {e}"
+        )
+        return dict(_FALLBACK_OWNER_EMAILS)
+
+
 def seed_owner_mapping():
-    mapping = {
-        "太平洋": "maoxiaoyang@cqtransit.com",
-        "港九港铁": "maoxiaoyang@cqtransit.com",
-        "东盟": "yangyawen@cqtransit.com",
-        "同程配": "yangyawen@cqtransit.com",
-        "中欧木业": "hanwenhao@cqtransit.com",
-        "沙坪坝": "hanwenhao@cqtransit.com",
-        "保时达": "fengqian@cqtransit.com",
-        "联运": "fengqian@cqtransit.com",
-    }
+    """把负责人映射写进 `bot_config`（bot='all', scope='owner'）。
+
+    来源 = WeComBot/config.py（单一真相源，任务 21）；内置字典只在真相源不可用时兜底。
+    保留 INSERT OR REPLACE 的语义 = 「每次启动跟随真相源」，改配置中心一处即全系统生效。
+    （上游若改库手改，下一次启动仍会被真相源覆盖 —— 这正是设计意图，别在库里改。）
+
+    口径差异（既有行为，本次不改，仅标注）：USER_COMPANIES 的关键词在上游是**子串**
+    语义（`kw in company`，见 WeComBot company_to_name），而 get_responsible_person()
+    是 SQL `key=?` **精确**匹配；本函数写入的 key 就是关键词原文，故只有公司名与关键词
+    完全相同时才命中。
+    """
+    mapping = _owner_mapping()
     with _bot_config_lock:
         conn = get_bot_config_connection()
         try:

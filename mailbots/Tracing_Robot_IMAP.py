@@ -24,10 +24,14 @@ from db_write import get_conn
 from common_io import norm_train_no, daemon_loop
 
 sys.path.insert(0, r'D:\YXO_DATA\WeComBot')
-from config import (
-    sender_for_company,
-    # 飞书配置已弃用，保留空字符串以兼容现存 import（Phase B 将彻底清除）
-)
+try:
+    from config import (
+        sender_for_company,
+        # 飞书配置已弃用，保留空字符串以兼容现存 import（Phase B 将彻底清除）
+    )
+except ImportError:                      # 真相源目录不可达（本机开发/CI）：兜底走机器人自身账号
+    def sender_for_company(company_name):
+        return None
 
 # ================= 1. 配置部分 =================
 # 体检E（2026-08-04）：飞书凭据不再硬编码，统一从 WeComBot/secrets.json 保险库经 config 读取。
