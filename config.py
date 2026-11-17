@@ -158,56 +158,10 @@ AUTH_LOCK_MINUTES = 15
 # system 身份全权限 + scope=all 放行，等价于 RBAC 上线前行为；开 = 门禁全效。
 AUTH_ENABLED = os.environ.get("YX_AUTH_ENABLED", "0") == "1"
 
-# real name -> managed company keywords (substring match on 开票子公司名称)
-USER_COMPANIES = {
-    "毛骁洋": ["太平洋", "港九港铁"],
-    "杨雅雯": ["同程配", "东盟"],
-    "冯茜": ["保时达", "联运"],
-    "韩文豪": ["沙坪坝", "中欧木业"],
-}
+# 2026-11-17 任务 21：本文件里那套负责人映射（真名→公司关键词、真名→邮箱、由两者
+# 派生的「公司→邮箱 / 公司→真名」反向索引，以及按公司取发件人、取负责人的两个函数）
+# 已全部删除。口径唯一真相源 = D:\YXO_DATA\WeComBot\config.py（历史形成的配置中心，
+# 不在任何 git 仓库）；mailbots/ 的 `from config import ...` 靠 sys.path 指向那里，
+# 不读本文件。改负责人请改那一处，别在本仓库再放第二份 —— 副本正是 2026-11-17
+# 人事变更被误判成「要改 3 个 .py」的根源。
 
-# real name -> sender email (password in ACCOUNTS)
-USER_EMAILS = {
-    "毛骁洋": "maoxiaoyang@cqtransit.com",
-    "杨雅雯": "yangyawen@cqtransit.com",
-    "冯茜": "fengqian@cqtransit.com",
-    "韩文豪": "hanwenhao@cqtransit.com",
-}
-
-# 公司关键词 -> 负责同事的发件邮箱（用于转发/发送时以对应同事身份发信）
-COMPANY_TO_EMAIL = {}
-for _real_name, _keywords in USER_COMPANIES.items():
-    _email = USER_EMAILS.get(_real_name)
-    if _email:
-        for _kw in _keywords:
-            COMPANY_TO_EMAIL[_kw] = _email
-
-# 公司关键词 -> 负责同事真名（用于企微通知）
-_COMPANY_KEYWORDS = []
-for _real_name, _keywords in USER_COMPANIES.items():
-    for _kw in _keywords:
-        _COMPANY_KEYWORDS.append((_kw, _real_name))
-
-def sender_for_company(company_name):
-    """返回 (email, password) 供 SMTP 以对应同事身份发信；找不到同事返回 None。
-    用途：ATB/DSK 邮件转发、订舱助手手动发信，都按箱号所属公司的负责同事发信。
-    """
-    if not company_name:
-        return None
-    c = str(company_name)
-    for kw, email in COMPANY_TO_EMAIL.items():
-        if kw in c:
-            pwd = os.environ.get(f"MAIL_PWD_{email.replace('@', '_').replace('.', '_')}")
-            return email, pwd or os.environ.get("MAIL_PWD_DEFAULT", "")
-    return None
-
-
-def company_to_name(company_name):
-    """根据公司名返回负责同事真名（用于企微通知），找不到返回 None"""
-    if not company_name:
-        return None
-    c = str(company_name)
-    for kw, real_name in _COMPANY_KEYWORDS:
-        if kw in c:
-            return real_name
-    return None
