@@ -206,7 +206,8 @@ def test_single_row_without_xls_behaves_as_before(proc):
     assert mock_send.call_count == 1
     fl = _fl_rows("tr-no-xls")
     assert len(fl) == 1
-    assert fl[0]["row_key"] == serve_row_key(rows[0]) == "0:no_key"
+    # 任务 20 / 2.3：无箱号改用 "-" 占位（不再用客编兜底，也不再是 "no_key"）
+    assert fl[0]["row_key"] == serve_row_key(rows[0]) == "0:-"
 
 
 # ---------------- 4. 同一 message_id 重扫 ⇒ 不再发（去重键稳定） ----------------

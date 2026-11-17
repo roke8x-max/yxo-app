@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 import json
 
@@ -66,6 +67,36 @@ from mailbots_next.core import archive
 # 不许在本文件里再写一遍（两份实现早晚漂移，只改一处 = 白改）。
 from mailbots_next.core.sender_addr import normalize_sender_domain
 
+# 任务 20：三态状态机（sent / closed / unresolved）+ 未发出池 + 告警折叠状态。
+# 直接从 core.dedup 取，**不走 core/__init__ 的汇总导出**（那个文件不在本任务的改动集内）。
+from mailbots_next.core.dedup import (
+    STATUS_SENT,
+    STATUS_CLOSED,
+    STATUS_UNRESOLVED,
+    set_status,
+    get_status,
+    reopen as dedup_reopen,
+    bump_retry,
+    reset_retry,
+    list_unresolved,
+    count_unresolved,
+    item_age_days,
+    bump_alarm,
+    list_expired_alarms,
+    delete_alarm_state,
+)
+
+# 任务 20 的新常量统一从 settings 取（config/__init__ 不在改动集内，不改导出面）。
+from mailbots_next.config.settings import (
+    ALARM_FOLD_SEC,
+    FAILURE_OWNER_HISTORY_N,
+    POOL_EMPTY_RETRY_MAX,
+    POOL_STALE_DAYS,
+    REPOOL_BATCH_MAX,
+    REPOOL_REQUEST_PATH,
+    REPOOL_STATE_PATH,
+)
+
 _log = EmailLogger("mailbots_next.serve")
 
 _shutdown_event = threading.Event()
@@ -83,6 +114,12 @@ class MailProcessor:
         # 行级明细的线程本地槽（T5-5）：12 条轮询线程共享同一 processor 实例，
         # 实例属性会被并发覆盖；sweeper 在自己线程内 set 后 get，行为不变。
         self._outcome_local = threading.local()
+        # 任务 20：本行「逐发送单元结果」的线程本地槽 —— dedup 状态只能按它聚合，
+        # **不许用 _process_row 的返回值定状态**（那是 queued > forwarded > alarm …
+        # 的优先级，[forwarded, alarm] 会被判成 forwarded）。
+        self._units_local = threading.local()
+        # 池子重判轮次标志（线程本地）：重判期间压掉逐行即时告警，改为每件一条折叠告警。
+        self._pool_round_local = threading.local()
 
     def _set_last_outcome(self, outcome: dict) -> None:
         self._outcome_local.value = outcome
@@ -331,14 +368,25 @@ class MailProcessor:
 
         Returns the row outcome: "duplicate" | "manual" | "forwarded" |
         "alarm" | "pending" | "queued" | "skipped". "queued" means this row
-        produced (or kept) an error-queue entry and still needs attention."""
+        produced (or kept) an error-queue entry and still needs attention.
+
+        🔴 任务 20：返回值**只用于旧调用方的统计**（process_email 的 outcome 计数、
+        sweep 的 resolve 判据）。dedup 三态**只按逐发送单元结果聚合**（见
+        _settle_row），两者刻意解耦：本函数返回值的优先级会把 [forwarded, alarm]
+        判成 forwarded，用它定状态会让失败的那一家永不重判。
+        """
         full_msg_id = f"{message_id}|{row_key}"
 
-        if not try_claim(full_msg_id):
+        # 认领必须带定位字段：pending / alarm 分支不写 error_queue，dedup 的
+        # account/folder/uid 是它们进池后取原文的唯一来源（02_TASK 2.2a）。
+        if not try_claim(message_id, row_key, account=account, folder=folder, uid=uid):
             _log.log_dedup_claim(full_msg_id, False, row_key)
             return "duplicate"
 
         _log.log_dedup_claim(full_msg_id, True, row_key)
+
+        units = []
+        self._set_row_units(units)
 
         # Manual categories leave it to humans: skip before routing so
         # they never enter the error queue (留人工，不标已读).
@@ -347,6 +395,7 @@ class MailProcessor:
                 f"Manual skip | msg_id={message_id[:50]} | row={row.row_idx} | "
                 f"category={row.draft_category} | left unread for humans"
             )
+            self._settle_row(message_id, row_key, "manual", units)
             return "manual"
 
         # waybill_rejected 单证审核驳回：业务上不需要通知（渝新欧会直接与同事沟通），
@@ -358,6 +407,7 @@ class MailProcessor:
                 f"row={row.row_idx} | code={row.customer_code or '-'} | subject={subject[:100]}"
             )
             increment_counter("action_wayb_rejected_skipped")
+            self._settle_row(message_id, row_key, "rejected", units)
             return "rejected"
 
         routing = route_row(email_type, row, self.records)
@@ -368,10 +418,65 @@ class MailProcessor:
         else:
             outcomes.append(self._process_routing_result(routing, row, email_type, message_id, row_key, raw_bytes, account, folder, uid, sender, subject, date_hdr, send_ctx))
         # A multi-company fan-out row is only as good as its worst outcome.
-        for terminal in ("queued", "forwarded", "alarm", "pending", "skipped"):
-            if terminal in outcomes:
-                return terminal
-        return "queued"
+        terminal = "queued"
+        for candidate in ("queued", "forwarded", "alarm", "pending", "skipped"):
+            if candidate in outcomes:
+                terminal = candidate
+                break
+        self._settle_row(message_id, row_key, terminal, units)
+        return terminal
+
+    # ------------------------------------------------------------ 任务 20：状态聚合
+    def _set_row_units(self, units) -> None:
+        loc = getattr(self, "_units_local", None)
+        if loc is None:
+            loc = threading.local()
+            self._units_local = loc
+        loc.value = units
+
+    def _get_row_units(self):
+        return getattr(getattr(self, "_units_local", None), "value", None)
+
+    def _push_unit(self, record) -> None:
+        units = self._get_row_units()
+        if units is not None:
+            units.append(record)
+
+    def _settle_row(self, message_id, row_key, row_outcome, units) -> None:
+        """把「逐发送单元结果」聚合成 dedup 三态（02_TASK 2.1.3，写死）。
+
+        · 全部单元 forwarded（含「forward_log 命中 ⇒ 跳过发送」）→ sent，source='auto'
+        · 任一单元 alarm / pending / queued                      → unresolved（进池）
+        · 全部单元 manual / rejected / skipped（判定不发）        → closed，close_reason=分支名
+        · 全部单元 pooled（已交给专列聚合池，由聚合批次负责发）  → closed，reason=release_pooled
+        · duplicate 根本不进这里（认领就没过）
+        其余混合情形一律留 unresolved（宁可重判一次，也不许把没发出去的判成已发）。
+        """
+        acts = [u.get("outcome") for u in (units or []) if u.get("outcome")]
+        if not acts:
+            acts = [row_outcome] if row_outcome else []
+        try:
+            if any(a in ("queued", "alarm", "pending") for a in acts):
+                set_status(message_id, row_key, STATUS_UNRESOLVED)
+            elif acts and all(a == "forwarded" for a in acts):
+                set_status(message_id, row_key, STATUS_SENT, source="auto")
+            elif "pooled" in acts:
+                # 专列聚合池：这批邮件的发送由 aggregate.flush_batch 负责（它有自己的
+                # 状态机与重试），本封不再单独重判 —— 否则每轮 repool 都会重复入池。
+                set_status(message_id, row_key, STATUS_CLOSED, source="auto",
+                           close_reason="release_pooled")
+            elif acts and all(a in ("manual", "rejected", "skipped") for a in acts):
+                set_status(message_id, row_key, STATUS_CLOSED, source="auto",
+                           close_reason=",".join(sorted(set(acts))))
+            else:
+                set_status(message_id, row_key, STATUS_UNRESOLVED)
+        except Exception as e:
+            # 状态写失败不许打掉主链路（邮件已经发了/没发都在 forward_log 里），
+            # 但必须留痕：这是「账本不准」的唯一信号。
+            _log.error(
+                f"settle status failed | msg={message_id[:50]} | row_key={row_key} | "
+                f"acts={acts} | {type(e).__name__}: {e}"
+            )
 
     def _identify_type(self, sender: str, subject: str, raw_bytes: bytes) -> Optional[str]:
         from mailbots_next.config import TYPE_ROUTES, ENC_PDF_RE, BOX_PDF_RE, UPDATE_KEYWORDS
@@ -437,6 +542,19 @@ class MailProcessor:
         return None
 
     def _process_routing_result(self, routing, row, email_type, message_id, row_key, raw_bytes, account, folder, uid, sender, subject, date_hdr, send_ctx=None):
+        """一个「发送单元」= 一条 routing 结果。返回值原样透传；额外把结果记进本行
+        units，供 _settle_row 逐单元聚合（任务 20）。"""
+        outcome = self._process_routing_result_impl(
+            routing, row, email_type, message_id, row_key, raw_bytes,
+            account, folder, uid, sender, subject, date_hdr, send_ctx,
+        )
+        self._push_unit({
+            "outcome": outcome,
+            "company": (getattr(routing, "company", "") or ""),
+        })
+        return outcome
+
+    def _process_routing_result_impl(self, routing, row, email_type, message_id, row_key, raw_bytes, account, folder, uid, sender, subject, date_hdr, send_ctx=None):
         from mailbots_next.core import Decision
 
         if not routing.success:
@@ -481,15 +599,22 @@ class MailProcessor:
             if email_type in (EmailType.DSK, EmailType.ATB, EmailType.DRAFT,
                               EmailType.WAYBILL, EmailType.RELEASE,
                               EmailType.RELEASE_CANCEL, EmailType.RETBOX):
-                recipients = [x for x in (routing.responsible_person, OPS_OWNER_EMAIL) if x]
-                self.notifier.notify(
-                    "alarm", recipients,
-                    "🚨 报警通知\n"
+                # 任务 20 / 3.4.1：success=False 时 routing.responsible_person 恒为空，
+                # 原来只发给洋。改为反查（班列号前缀 → 发件人历史归属 → 落洋）。
+                recipients = self._failure_recipients(row, sender)
+                detail = (
                     f"路由失败（{routing.route_source}），未转发，需人工处理 | "
                     f"type={email_type} | 客编{row.customer_code or '-'} "
                     f"箱{row.container_no or '-'} 班列{getattr(row, 'train_no', '') or '-'} | "
-                    f"{subject[:100]}",
+                    f"{subject[:100]}"
                 )
+                # 折叠只压频率、不压事实：首条照发；同类 24h 内只累加计数。
+                if not self._alarm_suppressed():
+                    self._alarm_keyed(
+                        f"alarm|{message_id}|{row_key}", recipients,
+                        "🚨 报警通知\n" + detail,
+                        kind="alarm", detail=detail, code="route_fail",
+                    )
             return "queued"
 
         _log.log_routing(message_id, row.row_idx, routing.company, routing.responsible_person or "", routing.to_list, routing.cc_list)
@@ -528,6 +653,22 @@ class MailProcessor:
                 f"added={added} dup={is_dup}"
             )
             return "pooled"
+
+        # 任务 20 / D1：forward_log 是**硬终态**。该发送单元
+        # (message_id, row_key, company) 已有「未退信」的发送记录 ⇒ 不发送，
+        # 但按「已转发」计入本行聚合（这样重放收尾时 dedup 能落到 sent、
+        # error 条目能 resolved，而不是永远卡在池子里）。
+        # 🔴 只认 bounced = 0 的行：bounced=1 表示那封信被退回过、从未送达，属于
+        #    「没发出去」，重发由退信重排队（bounce.py）负责，不算重复发送。
+        if decision.action == "forward" and self._forward_log_hit(
+                message_id, row_key, routing.company):
+            _log.info(
+                f"Skip resend, forward_log hit | msg_id={message_id[:50]} | "
+                f"row={row.row_idx} | row_key={row_key} | "
+                f"company={routing.company or '-'}"
+            )
+            increment_counter("resend_blocked_forward_log")
+            return "forwarded"
 
         sender_info = None
         if routing.responsible_person:
@@ -629,6 +770,176 @@ class MailProcessor:
                       raw_bytes=raw_bytes)
             increment_counter("action_failed")
             return "queued"
+
+
+    # ------------------------------------------------------------ 任务 20：D1 / D3 支撑
+
+    @staticmethod
+    def _forward_log_hit(message_id: str, row_key: str, company: str) -> bool:
+        """(message_id, row_key, company) 是否已有「未退信」的 forward_log 行。
+
+        company 的来源写死 = 该发送单元的 `routing.company`（也就是
+        act._record_forward(..., company=...) 写进 forward_log 的那个值），
+        **不是**从 records 反查、也不是从邮件正文取；多公司扇出时每个单元各一个。
+        查询任何异常一律按「没发过」处理（宁可多查一次，也不能因读不到库就不发）。
+        """
+        try:
+            from mailbots_next.core.store import get_bot_config_connection
+
+            conn = get_bot_config_connection()
+            try:
+                sql = (
+                    "SELECT 1 FROM forward_log WHERE message_id = ? AND row_key = ? "
+                    "AND COALESCE(bounced, 0) = 0"
+                )
+                params = [message_id, row_key or ""]
+                if company:
+                    sql += " AND company = ?"
+                    params.append(company)
+                return conn.execute(sql + " LIMIT 1", tuple(params)).fetchone() is not None
+            finally:
+                conn.close()
+        except Exception as e:
+            _log.warning(
+                f"forward_log lookup failed, treated as not-sent | msg={message_id[:50]} | "
+                f"{type(e).__name__}: {e}"
+            )
+            return False
+
+    def _failure_recipients(self, row, sender: str):
+        """路由失败时的告警收件人：①班列号前缀→承运公司→负责人 ②发件人历史归属 ③落洋。
+
+        🔴 禁止用「箱号所属记录的公司」反查（箱号查不到时本来就没有记录可查）。
+        """
+        person = self._owner_by_train(getattr(row, "train_no", "") or "")
+        if not person:
+            person = self._owner_by_sender(sender)
+        # 去重保序：反查结果可能就等于 OPS_OWNER_EMAIL（同一个人），
+        # 不去重会让企微对同一人发两条、也让「只发给洋」的判据出现两个同值元素。
+        return list(dict.fromkeys([x for x in (person, OPS_OWNER_EMAIL) if x]))
+
+    def _owner_by_train(self, train_no: str):
+        """班列号前缀 → 承运公司 → 负责人。
+
+        派生规则（不新增表，只用 records.班列号 的现有取值）：库内班列号形如
+        `WB943`，邮件侧可能带也可能不带 `WB` 前缀 ⇒ 两侧都归一成「去掉前缀 WB 的
+        数字段」，相等即命中；另允许库内值以该数字段结尾（覆盖 `WB1` 这类）。命中
+        记录的 开票子公司名称（已过 COMPANY_ALIAS）→ get_responsible_person。
+        """
+        text = (train_no or "").strip().upper()
+        if not text:
+            return None
+        digits = text[2:] if text.startswith("WB") else text
+        if not digits:
+            return None
+        for rec in (getattr(self, "records", None) or []):
+            lib = (rec.get("班列号") or "").strip().upper()
+            if not lib:
+                continue
+            lib_digits = lib[2:] if lib.startswith("WB") else lib
+            if lib_digits != digits and not lib_digits.endswith(digits):
+                continue
+            company = rec.get("company") or ""
+            if not company:
+                continue
+            person = get_responsible_person(company)
+            if person:
+                return person
+        return None
+
+    def _owner_by_sender(self, sender: str):
+        """发件人历史归属：该 sender 在 forward_log 中最近 N=20 条（company 或 sent_by
+        非空的才算）的 company/owner 众数；并列取最近一条。查不到返回 None。"""
+        import re as _re
+
+        from mailbots_next.core.store import get_bot_config_connection
+
+        text = (sender or "").strip()
+        if not text:
+            return None
+        m = _re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+", text)
+        addr = m.group(0) if m else text
+        try:
+            conn = get_bot_config_connection()
+            try:
+                rows = conn.execute(
+                    "SELECT company, sent_by FROM forward_log "
+                    "WHERE sender LIKE ? AND (COALESCE(company, '') <> '' "
+                    "      OR COALESCE(sent_by, '') <> '') "
+                    "ORDER BY sent_at DESC, rowid DESC LIMIT ?",
+                    (f"%{addr}%", int(FAILURE_OWNER_HISTORY_N)),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            _log.warning(f"sender history lookup failed | {type(e).__name__}: {e}")
+            return None
+        counts = {}
+        order = []
+        for r in rows:
+            company = r["company"] or ""
+            if not company:
+                continue
+            if company not in counts:
+                counts[company] = 0
+                order.append(company)
+            counts[company] += 1
+        if not counts:
+            return None
+        best = sorted(order, key=lambda c: (-counts[c], order.index(c)))[0]
+        return get_responsible_person(best)
+
+    # ------------------------------------------------------------ 任务 20：D3 告警折叠
+
+    def _pool_round_active(self) -> bool:
+        return bool(getattr(getattr(self, "_pool_round_local", None), "value", False))
+
+    def _alarm_suppressed(self) -> bool:
+        """池子重判期间为 True：压掉逐行即时告警，改由每件一条折叠告警承担。"""
+        return self._pool_round_active()
+
+    def _begin_pool_round(self) -> None:
+        loc = getattr(self, "_pool_round_local", None)
+        if loc is None:
+            loc = threading.local()
+            self._pool_round_local = loc
+        loc.value = True
+
+    def _end_pool_round(self) -> None:
+        loc = getattr(self, "_pool_round_local", None)
+        if loc is not None:
+            loc.value = False
+
+    def _alarm_keyed(self, key: str, recipients, content: str, kind: str = "alarm",
+                     detail: str = "", code: str = "") -> bool:
+        """同一 key 24h 只发 1 条，重复的只累加计数（D3）。
+
+        🔴 这是**频率策略，不是规则排除**：真实歧义必须实时到人（首条照发），
+        折叠只解决刷屏；也**不许**改成「只进日报不报警」。
+        🔴 计数与窗口落 dedup.db 的 alarm_state（重启不丢，否则重启就重复告警）。
+        返回 True = 本次真的发出去了。
+        """
+        window = int(ALARM_FOLD_SEC)
+        try:
+            res = bump_alarm(key, window)
+        except Exception as e:
+            _log.error(f"alarm fold state failed | key={key}: {type(e).__name__}: {e}")
+            res = {"send": True, "count": 1, "previous": 0}
+        if not res.get("send"):
+            _log.info(f"Alarm folded | key={key} | count={res.get('count')}")
+            return False
+        targets = list(dict.fromkeys([r for r in (recipients or []) if r])) \
+            or [OPS_OWNER_EMAIL]
+        try:
+            self.notifier.notify(kind, targets, content)
+        except Exception as e:
+            _log.error(f"Alarm notify failed | key={key}: {type(e).__name__}: {e}")
+        # 同时记进当日汇总项（kind=pool_alarm 独立成类，不动原有四类的计数口径）
+        try:
+            record_issue("pool_alarm", detail or content, code=code or "")
+        except Exception as e:
+            _log.error(f"Alarm record_issue failed | key={key}: {type(e).__name__}: {e}")
+        return True
 
 
 def signal_handler(signum, frame):
@@ -818,21 +1129,26 @@ def stop_inbound_server():
 def sweep_once(processor=None) -> dict:
     """Single sweeper pass over the error queue.
 
-    Each pending entry with a replay payload is really reprocessed through
-    the full pipeline. Dedup conflict is resolved by releasing the original
-    claim first ((a)): the replay re-claims synchronously in this same
-    thread, so a concurrent poll pass can only make our claim fail — i.e. a
-    wasted cycle, never a double forward. Dedup stays the single source of
-    truth; no bypass flag exists anywhere.
+    任务 20 / D1 改造（三条，写死）：
+    · **不再释放认领**：认领只有三种状态，重放只改 status。释放会把「已发出的件」
+      重新变回可处理，正是 2026-11-16 09:52 重复转发的成因。
+    · 重放前逐发送单元查 forward_log：命中（未退信）的单元不发送（挡在
+      _process_routing_result 里，日志出现 `forward_log hit`）⇒ 一次重放中
+      已发出的单元发送次数必须为 0。
+    · 退信（BOUNCE）条目对应的发送单元**没有送达** ⇒ 先把 dedup 从 sent 退回
+      unresolved，否则 D1 的 claim 会把它挡成 duplicate，退信重发永远不会发生。
+
     Success closes the entry (+mark-seen enqueue when no sibling rows are
-    still pending); failure increments attempts, escalating to manual + one
-    E1 at the cap. Entries without payload can't replay: WARN + counter.
+    still pending); failure increments attempts and, at the cap, moves the
+    error-queue entry to manual + one E1 — 但**邮件本身不锁死**：它仍在未发出池
+    （dedup.status='unresolved'）里，由 repool_once 继续重判。
+    Entries without payload can't replay: WARN + counter.
     Returns {"retried": n, "escalated": n}; retried counts real replays.
     """
     from mailbots_next.core.dedup import (
         get_pending_errors, get_manual_errors, increment_attempt,
         mark_error_manual, mark_error_resolved, is_error_notified,
-        set_error_notified, release_claim,
+        set_error_notified,
     )
     from mailbots_next.config import SWEEP_MAX_RETRY
 
@@ -869,7 +1185,17 @@ def sweep_once(processor=None) -> dict:
             continue
 
         row_key = e.get("row_key") or ""
-        release_claim(f"{e['message_id']}|{row_key}" if row_key else e["message_id"])
+        # 🔴 release_claim 已删除（D1）。认领一律不释放，只改 status。
+        if (e.get("error_type") or "") == "BOUNCE":
+            # 退信 = 该发送单元没送达 ⇒ 从 sent 退回池子，允许重发。
+            # （forward_log 那一行已被 bounce.py 标 bounced=1，不参与「已发」判定。）
+            try:
+                set_status(e["message_id"], row_key, STATUS_UNRESOLVED, source="auto")
+            except Exception as exc:
+                _log.error(
+                    f"Sweep bounce reopen failed | id={e['id']} "
+                    f"msg_id={e['message_id'][:50]}: {type(exc).__name__}: {exc}"
+                )
         try:
             result = processor.process_email(
                 account, e.get("folder") or "", e["message_id"],
@@ -899,6 +1225,10 @@ def sweep_once(processor=None) -> dict:
                     get_notifier().send_program_error(OPS_OWNER_EMAIL, e["error_id"], f"Max retries reached for {e['message_id']}")
                     set_error_notified(e["id"])
                 stats["escalated"] += 1
+            # 转池 + 一次告警（D3 折叠；同 key 24h 只发一条，重复只累加计数）。
+            _pool_alarm(processor, e["message_id"], row_key,
+                        subject=e.get("subject") or "",
+                        reason="重放后仍未发出（留在未发出池）")
             continue
         if outcome.get("forwarded", 0) + outcome.get("alarm", 0) \
                 + outcome.get("pending", 0) + outcome.get("manual", 0) \
@@ -918,6 +1248,413 @@ def sweep_once(processor=None) -> dict:
             set_error_notified(e["id"])
             stats["escalated"] += 1
     return stats
+
+
+# ---------------------------------------------------------------- 任务 20：D2 未发出池重判
+
+
+def _load_json_file(path):
+    try:
+        with open(Path(path), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_json_atomic(path, data) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def mark_repool_requested(now: Optional[datetime] = None) -> bool:
+    """D2 触发器①：舱单导入**提交成功之后**写的脏标记（由 app.py 导入提交点一行调用）。
+
+    只写文件、立即返回：**不许**在导入事务里同步跑重判（会把网页请求拖死，也会在
+    数据还没落稳时重判）。serve 每轮消费一次并删掉这个文件。
+    """
+    try:
+        _write_json_atomic(REPOOL_REQUEST_PATH, {
+            "requested_at": (now or datetime.now()).isoformat(timespec="seconds"),
+        })
+        return True
+    except Exception as e:
+        _log.warning(f"repool request marker failed: {type(e).__name__}: {e}")
+        return False
+
+
+def _consume_repool_request() -> bool:
+    """消费脏标记（存在即返回 True 并**删除**文件，失败也不阻塞主链路）。"""
+    path = Path(REPOOL_REQUEST_PATH)
+    try:
+        if not path.exists():
+            return False
+        path.unlink()
+        _log.info(f"Repool request consumed: {path}")
+        return True
+    except OSError as e:
+        _log.warning(f"repool request consume failed: {type(e).__name__}: {e}")
+        return False
+
+
+def _daily_repool_due(now: Optional[datetime] = None) -> bool:
+    """每日一次：data/repool_state.json 的 last_daily_date 与今天不同才算到期。"""
+    today = (now or datetime.now()).strftime("%Y-%m-%d")
+    return _load_json_file(REPOOL_STATE_PATH).get("last_daily_date") != today
+
+
+def _mark_daily_repool_done(now: Optional[datetime] = None) -> None:
+    now = now or datetime.now()
+    try:
+        _write_json_atomic(REPOOL_STATE_PATH, {
+            "last_daily_date": now.strftime("%Y-%m-%d"),
+            "at": now.isoformat(timespec="seconds"),
+        })
+    except Exception as e:
+        _log.warning(f"repool state write failed: {type(e).__name__}: {e}")
+
+
+def _headers_from_raw(raw_bytes: bytes, subject: str = "", sender: str = "",
+                      date_hdr: str = ""):
+    """从原文补齐 subject / From / Date：IMAP 重取路径没有 error_queue 的元数据，
+    缺元数据会让 _identify_type 判不出类型 ⇒ 重判必然走成 unclassified。"""
+    if not raw_bytes or (subject and sender):
+        return subject, sender, date_hdr
+    try:
+        from mailbots_next.core.act import decode_header_safe
+
+        msg = email.message_from_bytes(raw_bytes, policy=email.policy.default)
+        subject = subject or decode_header_safe(msg.get("Subject", "") or "")
+        sender = sender or (msg.get("From", "") or "")
+        date_hdr = date_hdr or (msg.get("Date", "") or "")
+    except Exception as e:
+        _log.warning(f"pool replay header parse failed: {type(e).__name__}: {e}")
+    return subject, sender, date_hdr
+
+
+def _pool_replay_payload(item):
+    """池子重判的原文来源，**写死为两条**（02_TASK 2.2c）：
+
+      ① error_queue 里同 (message_id, row_key) 的 raw_hex（优先）
+      ② 按 dedup 的 (account, folder, uid) 重新 FETCH
+    两者都取不到 ⇒ raw 为空，由调用方累计 dedup.retry_count。
+
+    为什么需要第②条：pending / alarm 分支**不写** error_queue（走通知路径），
+    它们的原文只能靠认领时落库的定位字段重新取回来。
+    """
+    mid = item.get("message_id") or ""
+    row_key = item.get("row_key") or ""
+    account = item.get("account") or ""
+    folder = item.get("folder") or ""
+    uid = int(item.get("uid") or 0)
+    subject = sender = date_hdr = ""
+    raw_bytes = b""
+
+    try:
+        from mailbots_next.core.dedup import get_connection
+
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT raw_hex, account, folder, uid, subject, sender, date "
+                "  FROM error_queue "
+                " WHERE message_id = ? AND COALESCE(row_key, '') = ? "
+                "   AND COALESCE(raw_hex, '') <> '' "
+                " ORDER BY id DESC LIMIT 1",
+                (mid, row_key),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        _log.warning(f"pool payload lookup failed | msg={mid[:50]}: {type(e).__name__}: {e}")
+        row = None
+
+    if row is not None:
+        try:
+            raw_bytes = bytes.fromhex(row["raw_hex"] or "")
+        except ValueError:
+            raw_bytes = b""
+        account = account or (row["account"] or "")
+        folder = folder or (row["folder"] or "")
+        uid = uid or int(row["uid"] or 0)
+        subject = row["subject"] or ""
+        sender = row["sender"] or ""
+        date_hdr = row["date"] or ""
+
+    if not raw_bytes and account and uid:
+        from mailbots_next.core.ingest import fetch_raw_by_uid
+
+        raw_bytes = fetch_raw_by_uid(account, folder, uid) or b""
+        if not raw_bytes:
+            increment_counter("repool_refetch_failed")
+
+    if raw_bytes:
+        subject, sender, date_hdr = _headers_from_raw(raw_bytes, subject, sender, date_hdr)
+    return raw_bytes, subject, sender, date_hdr, account, folder, uid
+
+
+def _pool_alarm(processor, message_id: str, row_key: str, subject: str = "",
+                reason: str = "", recipients=None, days=None) -> bool:
+    """「这件还在未发出池里」的唯一告警出口（D3 折叠：同 key 24h 只发 1 条）。
+
+    文案必带**已在池天数**（02_TASK 2.2e：同一件 unresolved 超 N=2 天必报）。
+
+    days 必须由调用方在**本轮认领之前**算好传进来：try_claim 对 unresolved 会刷新
+    last_try_at，重判收尾再读 item_age_days 恒为 0，天数就永远是 0、超期告警
+    也就永不成立。只有 sweep 侧（没有「本轮之前」这个概念）才允许省略。
+    """
+    if days is None:
+        try:
+            days = item_age_days(message_id, row_key)
+        except Exception:
+            days = 0
+    stale = ""
+    if int(days) >= int(POOL_STALE_DAYS):
+        stale = f"｜超 {int(POOL_STALE_DAYS)} 天未发出，请人工确认"
+    detail = (
+        f"{reason}｜行键 {row_key or '-'}｜已在池 {int(days)} 天{stale}"
+        + (f"｜{subject[:80]}" if subject else "")
+    )
+    content = (
+        "🚨 未发出池（自动重判未成功）\n"
+        f"{detail}\n"
+        "已发出的不会重发；数据补全后下一轮重判会自动发出，也可人工处理。"
+    )
+    try:
+        return processor._alarm_keyed(
+            f"pool|{message_id}|{row_key}", recipients or [OPS_OWNER_EMAIL],
+            content, kind="alarm", detail=detail, code="pool_unresolved",
+        )
+    except Exception as e:
+        _log.error(
+            f"pool alarm failed | msg={message_id[:50]}: {type(e).__name__}: {e}"
+        )
+        return False
+
+
+def _repool_item(processor, item, stats=None) -> str:
+    """重判单件：取原文 → process_email（**同一 route + decide 路径**）→ 按结果聚合。
+
+    单封异常只影响该封（调用方 catch），绝不把整轮重判打断。
+    """
+    stats = stats if stats is not None else {}
+    mid = item.get("message_id") or ""
+    row_key = item.get("row_key") or ""
+    if not mid:
+        return STATUS_UNRESOLVED
+
+    # 已在池天数必须在**本轮认领之前**取：try_claim 对 unresolved 会刷新 last_try_at，
+    # 认领之后再取恒为 0，「超 2 天必报」就永远不成立（02_TASK 2.2e）。
+    try:
+        days_before = item_age_days(mid, row_key)
+    except Exception:
+        days_before = 0
+
+    raw_bytes, subject, sender, date_hdr, account, folder, uid = _pool_replay_payload(item)
+    if not raw_bytes:
+        n = bump_retry(mid, row_key)
+        if n >= int(POOL_EMPTY_RETRY_MAX):
+            # 连续 3 次取不到原文 ⇒ 认定邮件已删（留痕，不静默删行）。
+            set_status(mid, row_key, STATUS_CLOSED, source="auto",
+                       close_reason="mail_gone")
+            stats["closed"] = stats.get("closed", 0) + 1
+            _pool_alarm(processor, mid, row_key, subject=subject,
+                        reason=f"原文连续 {n} 次取不到，转 closed(mail_gone)",
+                        days=days_before)
+            return STATUS_CLOSED
+        stats["unresolved"] = stats.get("unresolved", 0) + 1
+        _pool_alarm(processor, mid, row_key, subject=subject,
+                    reason=f"原文取不到（连续第 {n} 次），保持 unresolved",
+                    days=days_before)
+        return STATUS_UNRESOLVED
+
+    # 原文取到了 ⇒ 「连续取不到」计数归零（成功/失败都归零，只统计"连续空取"）
+    try:
+        reset_retry(mid, row_key)
+    except Exception:
+        pass
+
+    processor._begin_pool_round()
+    try:
+        processor.process_email(account, folder, mid, uid, subject, sender,
+                                date_hdr, raw_bytes)
+    finally:
+        processor._end_pool_round()
+
+    status = get_status(mid, row_key) or STATUS_UNRESOLVED
+    if status == STATUS_SENT:
+        stats["sent"] = stats.get("sent", 0) + 1
+        return status
+    if status == STATUS_CLOSED:
+        stats["closed"] = stats.get("closed", 0) + 1
+        return status
+
+    # 行键漂移兜底（02_TASK 2.2 的必然推论）：row_key = 行序号 + 箱号，提取结果变了
+    # （箱号列被修正/换列）就会换成另一把键。新键被 try_claim 判成 duplicate，说明
+    # 本封在这些新键上已经是终态；旧键再也没人写，会**永远**留在池子里每轮报警。
+    # 只在这个条件下收口，别的情形一律留 unresolved（宁可多判一次，不许漏发）。
+    try:
+        outcome = processor._get_last_outcome() or {}
+    except Exception:
+        outcome = {}
+    if outcome.get("duplicate") and not outcome.get("queued") \
+            and not has_pending_error(mid, row_key):
+        set_status(mid, row_key, STATUS_CLOSED, source="auto",
+                   close_reason="row_key_drift")
+        stats["closed"] = stats.get("closed", 0) + 1
+        _log.info(
+            f"Repool row_key drifted, old key closed | msg={mid[:50]} | row_key={row_key}"
+        )
+        return STATUS_CLOSED
+
+    stats["unresolved"] = stats.get("unresolved", 0) + 1
+    _pool_alarm(processor, mid, row_key, subject=subject,
+                reason="重判后仍未发出（留在未发出池）", days=days_before)
+    return status
+
+
+def repool_once(processor=None) -> dict:
+    """D2：未发出池自动重判（**唯一允许重判的入口**）。
+
+    触发器只有两个（写死，不加「新增记录时实时触发」）：
+      ① mailbots_next/data/repool_request.json 存在（舱单导入提交点写的脏标记）
+         → 消费后删除该文件；
+      ② 每日一次：data/repool_state.json 的 last_daily_date 与今天不同才跑。
+
+    流程不做任何特殊排除：no_route / 数字段查不到 / 未分类 / pending /
+    multi_company 全部可以进池；重判复用首次分发的 **同一套 route + decide**，
+    结果分类与首次一致（仍 multi ⇒ 留池 + 报警；补全变唯一 ⇒ 自动发出）。
+    """
+    stats = {"requested": False, "daily": False, "scanned": 0,
+             "sent": 0, "closed": 0, "unresolved": 0}
+    requested = _consume_repool_request()
+    daily = _daily_repool_due()
+    stats["requested"], stats["daily"] = requested, daily
+    if not (requested or daily):
+        return stats
+
+    if processor is None:
+        processor = MailProcessor(snapshot())
+    try:
+        items = list_unresolved(limit=int(REPOOL_BATCH_MAX))
+    except Exception as e:
+        _log.error(f"repool list unresolved failed: {type(e).__name__}: {e}")
+        return stats
+
+    for item in items:
+        stats["scanned"] += 1
+        try:
+            _repool_item(processor, item, stats)
+        except Exception as e:
+            # 单封异常只影响该封（重判期间不得阻塞轮询）
+            stats["unresolved"] = stats.get("unresolved", 0) + 1
+            _log.error(
+                f"Repool item failed | msg={(item.get('message_id') or '')[:50]}: "
+                f"{type(e).__name__}: {e}"
+            )
+    if daily:
+        _mark_daily_repool_done()
+    _log.info(f"Repool done | {stats}")
+    return stats
+
+
+def repool_key(processor, message_id: str, row_key: str = "") -> dict:
+    """单件重判（--pool retry 用）：只处理这一件，不看触发器/日期。"""
+    stats = {"requested": False, "daily": False, "scanned": 0,
+             "sent": 0, "closed": 0, "unresolved": 0}
+    item = {
+        "message_id": message_id, "row_key": row_key,
+        "account": "", "folder": "", "uid": 0,
+    }
+    # 定位字段从 dedup 补全（重判取原文要靠它们）
+    for it in list_unresolved(limit=int(REPOOL_BATCH_MAX)):
+        if it.get("message_id") == message_id and (it.get("row_key") or "") == (row_key or ""):
+            item.update(it)
+            break
+    stats["scanned"] = 1
+    _repool_item(processor, item, stats)
+    return stats
+
+
+def pool_cli(pool_args, row_key: str = "", operator: str = "cli") -> int:
+    """`--pool list|close|retry` 的唯一实现（G4 的人工出口）。返回进程退出码。"""
+    action = (pool_args[0] if pool_args else "").strip().lower()
+    if action == "list":
+        items = list_unresolved(limit=int(REPOOL_BATCH_MAX))
+        print(f"未发出池：{count_unresolved()} 件（本次列出 {len(items)} 件）")
+        for it in items:
+            print(
+                f"  {it['message_id']} | row_key={it['row_key'] or '-'} | "
+                f"{it['status']} | retry={it['retry_count']} | "
+                f"last_try={it['last_try_at'] or '-'} | source={it['source'] or '-'}"
+            )
+        return 0
+
+    if action in ("close", "retry"):
+        if len(pool_args) < 2 or not pool_args[1]:
+            print("用法: --pool close <message_id> [--row-key K] | "
+                  "--pool retry <message_id> [--row-key K]")
+            return 2
+        message_id = pool_args[1]
+        if action == "close":
+            set_status(message_id, row_key, STATUS_SENT, source="manual",
+                       close_reason="")
+            print(f"已置 sent（source=manual）：{message_id} | row_key={row_key or '-'}")
+            return 0
+        # retry：closed → 人工 reopen（unresolved）→ 立即重判一次；sent 一律拒绝
+        status = get_status(message_id, row_key)
+        if status == STATUS_SENT:
+            print(f"已发出，永不重发：{message_id} | row_key={row_key or '-'}")
+            return 1
+        if not dedup_reopen(message_id, row_key, operator):
+            print(f"reopen 失败（键不存在）：{message_id} | row_key={row_key or '-'}")
+            return 1
+        print(f"已 reopen：{message_id} | row_key={row_key or '-'} → unresolved")
+        processor = MailProcessor(snapshot())
+        stats = repool_key(processor, message_id, row_key)
+        print(f"重判完成：{stats}")
+        return 0
+
+    print("用法: --pool list | --pool close <message_id> [--row-key K] | "
+          "--pool retry <message_id> [--row-key K]")
+    return 2
+
+
+def _flush_expired_alarms() -> int:
+    """D3：折叠窗口到期补发一条「共 N 次」—— 折叠**不是静默**。
+
+    返回补发条数；单条失败只记日志，绝不打断 sweeper。
+    """
+    sent = 0
+    try:
+        expired = list_expired_alarms(int(ALARM_FOLD_SEC))
+    except Exception as e:
+        _log.error(f"alarm window list failed: {type(e).__name__}: {e}")
+        return 0
+    for st in expired:
+        key = st.get("key") or ""
+        count = int(st.get("count") or 0)
+        if count > 1:
+            try:
+                get_notifier().notify(
+                    "alarm", [OPS_OWNER_EMAIL],
+                    "🚨 告警汇总（折叠窗口已到期）\n"
+                    f"同一件事在折叠窗口内共发生 {count} 次｜key={key}",
+                )
+                sent += 1
+            except Exception as e:
+                _log.error(f"alarm window flush failed | key={key}: "
+                           f"{type(e).__name__}: {e}")
+        try:
+            delete_alarm_state(key)
+        except Exception as e:
+            _log.error(f"alarm window cleanup failed | key={key}: "
+                       f"{type(e).__name__}: {e}")
+    return sent
 
 
 def _bounce_poll_due(now: float, last_ts: float) -> bool:
@@ -950,6 +1687,19 @@ def run_sweeper():
                     _log.error(f"bounce poll tick failed: {e}")
 
         sweep_once()
+
+        # 任务 20 / D3：折叠窗口到期的告警补发一条「共 N 次」（折叠 ≠ 静默）。
+        try:
+            _flush_expired_alarms()
+        except Exception as e:
+            _log.error(f"alarm window flush tick failed: {type(e).__name__}: {e}")
+
+        # 任务 20 / D2：未发出池重判。触发器只有两个（导入脏标记 / 每日一次），
+        # repool_once 自己判；没触发时只读一个标记文件 + 一个日期文件，空转返回。
+        try:
+            repool_once()
+        except Exception as e:
+            _log.error(f"repool tick failed: {type(e).__name__}: {e}")
 
         # 发送后自检：与 sweep 同节奏（默认 300s），默认关闭。
         # 函数内 import 避免循环导入；单次异常绝不能把 sweeper 线程打死。
@@ -1005,6 +1755,12 @@ def run_digest():
             break
 
         flush_and_notify()
+        # 任务 20 / D2：每日一次重判也挂在 digest 线程（sweeper 里也有一处，幂等：
+        # 由 repool_state.json 的日期去重，同一天只跑一次）。
+        try:
+            repool_once()
+        except Exception as e:
+            _log.error(f"daily repool failed: {type(e).__name__}: {e}")
 
 
 # 归档核对删除的每日小时（洋定 12:00，与 09:00 的日报错开）。
@@ -1105,6 +1861,13 @@ def main():
     parser.add_argument("--once", action="store_true", help="Single scan and exit")
     parser.add_argument("--errors", choices=["list", "retry", "resolve"], help="Error queue management")
     parser.add_argument("--error-id", type=int, help="Error ID for retry/resolve")
+    # 任务 20 / G4：未发出池的人工入口（风格照 --errors）
+    #   python serve.py --pool list
+    #   python serve.py --pool close <message_id> [--row-key <row_key>]
+    #   python serve.py --pool retry <message_id> [--row-key <row_key>]
+    parser.add_argument("--pool", nargs="+", metavar="ACTION",
+                        help="Pool ops: list | close <message_id> | retry <message_id>")
+    parser.add_argument("--row-key", default="", help="Row key for --pool close/retry")
     args = parser.parse_args()
 
     os.environ["MAILBOT_MODE"] = "live" if args.live else "test"
@@ -1125,6 +1888,9 @@ def main():
             )
 
     _log.info(f"Starting MailBot Next in {mode.upper()} mode")
+
+    if args.pool:
+        return pool_cli(args.pool, row_key=args.row_key or "")
 
     if args.errors:
         from mailbots_next.core.dedup import get_pending_errors, get_manual_errors, mark_error_resolved
@@ -1215,4 +1981,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # --pool 的退出码要能被 shell 看见（sent 件拒绝 retry ⇒ 1）；其它入口 main() 返回 None。
+    sys.exit(main())

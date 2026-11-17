@@ -30,6 +30,18 @@ def setup_db():
             except PermissionError:
                 pass
     init_db()
+    # 任务 20：forward_log 是「已发永不重发」的硬终态（D1）。本文件所有用例共用同一个
+    # bot_config.db，而 test_error_record 的 message_id 是固定的 —— 上一个用例发过之后，
+    # 这个用例的人工补发会被 D1 正确挡掉（SMTP 0 次）。故每个用例前清表，保证
+    # 「这条 error 从未发出过」这个前提成立。
+    from mailbots_next.core.store import get_bot_config_connection
+
+    conn = get_bot_config_connection()
+    try:
+        conn.execute("DELETE FROM forward_log")
+        conn.commit()
+    finally:
+        conn.close()
     yield
     for _p in (DEDUP_DB_PATH,):
         if _p.exists():

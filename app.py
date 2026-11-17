@@ -1503,6 +1503,11 @@ def api_manifest_apply():
     try:
         batch_id = apply_diff(conn, diff, operator, files)
         conn.commit()
+        # 任务20/D2 触发器①：舱单导入**提交成功之后**写脏标记（不入事务、不阻塞请求）。
+        # 落点在 app.py 而不是 admin_api.py：admin_api 里没有舱单导入入口（实测）。
+        from mailbots_next.serve import mark_repool_requested as _mark_repool_20
+        try: _mark_repool_20()
+        except Exception: pass
     except Exception as e:
         try:
             conn.rollback()

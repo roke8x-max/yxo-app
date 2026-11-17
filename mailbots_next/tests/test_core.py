@@ -17,6 +17,7 @@ from mailbots_next.core.dedup import (
     try_claim,
     release_claim,
     is_claimed,
+    set_status,
     add_error,
     get_pending_errors,
     get_manual_errors,
@@ -183,28 +184,41 @@ class TestConfigProvider:
 
 
 class TestDedup:
+    """任务 20 契约变更（原断言按「认领即终态」写，已被三态状态机取代）：
+
+    · 认领成功 = 落 status='unresolved'（未发出池）⇒ **允许再次认领**，否则池子里的
+      件永远进不到 _process_row，D2 直接失效；
+    · 只有 sent / closed 才返回 False（已发永不重发 / 已判永不重判）。
+    旧断言的语义等价物在 test_pool_state.py 里逐条覆盖，这里保留最小回归面。
+    """
+
     def test_try_claim_success(self):
-        result = try_claim("msg_123")
+        result = try_claim("msg_claim_success_1")
         assert result is True
 
     def test_try_claim_duplicate(self):
-        try_claim("msg_123")
-        result = try_claim("msg_123")
-        assert result is False
+        assert try_claim("msg_claim_dup_1") is True
+        # unresolved 允许重判（池子重判的唯一入口）
+        assert try_claim("msg_claim_dup_1") is True
+        # 落终态之后才是 duplicate
+        set_status("msg_claim_dup_1", "", "sent")
+        assert try_claim("msg_claim_dup_1") is False
 
     def test_try_claim_with_row_key(self):
-        result = try_claim("msg_123", "row_1")
-        assert result is True
-        result2 = try_claim("msg_123", "row_1")
-        assert result2 is False
-        result3 = try_claim("msg_123", "row_2")
-        assert result3 is True
+        assert try_claim("msg_claim_rk_1", "row_1") is True
+        # 同一行的 unresolved：允许再次认领（重判）
+        assert try_claim("msg_claim_rk_1", "row_1") is True
+        # 同一封的另一行是独立键，互不影响
+        assert try_claim("msg_claim_rk_1", "row_2") is True
+        # closed 永不重判
+        set_status("msg_claim_rk_1", "row_1", "closed")
+        assert try_claim("msg_claim_rk_1", "row_1") is False
 
     def test_release_claim(self):
-        try_claim("msg_123")
-        assert is_claimed("msg_123")
-        release_claim("msg_123")
-        assert not is_claimed("msg_123")
+        assert try_claim("msg_release_1") is True
+        assert is_claimed("msg_release_1")
+        release_claim("msg_release_1")
+        assert not is_claimed("msg_release_1")
 
     def test_error_queue_add_and_get(self):
         eid = add_error("msg_1", "row_1", "extract", "PARSE_ERROR", "Failed to parse", "err_001")
