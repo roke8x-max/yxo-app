@@ -39,7 +39,9 @@ _EXTERNAL_TABLES = {
 # 落 dedup.db；serve.main() 启动期调用）。
 _CREATED_TABLES = {"dedup", "error_queue", "bot_config", "forward_log",
                    "bounce_handled", "release_batch", "release_item",
-                   "archive_log"}
+                   "archive_log",
+                   # 任务 20：D3 告警折叠状态（dedup.py::init_db 建，落同一个 dedup.db）
+                   "alarm_state"}
 
 
 def _clean_source(text: str) -> str:

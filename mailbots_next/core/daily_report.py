@@ -386,6 +386,16 @@ def collect(now: Optional[datetime] = None,
     #    两段相加不重不漏）
     counts = _merge_counts(get_digest_snapshot(today), get_counters_snapshot(today))
 
+    # 任务 20：未发出池（dedup.status='unresolved'）—— 只读汇总，取不到就是空，
+    # 绝不让它把整封日报打掉。
+    try:
+        from .dedup import unresolved_summary
+
+        pool = unresolved_summary()
+    except Exception as e:
+        _log.warning(f"daily report: unresolved pool read failed: {type(e).__name__}: {e}")
+        pool = {"total": 0, "by_reason": {}, "oldest_days": 0}
+
     issues = get_issues(today)
     pending = [i for i in issues if i.get("kind") == "pending"]
     unclassified = [i for i in issues if i.get("kind") == "unclassified"]
@@ -408,6 +418,7 @@ def collect(now: Optional[datetime] = None,
         "unclassified": unclassified,
         "config_missing": config_missing,
         "program_errors": program_errors,
+        "pool": pool,
     }
 
 
@@ -583,6 +594,27 @@ def _section_five(data: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def _section_pool(data: Dict[str, Any]) -> List[str]:
+    """「未发出池」一节（任务 20 / 2.4）。
+
+    口径：`dedup.status='unresolved'` 的件 —— 认领了但**没发出去**，是唯一会被
+    自动重判的集合。只报数与最老天数，逐条明细走企微告警（D3 折叠）。
+    🔴 独立成节：原有四类（unclassified / config_missing / program_error / pending）
+    的计数口径与文案位置一个字都不动。
+    """
+    pool = data.get("pool") or {}
+    total = int(pool.get("total") or 0)
+    if not total:
+        return ["未发出池：空（没有待自动重判的件）。"]
+    lines = [f"在池 {total} 件｜最老一件已等 {int(pool.get('oldest_days') or 0)} 天"
+             f"（数据补全后由自动重判发出，已发出的永不重发）"]
+    by_reason = pool.get("by_reason") or {}
+    if by_reason:
+        parts = [f"{k} {v}" for k, v in sorted(by_reason.items(), key=lambda kv: (-kv[1], kv[0]))]
+        lines.append("  按原因：" + " · ".join(parts))
+    return lines
+
+
 def build_body(data: Optional[Dict[str, Any]] = None) -> str:
     """整封正文（五节，从头生成，不拼接旧日报文本）。"""
     data = data if data is not None else collect()
@@ -601,6 +633,7 @@ def build_body(data: Optional[Dict[str, Any]] = None) -> str:
     _block("三、待办与异常（细 · 需你处理的都在这）", _section_three(data))
     _block("四、发送与归档自检（细 · 只报异常数，正常为 0）", _section_four(data))
     _block("五、转发明细（细 · 全量，按需看）", _section_five(data))
+    _block("六、未发出池（自动重判中 · 只报数，逐条见企微）", _section_pool(data))
 
     lines.append(_SEP)
     lines.append("本邮件每天 12:30 自动发送，无需回复。")

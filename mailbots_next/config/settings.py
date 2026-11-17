@@ -143,6 +143,30 @@ RELEASE_ZIP_MAX_BYTES = int(os.environ.get("RELEASE_ZIP_MAX_BYTES", str(50 * 102
 
 DEDUP_RETENTION_DAYS = 90
 
+# ---- 任务 20：未发出池 / 告警折叠（全部**写死为常量**，不走 env）----
+# 理由：这几个值直接决定「会不会重复发」与「多久提醒一次」，让运维在环境变量里
+# 改成 0 或负数会静默改掉业务口径（例如折叠窗口设 0 ⇒ 每轮都告警；设成 -1 ⇒
+# 永不告警）。要改就改代码、走评审。
+#
+# D3：同一告警 key 在 24h 内只发 1 条，重复的只累加计数（窗口到期由 sweeper 补发
+# 一条「共 N 次」）。折叠是**频率策略，不是规则排除**。
+ALARM_FOLD_SEC = 24 * 3600
+# D3：同一件 unresolved 超过 N 天**必报**（文案带已在池天数）。
+POOL_STALE_DAYS = 2
+# D2：原文连续取不到几次才认定「邮件已删」并转 closed(mail_gone)。
+# 留 3 次余量：一次 IMAP 抖动不该被判成"邮件已删"。
+POOL_EMPTY_RETRY_MAX = 3
+# D2：单轮重判最多处理多少件（防一次涌入把 sweeper 拖长）。
+REPOOL_BATCH_MAX = 200
+# 3.4.1：路由失败时按发件人历史归属反查负责人，回看最近 N 条 forward_log。
+FAILURE_OWNER_HISTORY_N = 20
+# D2 触发器①：舱单导入提交成功后写的脏标记（serve 消费后删除）。
+REPOOL_REQUEST_PATH = Path(os.environ.get(
+    "REPOOL_REQUEST_PATH", str(DATA_DIR / "repool_request.json")))
+# D2 触发器②：每日一次重判的完成日期（{"last_daily_date": "YYYY-MM-DD"}，原子写）。
+REPOOL_STATE_PATH = Path(os.environ.get(
+    "REPOOL_STATE_PATH", str(DATA_DIR / "repool_state.json")))
+
 DEFAULT_ACCOUNTS = [
     "maoxiaoyang@cqtransit.com",
     "yangyawen@cqtransit.com",
