@@ -2,7 +2,7 @@
 """任务 16 · 每日一封汇总邮件（`06_EMAIL-DESIGN.md` 是唯一文本真相源）。
 
 覆盖判据：
-  1  运踪成功通知不抄送洋（send_forwarded 的 cc_admin）
+  1  运踪转发成功不发企微（任务 22-C）
   4  09:00 digest / 12:00 archive_summary 不再发企微
   5  未分类 / 配置缺失不逐封弹企微，但在邮件第三节列出
   6  每天恰好 1 封、只发洋、无数据也发
@@ -335,8 +335,8 @@ def test_tracing_forward_counted(env):
 
 # ---------------------------------------------------------------- 企微侧（判据 1 / 4 / 8）
 
-def test_tracing_forwarded_does_not_cc_admin(env):
-    """判据 1：运踪成功通知只给负责人，不给洋。"""
+def test_tracing_forwarded_sends_no_notification(env):
+    """判据：运踪成功不发企微（任务 22-C）。"""
     from unittest.mock import patch
     from mailbots_next.config import EmailType
     from mailbots_next.core.extract import ExtractedRow
@@ -355,8 +355,7 @@ def test_tracing_forwarded_does_not_cc_admin(env):
             routing, row, EmailType.TRACING, "t-msg-1", "0:1032", b"raw",
             "a@x.com", "Tracing", 7, "s", "subj", "",
         )
-    kwargs = processor.notifier.send_forwarded.call_args.kwargs
-    assert kwargs.get("cc_admin") is False
+    processor.notifier.send_forwarded.assert_not_called()
 
 
 def test_non_tracing_forwarded_still_cc_admin(env):

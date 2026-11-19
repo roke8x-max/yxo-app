@@ -67,10 +67,10 @@ _RECIPIENTS = {
     "港九港铁": (["gj@test.com"], []),
 }
 
-# 05_ACCEPTANCE 判据 12 ④：dedup 新增列必须正好这 8 个
+# 05_ACCEPTANCE 判据 12 ④：dedup 新增列必须正好这 9 个（任务 22-A1 增 lease_until 租约列）
 _DEDUP_NEW_COLS = {
     "status", "last_try_at", "source", "close_reason",
-    "account", "folder", "uid", "retry_count",
+    "account", "folder", "uid", "retry_count", "lease_until",
 }
 
 

@@ -197,8 +197,13 @@ class TestDedup:
         assert result is True
 
     def test_try_claim_duplicate(self):
+        """任务 22-A1：认领后有 900s 租约，unresolved 不再允许**并发/二次**认领；
+        但失败进池（set_status(unresolved)）会清租约，下一轮仍可立即重判。"""
         assert try_claim("msg_claim_dup_1") is True
-        # unresolved 允许重判（池子重判的唯一入口）
+        # 在途：第二次必须被租约挡住（这正是"每封信被 4 个账号各发一遍"的根因）
+        assert try_claim("msg_claim_dup_1") is False
+        # 失败进池：set_status 清租约 ⇒ 立即可重判（判据 9 的口径）
+        set_status("msg_claim_dup_1", "", "unresolved")
         assert try_claim("msg_claim_dup_1") is True
         # 落终态之后才是 duplicate
         set_status("msg_claim_dup_1", "", "sent")
@@ -206,10 +211,13 @@ class TestDedup:
 
     def test_try_claim_with_row_key(self):
         assert try_claim("msg_claim_rk_1", "row_1") is True
-        # 同一行的 unresolved：允许再次认领（重判）
-        assert try_claim("msg_claim_rk_1", "row_1") is True
+        # 同一行在途：第二次被租约挡住（A1）
+        assert try_claim("msg_claim_rk_1", "row_1") is False
         # 同一封的另一行是独立键，互不影响
         assert try_claim("msg_claim_rk_1", "row_2") is True
+        # 失败进池：set_status 清租约 ⇒ 立即可重判（判据 9）
+        set_status("msg_claim_rk_1", "row_1", "unresolved")
+        assert try_claim("msg_claim_rk_1", "row_1") is True
         # closed 永不重判
         set_status("msg_claim_rk_1", "row_1", "closed")
         assert try_claim("msg_claim_rk_1", "row_1") is False

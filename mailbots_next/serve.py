@@ -75,6 +75,7 @@ from mailbots_next.core.dedup import (
     STATUS_UNRESOLVED,
     set_status,
     get_status,
+    is_inflight,
     reopen as dedup_reopen,
     bump_retry,
     reset_retry,
@@ -727,14 +728,23 @@ class MailProcessor:
             # Group-covered rows ride on their company's group mail: no
             # extra notify, no extra send.
             if detail == "forwarded" and decision.action == "forward":
-                # 任务 16：运踪成功通知不再发给洋（只发负责同事）；其它类型不变。
-                # 🔴 只信任 boolean 形参，绝不用空串/None/伪造邮箱顶管理员那一位。
-                self.notifier.send_forwarded(
-                    routing.responsible_person or "",
-                    OPS_OWNER_EMAIL,
-                    f"Email forwarded: {subject[:100]}",
-                    cc_admin=(email_type != EmailType.TRACING),
-                )
+                # 任务 22-C（洋 2026-11-18）：运踪**成功**不再推企微。
+                # 11-18 上午半小时涌了 40 条「✅ 已转发」（运踪 20 + ATB 20，后者由
+                # A1 修掉）。运踪量大、扇出多，日报第一节已有完整统计 ⇒ 成功静默；
+                # 失败 / 告警 / 待办仍走下面三个分支，一个字都不许静默。
+                if email_type == EmailType.TRACING:
+                    increment_counter("notify_skip_tracing_forwarded")
+                else:
+                    # 非运踪：负责人 + 抄送运维，行为与任务 16 一致。
+                    # cc_admin 显式传 True：既有 test_non_tracing_forwarded_still_cc_admin
+                    # 断言 kwargs.get("cc_admin") is True（该测试不许改）；省略靠默认值
+                    # 会让 kwargs 里没有这个键 ⇒ 断言失败。
+                    self.notifier.send_forwarded(
+                        routing.responsible_person or "",
+                        OPS_OWNER_EMAIL,
+                        f"Email forwarded: {subject[:100]}",
+                        cc_admin=True,
+                    )
             elif decision.action == "alarm":
                 self.notifier.send_alarm(
                     routing.responsible_person or "",
@@ -1454,6 +1464,16 @@ def _repool_item(processor, item, stats=None) -> str:
     except Exception:
         days_before = 0
 
+    # 在途件不重判：另一个 poller 正在发这一件（租约未过期）。
+    # 不挡的话这一轮会被判成 outcome["duplicate"]，命中下面「row_key 漂移」分支
+    # 把**正在发的件**关成 closed(row_key_drift) —— 那边一旦发失败，这件就永久
+    # 不再重判 = 漏件。约束：① 必须在 _pool_alarm 之前 return（在途件不是"重判失败"）；
+    # ② 不许累加 stats["unresolved"]，只加 stats["inflight"] 让日志自解释；
+    # ③ 返回 unresolved 只为满足返回类型，调用方不按返回值决策。
+    if is_inflight(mid, row_key):
+        stats["inflight"] = stats.get("inflight", 0) + 1
+        return STATUS_UNRESOLVED
+
     raw_bytes, subject, sender, date_hdr, account, folder, uid = _pool_replay_payload(item)
     if not raw_bytes:
         n = bump_retry(mid, row_key)
@@ -1530,7 +1550,7 @@ def repool_once(processor=None) -> dict:
     结果分类与首次一致（仍 multi ⇒ 留池 + 报警；补全变唯一 ⇒ 自动发出）。
     """
     stats = {"requested": False, "daily": False, "scanned": 0,
-             "sent": 0, "closed": 0, "unresolved": 0}
+             "sent": 0, "closed": 0, "unresolved": 0, "inflight": 0}
     requested = _consume_repool_request()
     daily = _daily_repool_due()
     stats["requested"], stats["daily"] = requested, daily
@@ -1565,7 +1585,7 @@ def repool_once(processor=None) -> dict:
 def repool_key(processor, message_id: str, row_key: str = "") -> dict:
     """单件重判（--pool retry 用）：只处理这一件，不看触发器/日期。"""
     stats = {"requested": False, "daily": False, "scanned": 0,
-             "sent": 0, "closed": 0, "unresolved": 0}
+             "sent": 0, "closed": 0, "unresolved": 0, "inflight": 0}
     item = {
         "message_id": message_id, "row_key": row_key,
         "account": "", "folder": "", "uid": 0,
@@ -1709,6 +1729,13 @@ def run_sweeper():
                 run_once()
             except Exception as e:
                 _log.error(f"send_check tick failed: {e}")
+            # 任务 22-E：补发是独立的一步，两个独立 try —— 自检抛异常也不能挡住补发。
+            # 补发刻意嵌在 SEND_CHECK_ENABLED 内（NONE 由自检写入；历史行已由运维封口）。
+            try:
+                from mailbots_next.core.send_check import resend_once
+                resend_once()
+            except Exception as e:
+                _log.error(f"send_check resend tick failed: {e}")
 
 
 def flush_and_notify() -> bool:

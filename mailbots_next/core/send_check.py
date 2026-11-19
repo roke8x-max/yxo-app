@@ -9,15 +9,20 @@
 生产路径不注入时用本模块的 `collect_sent` / `collect_qq` 默认实现。
 """
 import email
+import email.policy
 import imaplib
 import json
 import re
 from datetime import datetime, timezone
+from typing import Tuple
 
 from ..config import OPS_OWNER_EMAIL, settings
 from .log import get_logger
-from .notify import get_notifier, increment_counter
-from .store import get_owner_email, get_pending_checks, mark_check_result
+from .notify import get_notifier, increment_counter, record_issue
+from .store import (
+    get_owner_email, get_pending_checks, mark_check_result,
+    list_resend_candidates, claim_resend,
+)
 
 _log = get_logger(__name__)
 
@@ -248,14 +253,14 @@ def _qq_credentials() -> tuple:
 
 
 def _recipients_for(result, company) -> list:
-    """告警收件人（SPEC §12-①）。
+    """告警收件人（洋 2026-11-18 拍板的口径）。
 
-    NONE  → 公司负责人 ∪ 运维负责人，先滤掉 None/空串再去重
-            （get_owner_email 查不到公司时返回 None，直接传给 notify 会静默失败）
-    其余  → 只有运维负责人
+    只有 NONE（两路都没有副本）才算「未发送成功」，才告警：
+        负责人 ∪ 运维负责人，先滤 None/空串再去重。
+    AB / A_ONLY / B_ONLY **一律返回空列表 = 不告警** —— 只要有一路命中就判成功。
     """
     if result != RESULT_NONE:
-        return [OPS_OWNER_EMAIL]
+        return []
     owner = get_owner_email(company)
     return sorted({r for r in (owner, OPS_OWNER_EMAIL) if r})
 
@@ -391,29 +396,20 @@ def run_once(candidates=None, sent_probe=None, qq_probe=None, notifier=None) -> 
         if result != RESULT_AB:
             judged.append((result, cand))
 
-    # ⑤ 告警（SPEC §12）：NONE / B_ONLY 逐封；A_ONLY 同公司 ≥2 封合并成一条
+    # ⑤ 告警（2026-11-18 口径）：只有 NONE 算未发送成功，逐封告警。
+    # AB / A_ONLY / B_ONLY 都判成功，不发企微；但保留 INFO 日志 + 落库 + 计数，
+    # 这样"QQ 旁路是不是断了"还能从日志看出来，不至于静默。
+    # ④ 段的 judged 仍收集所有非 AB（见上），"要不要告警"只在这里判。
     alerted = 0
     for result, cand in judged:
-        if result != RESULT_A_ONLY:
+        if result == RESULT_NONE:
             alerted += _alert_one(notifier, result, cand)
-    a_only_by_company = {}
-    for result, cand in judged:
-        if result == RESULT_A_ONLY:
-            a_only_by_company.setdefault((cand.get("company") or ""), []).append(cand)
-    for company, rows in a_only_by_company.items():
-        if len(rows) >= 2:
-            detail = (
-                f"公司: {company or '(未知)'}\n"
-                f"本轮该公司 {len(rows)} 封未见外部投递，QQ 副本链路可能已断"
-                f"（是否把 3841559246@qq.com 从 cc 里删了？）\n"
-                f"forward_id 列表: " + ", ".join(str(r.get("forward_id")) for r in rows) +
-                f"\n发信账号: " + ", ".join(sorted({str(r.get("sent_by")) for r in rows})) +
-                f"\n说明: {_HINT_BY_RESULT[RESULT_A_ONLY]}"
-            )
-            alerted += _alert(notifier, [OPS_OWNER_EMAIL], detail)
         else:
-            alerted += _alert_one(notifier, RESULT_A_ONLY, rows[0])
-
+            _log.info(
+                f"send_check: treated as delivered ({result}) | "
+                f"forward_id={cand.get('forward_id')} | "
+                f"company={cand.get('company') or '-'}"
+            )
     stats["alerted"] = alerted
     if alerted:
         increment_counter("send_check_alerted", alerted)
@@ -437,3 +433,84 @@ def _alert_one(notifier, result, cand) -> int:
     """单封告警。收件人按 SPEC §12-① 分级。"""
     return _alert(notifier, _recipients_for(result, cand.get("company")),
                   _mail_detail(result, cand, _MISSING_BY_RESULT[result]))
+
+
+# ---------------------------------------------------------------- E：NONE 自动补发一次
+
+
+def _resend_one(row) -> Tuple[bool, str]:
+    """按 forward_log 里存的原文、原 to/cc、原发信账号、**原 forward_id** 再发一次。
+
+    · 原文：`forward_log.raw_hex`（`write_forward_log` 一直存 `raw_bytes.hex()`）⇒ 不走 IMAP
+    · forward_id 用**原来那个**，不生成新的：邮件头的 `X-YXO-Forward-Id` 与原行一致，可追溯
+    · 🔴 **不调 `write_forward_log`**：补发只更新 `resent_at`，绝不新增 forward_log 行
+      （新增行会让"同前缀多行"被判成重复发送，见 7.6.6 第 6 条）
+    """
+    # 函数内 import act：与 serve.py 对 send_check 的调用惯例一致，也避免将来
+    # act ↔ send_check 反向依赖时成环（当前 act 并不 import send_check，模块级也能跑，
+    # 但保持函数内 import 更稳）。
+    from mailbots_next.core.act import build_forward_message, send_smtp, _envelope_from
+
+    raw = bytes.fromhex(row.get("raw_hex") or "")
+    original = email.message_from_bytes(raw, policy=email.policy.default)
+    to_list = json.loads(row.get("to_list") or "[]")
+    cc_list = json.loads(row.get("cc_list") or "[]")
+    sender_email = (row.get("sent_by") or "").strip() or (row.get("account") or "").strip()
+    pwd = _sent_password(sender_email)
+    if not pwd:
+        return False, f"no password for sender {sender_email or '-'}"
+    fid = row.get("forward_id") or ""
+    msg = build_forward_message(original, to_list, cc_list, sender_email, forward_id=fid)
+    result = send_smtp(msg, sender_email, pwd, to_list, cc_list,
+                       mail_from=_envelope_from(fid, sender_email))
+    if not result.get("success"):
+        return False, f"SMTP failed: {result.get('error')}"
+    return True, "resent"
+
+
+def resend_once(limit=None) -> dict:
+    """E：把「判 NONE 且已过等待窗口」的逐封补发一次。返回统计 dict。
+
+    `limit=None` 用配置默认值；**`limit=0` 表示"这轮不补"，不是"用默认值"**
+    （所以下面必须用 `is not None` 判断，不能写 `limit or ...`）。
+    要整体关闭请用 `SEND_CHECK_RESEND_ENABLED=0`。
+    """
+    if not settings.SEND_CHECK_RESEND_ENABLED:
+        return {"enabled": False}
+    rows = list_resend_candidates(
+        settings.SEND_CHECK_RESEND_MIN_AGE_SEC,
+        settings.SEND_CHECK_RESEND_MAX_PER_ROUND if limit is None else limit,
+    )
+    stats = {"candidates": len(rows), "resent": 0, "failed": 0, "skipped": 0}
+    for row in rows:
+        fid = row.get("forward_id") or ""
+        if not fid or not claim_resend(fid):      # 先占位再发；抢不到直接跳过
+            stats["skipped"] += 1
+            continue
+        # 无原文：此时 resent_at 已经占位 ⇒ 这封**以后也不会再补**（intentional，
+        # 与"失败不重试"同一条原则）。不要为了"以后还能补"把它挪到 claim 之前 ——
+        # 那会让它每轮都被扫到、每轮打一条 warning、永远清不掉。
+        if not (row.get("raw_hex") or ""):
+            stats["skipped"] += 1
+            _log.warning(f"send_check resend skipped: no raw payload | forward_id={fid}")
+            increment_counter("send_check_resend_no_payload")
+            continue
+        try:
+            ok, detail = _resend_one(row)
+        except Exception as e:
+            ok, detail = False, f"{type(e).__name__}: {e}"
+        if ok:
+            stats["resent"] += 1
+            increment_counter("send_check_resent")
+            _log.info(
+                f"send_check resend ok | forward_id={fid} | "
+                f"company={row.get('company') or '-'} | to={row.get('to_list')}"
+            )
+        else:
+            # 🔴 失败不重试（resent_at 已占位）—— 一次就是一次，绝不变成重发机器
+            stats["failed"] += 1
+            increment_counter("send_check_resend_failed")
+            _log.error(f"send_check resend failed | forward_id={fid} | {detail}")
+            record_issue("resend_failed",
+                         f"补发失败 forward_id={fid}：{detail}", code="resend_failed")
+    return stats
