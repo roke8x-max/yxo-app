@@ -393,7 +393,7 @@ def test_qq_credentials_raise_when_empty(monkeypatch):
 # ---------------------------------------------------------------- 9-14 告警收件人
 
 
-def test_a_only_alerts_ops_only(db):
+def test_a_only_treated_as_delivered(db):
     _add("fid-1", company="\u4e1c\u76df")          # 东盟 → yangyawen
     rec = _Recorder()
 
@@ -403,8 +403,9 @@ def test_a_only_alerts_ops_only(db):
                    notifier=rec)
 
     assert res["a_only"] == 1
-    assert len(rec.calls) == 1
-    assert rec.calls[0]["recipients"] == [OPS]
+    assert rec.calls == []                          # 任一路有副本 ⇒ 不告警
+    assert res["alerted"] == 0
+    assert get_forward_log("fid-1")["check_result"] == RESULT_A_ONLY
 
 
 def test_none_alerts_owner_and_ops_without_duplicates(db):
@@ -433,7 +434,7 @@ def test_none_owner_equals_ops_sends_once(db):
     assert rec.calls[0]["recipients"] == [OPS]
 
 
-def test_b_only_alerts_ops_only(db):
+def test_b_only_treated_as_delivered(db):
     _add("fid-1", company="\u4e1c\u76df")
     rec = _Recorder()
 
@@ -443,10 +444,12 @@ def test_b_only_alerts_ops_only(db):
                    notifier=rec)
 
     assert res["b_only"] == 1
-    assert rec.calls[0]["recipients"] == [OPS]
+    assert rec.calls == []                          # 任一路有副本 ⇒ 不告警
+    assert res["alerted"] == 0
+    assert get_forward_log("fid-1")["check_result"] == RESULT_B_ONLY
 
 
-def test_a_only_same_company_merged_into_one_summary(db):
+def test_a_only_multi_rows_no_merge_alert(db):
     _add("fid-1", company="\u4e1c\u76df")
     _add("fid-2", company="\u4e1c\u76df")
     rec = _Recorder()
@@ -458,13 +461,11 @@ def test_a_only_same_company_merged_into_one_summary(db):
                    notifier=rec)
 
     assert res["a_only"] == 2
-    assert len(rec.calls) == 1                       # 合并成一条
-    assert "2 \u5c01" in rec.calls[0]["detail"]      # 「2 封」
-    assert "fid-1" in rec.calls[0]["detail"]
-    assert rec.calls[0]["recipients"] == [OPS]
+    assert rec.calls == []                           # 同公司 ≥2 封也一律不告警
+    assert res["alerted"] == 0
 
 
-def test_a_only_different_companies_send_one_each(db):
+def test_a_only_different_companies_no_alert(db):
     _add("fid-1", company="\u4e1c\u76df")
     _add("fid-2", company="\u592a\u5e73\u6d0b")
     rec = _Recorder()
@@ -476,8 +477,8 @@ def test_a_only_different_companies_send_one_each(db):
                    notifier=rec)
 
     assert res["a_only"] == 2
-    assert len(rec.calls) == 2
-    assert all(c["recipients"] == [OPS] for c in rec.calls)
+    assert rec.calls == []                           # 不同公司也都 0 告警
+    assert res["alerted"] == 0
 
 
 def test_ab_writes_result_without_alert(db):
@@ -510,17 +511,18 @@ def test_none_alert_with_unknown_company_only_ops(db):
 
 
 def test_alerted_counter_counts_sent_alerts(db):
-    _add("fid-1", company="\u4e1c\u76df")
-    _add("fid-2", company="\u592a\u5e73\u6d0b")
+    """计数口径变成"只有 NONE 才 +1"：1 条 NONE + 1 条 A_ONLY ⇒ 只 +1。"""
+    _add("fid-1", company="\u4e1c\u76df")     # NONE（两路都没有）
+    _add("fid-2", company="\u592a\u5e73\u6d0b")  # A_ONLY（仅存档有）
     rec = _Recorder()
 
     run_once(candidates=[_cand("fid-1", company="\u4e1c\u76df"),
                          _cand("fid-2", company="\u592a\u5e73\u6d0b")],
-             sent_probe=_Stub(set()),
+             sent_probe=_Stub({"fid-2"}),
              qq_probe=_Stub((set(), [])),
              notifier=rec)
 
-    assert get_counters().get("send_check_alerted") == 2
+    assert get_counters().get("send_check_alerted") == 1
 
 
 # ---------------------------------------------------------------- 15-18 去重 / 跳过
@@ -734,3 +736,75 @@ def test_send_send_check_method_and_digest_labels(db):
     digest = n2._notify_by_name.call_args[0][1]
     assert "\u81ea\u68c0\u544a\u8b66\u6761\u6570" in digest      # 自检告警条数
     assert "\u81ea\u68c0\u6293\u53d6\u5931\u8d25" in digest      # 自检抓取失败
+
+
+# ---------------------------------------------------------------- D 口径（T19–T22，追加）
+# 任一路有副本即判成功：A_ONLY / B_ONLY 不告警但留 INFO 日志 + 落库 + 计数；
+# 只有 NONE 仍逐封告警。
+
+def test_a_only_no_alert_but_info_log_and_result(db):
+    """T19：单封 A_ONLY —— 不告警 / check_result 落库 / a_only==1 / alerted==0 / INFO 含 fid。"""
+    from unittest.mock import patch
+    rec = _Recorder()
+    _add("a-only-fid")
+    with patch.object(send_check._log, "info") as mock_info:
+        res = run_once(candidates=[_cand("a-only-fid")],
+                       sent_probe=_Stub({"a-only-fid"}),
+                       qq_probe=_Stub((set(), [])),
+                       notifier=rec)
+    assert rec.calls == []                          # 不告警
+    assert get_forward_log("a-only-fid")["check_result"] == RESULT_A_ONLY
+    assert res["a_only"] == 1
+    assert res["alerted"] == 0
+    assert any("a-only-fid" in str(c) for c in mock_info.call_args_list)
+
+
+def test_b_only_no_alert_but_info_log_and_result(db):
+    """T20：单封 B_ONLY —— 同上（b_only）。"""
+    from unittest.mock import patch
+    rec = _Recorder()
+    _add("b-only-fid")
+    with patch.object(send_check._log, "info") as mock_info:
+        res = run_once(candidates=[_cand("b-only-fid")],
+                       sent_probe=_Stub(set()),
+                       qq_probe=_Stub(({"b-only-fid"}, [])),
+                       notifier=rec)
+    assert rec.calls == []
+    assert get_forward_log("b-only-fid")["check_result"] == RESULT_B_ONLY
+    assert res["b_only"] == 1
+    assert res["alerted"] == 0
+    assert any("b-only-fid" in str(c) for c in mock_info.call_args_list)
+
+
+def test_none_still_alerts_owner_and_ops(db):
+    """T21：单封 NONE —— 仍告警 1 条，收件人「负责人 ∪ 运维」（防 D 把 NONE 静音）。"""
+    rec = _Recorder()
+    _add("none-fid", company="\u4e1c\u76df")       # 东盟 → yangyawen
+    res = run_once(candidates=[_cand("none-fid", company="\u4e1c\u76df")],
+                   sent_probe=_Stub(set()),
+                   qq_probe=_Stub((set(), [])),
+                   notifier=rec)
+    assert res["none"] == 1
+    assert len(rec.calls) == 1
+    assert rec.calls[0]["recipients"] == sorted({OPS, "yangyawen@cqtransit.com"})
+
+
+def test_mixed_batch_only_none_alerts(db):
+    """T22：AB + A_ONLY + B_ONLY + NONE 各 1 ⇒ alerted==1、send_check_alerted 只 +1、四条落库正确。"""
+    rec = _Recorder()
+    before = get_counters().get("send_check_alerted", 0)
+    for fid in ("mix-ab", "mix-a", "mix-b", "mix-none"):
+        _add(fid, company="\u592a\u5e73\u6d0b")
+    res = run_once(
+        candidates=[_cand("mix-ab"), _cand("mix-a"), _cand("mix-b"), _cand("mix-none")],
+        sent_probe=_Stub({"mix-ab", "mix-a"}),
+        qq_probe=_Stub(({"mix-ab", "mix-b"}, [])),
+        notifier=rec)
+    assert res["ab"] == 1 and res["a_only"] == 1 and res["b_only"] == 1 and res["none"] == 1
+    assert res["alerted"] == 1
+    assert len(rec.calls) == 1
+    assert get_counters().get("send_check_alerted", 0) - before == 1
+    assert get_forward_log("mix-ab")["check_result"] == RESULT_AB
+    assert get_forward_log("mix-a")["check_result"] == RESULT_A_ONLY
+    assert get_forward_log("mix-b")["check_result"] == RESULT_B_ONLY
+    assert get_forward_log("mix-none")["check_result"] == RESULT_NONE

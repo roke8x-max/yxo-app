@@ -418,6 +418,8 @@ def init_forward_log():
                     ("code", "ALTER TABLE forward_log ADD COLUMN code TEXT DEFAULT ''"),
                     ("box", "ALTER TABLE forward_log ADD COLUMN box TEXT DEFAULT ''"),
                     ("train_no", "ALTER TABLE forward_log ADD COLUMN train_no TEXT DEFAULT ''"),
+                    # 任务 22-E：补发占位标记。老行 '' = 没补发过（不回填历史值）。
+                    ("resent_at", "ALTER TABLE forward_log ADD COLUMN resent_at TEXT DEFAULT ''"),
                 ):
                     if _col not in cols:
                         conn.execute(_ddl)
@@ -520,9 +522,17 @@ def find_forward_log_by_message_id(message_id: str):
 def get_pending_checks(delay_sec=120, limit=200):
     """返回到期待核对的行（dict 列表，按 sent_at 升序）。
 
-    条件：未核对 / 未退信 / 已过延迟窗口。sent_at 与 datetime('now') 都是 UTC，
-    同一基准，不要引入本地时间。
+    条件：未核对 / 未退信 / 已过延迟窗口 / 不是运踪。
+    sent_at 与 datetime('now') 都是 UTC，同一基准，不要引入本地时间。
+
+    🔴 运踪不进候选：2026-10-29 拍板「tracing 不纳入核对」
+    （docs/mailbots/specs/2026-10-29-mailbots_next-发送后自检.md §1 第 5 条 / §9）。
+    任务 19（2026-11-16）之后运踪改走单发路径并写 forward_log，若不在这里排除，
+    运踪会进候选、而 QQ 旁路的 tracing 归档夹又被 QQ_VERIFY_SKIP_SUBFOLDERS 跳过
+    ⇒ 永远判不出 AB，只能落 A_ONLY / NONE，NONE 还会按 SPEC §12-① 直推公司负责人
+    （2026-11-18 误报事故）。标签取 ROBOT_LABELS，不写字面串 —— 改字时这里跟着走。
     """
+    tracing_label = config.ROBOT_LABELS[config.EmailType.TRACING]
     with _bot_config_lock:
         conn = get_bot_config_connection()
         try:
@@ -531,8 +541,9 @@ def get_pending_checks(delay_sec=120, limit=200):
                 "FROM forward_log "
                 "WHERE checked_at = '' AND bounced = 0 "
                 "  AND sent_at <= datetime('now', ?) "
+                "  AND COALESCE(robot, '') <> ? "
                 "ORDER BY sent_at LIMIT ?",
-                (f"-{int(delay_sec)} seconds", int(limit)),
+                (f"-{int(delay_sec)} seconds", tracing_label, int(limit)),
             ).fetchall()
             return [dict(r) for r in rows]
         finally:
@@ -550,6 +561,61 @@ def mark_check_result(forward_id, result):
                 (result, forward_id),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def list_resend_candidates(min_age_sec=None, limit=None):
+    """E：可补发的行 = 判 NONE + 未补发过 + 未退信 + **非运踪** + 已过等待窗口（只读）。
+
+    默认值走 `None` → 内部读 `config.SEND_CHECK_RESEND_*`：**只有一处真相源**，
+    不要在这里写 1800 / 5 的字面量（否则改 env 配置时这里不跟着变）。
+
+    🔴 必须排除运踪：运踪不纳入自检（B 项），但库里**已经存在** `check_result='NONE'`
+    的运踪历史行（2026-11-18 就有 14 条）。不排除的话，本功能一上线就会把这 14 条
+    全部补发一遍给客户 —— 客户当天已经收过 4 份，再来第 5 份，正是本任务要消灭的事故。
+    """
+    if min_age_sec is None:
+        min_age_sec = config.SEND_CHECK_RESEND_MIN_AGE_SEC
+    if limit is None:
+        limit = config.SEND_CHECK_RESEND_MAX_PER_ROUND
+    tracing_label = config.ROBOT_LABELS[config.EmailType.TRACING]
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            rows = conn.execute(
+                "SELECT forward_id, message_id, row_key, account, folder, uid, "
+                "       subject, to_list, cc_list, sent_by, company, raw_hex, sent_at "
+                "  FROM forward_log "
+                " WHERE check_result = 'NONE' AND COALESCE(resent_at, '') = '' "
+                "   AND COALESCE(bounced, 0) = 0 "
+                "   AND COALESCE(robot, '') <> ? "
+                "   AND sent_at <= datetime('now', ?) "
+                " ORDER BY sent_at LIMIT ?",
+                (tracing_label, f"-{int(min_age_sec)} seconds", int(limit)),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+def claim_resend(forward_id) -> bool:
+    """E：原子占位。只有第一次调用返回 True —— 抢不到就说明别人已经在补发了。
+
+    🔴 必须在**发送之前**调用：先占位再发，进程崩在中间也不会重复补发第二遍。
+    """
+    if not forward_id:
+        return False
+    with _bot_config_lock:
+        conn = get_bot_config_connection()
+        try:
+            cur = conn.execute(
+                "UPDATE forward_log SET resent_at = datetime('now') "
+                " WHERE forward_id = ? AND COALESCE(resent_at, '') = ''",
+                (forward_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 

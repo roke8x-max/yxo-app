@@ -169,9 +169,36 @@ def send_smtp(
             server.login(sender_email, sender_password)
             env_from = mail_from or sender_email
             refused = server.sendmail(env_from, all_recipients, msg.as_string())
-            if refused:
-                raise smtplib.SMTPRecipientsRefused(refused)
-        return {"success": True, "refused": {}}
+        # 🔴 判定放在 with 之外：连接已正常 QUIT，避免 __exit__ 里的 quit() 异常
+        # 把「哪些地址被拒」盖掉（盖掉之后 error 串里看不到地址，排查会瞎）。
+        if not refused:
+            return {"success": True, "refused": {}}
+        # 部分被拒：smtplib 已经把信投给了**被接受**的那些收件人。
+        # 只有「被拒的全都是自检抄送地址」才允许判成功 —— 否则 dedup 会留
+        # unresolved，重判时再发一遍，客户就收到两封。
+        refused_addrs = {str(a).strip().lower() for a in refused}
+        exception = (config.SELFCHECK_CC_ADDR or "").strip().lower()
+        if exception and refused_addrs == {exception}:
+            _log.warning(
+                f"SMTP selfcheck cc refused (business send ok) | "
+                f"addr={exception} | detail={list(refused.values())[:1]}"
+            )
+            # 🔴 计数/记录失败不许反转业务判定：信已经发出去了。
+            # 这层内部 try 必须留着：计数/记录被外层 except 接住的话，
+            # 「客户已收到、只有自检地址被拒」会变成 success=False ⇒ dedup 留
+            # unresolved ⇒ 重判再发 ⇒ 客户收到两封，正是本任务要消除的场景。
+            try:
+                from mailbots_next.core.notify import increment_counter, record_issue
+                increment_counter("selfcheck_cc_refused")
+                record_issue(
+                    "selfcheck_cc_refused",
+                    f"自检抄送 {exception} 被拒收（业务收件人已收到）",
+                    code="selfcheck_cc_refused",
+                )
+            except Exception as e:
+                _log.warning(f"selfcheck cc refused: counter/record failed: {e}")
+            return {"success": True, "refused": refused}
+        raise smtplib.SMTPRecipientsRefused(refused)
     except Exception as e:
         _log.error(f"SMTP send failed: {e}")
         return {"success": False, "error": str(e)}

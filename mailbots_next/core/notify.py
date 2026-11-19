@@ -430,10 +430,12 @@ class WeComNotifier:
                        error_id: Optional[str] = None, cc_admin: bool = True) -> bool:
         """转发成功通知。
 
-        `cc_admin=False` 时**只发负责人、不抄送管理员**（任务 16：运踪成功通知
-        不再发给洋）。🔴 必须是"少一个收件人"，不能拿空串/None/伪造邮箱去顶
-        管理员那一位 —— `_send_now` 对无企微映射的收件人会走 SMTP 降级邮件发给
-        运维负责人（`_fallback_owner_email`），那等于没停。
+        `cc_admin=False` 时只发负责人、不抄送管理员（任务 16 引入）。
+        ⚠️ 任务 22-C（2026-11-18）之后**运踪不再调用本方法**（成功静默），
+        所以运踪这一层已不依赖 cc_admin；参数与行为保持不变，供其它类型使用。
+        🔴 必须是"少一个收件人"，不能拿空串/None/伪造邮箱去顶管理员那一位 ——
+        `_send_now` 对无企微映射的收件人会走 SMTP 降级邮件发给运维负责人
+        （`_fallback_owner_email`），那等于没停。
         """
         content = f"✅ 已转发\n{detail}"
         recipients = [responsible_person]

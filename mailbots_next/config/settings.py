@@ -51,6 +51,12 @@ INBOUND_SHARED_SECRET = os.environ.get("INBOUND_SHARED_SECRET", "")
 
 SWEEP_INTERVAL_SEC = int(os.environ.get("SWEEP_INTERVAL_SEC", "300"))
 SWEEP_MAX_RETRY = int(os.environ.get("SWEEP_MAX_RETRY", "3"))
+# dedup 认领租约（秒）：认领后这段时间内同一个 key 不许第二个人认领。
+# 只挡「并发重复发」，不影响失败重判 —— 发失败那次会在 set_status 里清租约。
+# 取值理由：实测一封从认领到 settle 是 2~4 秒；SMTP 单连接 timeout=30s、
+# 一封最多 8 家扇出 ⇒ 正常上限约 60s。取 900 是给足余量：宁可崩了晚 15 分钟
+# 被重判，也不许并发重发一次。
+DEDUP_CLAIM_LEASE_SEC = int(os.environ.get("DEDUP_CLAIM_LEASE_SEC", "900"))
 DIGEST_HOUR = int(os.environ.get("DIGEST_HOUR", "9"))
 # 每日一封汇总邮件的固定发送时点（12:30 —— 等 12:00 归档核对跑完，数据才齐）。
 # 见任务 16 / 06_EMAIL-DESIGN.md「发送规则（写死）」。
@@ -204,12 +210,23 @@ CODE_RE = re.compile(r'CQWLJT[0-9A-Za-z\-]+')
 CODE_NUM_RE = re.compile(r'CQWLJT(\d+)')
 
 # ---- 发送后自检（2026-10-29）----
+# 自检/抄送旁路地址：只有它被 SMTP 拒收时可以不算业务失败（客户侧已收到）。
+# 置空 = 关闭这个例外（任何收件人被拒都判失败）。
+SELFCHECK_CC_ADDR = os.environ.get("SELFCHECK_CC_ADDR", "3841559246@qq.com")
 # 默认关闭：代码合入、单测通过、真实邮箱不碰；切换验证完再由运维打开。
 SEND_CHECK_ENABLED = os.environ.get("SEND_CHECK_ENABLED", "0") in ("1", "true", "True")
 # 发出去多久之后才核对（秒）。实测到达 QQ 7.9~22s、已发送 <21s，取 120 留 5~15 倍余量。
 SEND_CHECK_DELAY_SEC = int(os.environ.get("SEND_CHECK_DELAY_SEC", "120"))
 # 每轮最多核对多少封（防一次涌入过多把 sweep 拖长）。
 SEND_CHECK_BATCH_MAX = int(os.environ.get("SEND_CHECK_BATCH_MAX", "200"))
+# 自检判 NONE（两路都没有副本）后自动补发一次（洋 2026-11-18 拍板）。
+# 🔴 默认开，但它会**主动再发一封给客户**，所以三道闸一个都不能少：
+#   ① 至少等 RESEND_MIN_AGE 秒（实测 QQ 到达 7.9~22s、阿里已发送 <21s，30 分钟足够）
+#   ② 每封最多补发一次（resent_at 原子占位）
+#   ③ 每轮最多 RESEND_MAX_PER_ROUND 封（防一次性爆发）
+SEND_CHECK_RESEND_ENABLED = os.environ.get("SEND_CHECK_RESEND_ENABLED", "1") in ("1", "true", "True")
+SEND_CHECK_RESEND_MIN_AGE_SEC = int(os.environ.get("SEND_CHECK_RESEND_MIN_AGE_SEC", "1800"))
+SEND_CHECK_RESEND_MAX_PER_ROUND = int(os.environ.get("SEND_CHECK_RESEND_MAX_PER_ROUND", "5"))
 # QQ 侧每个文件夹取「序号尾部 K 封」来比对（腾讯 SEARCH SINCE 无效，只能这样）。
 SEND_CHECK_TAIL_N = int(os.environ.get("SEND_CHECK_TAIL_N", "300"))
 # 阿里「已发送」的 IMAP 文件夹名（UTF-7 编码的「已发送」）
@@ -224,6 +241,10 @@ QQ_VERIFY_OTHER_ROOT = os.environ.get("QQ_VERIFY_OTHER_ROOT", "&UXZO1mWHTvZZOQ-"
 # QQ 侧必须排除的文件夹（前两个实测 EXAMINE 会报 [CLIENTBUG]）
 QQ_VERIFY_EXCLUDE = ("Sent Messages", "Deleted Messages", "Drafts", "Junk")
 # 「其他文件夹」下要跳过的子夹（按名字最后一段匹配，不含前缀）。
-# 依据：tracing 不纳入核对（洋 2026-10-29 拍板）。动态枚举本来会把它扫进来，
-# 跳过它只是省时间，不影响判定结果（候选集来自 forward_log，tracing 的信永远不在里面）。
+# 依据：tracing 不纳入核对（洋 2026-10-29 拍板，
+#      见 docs/mailbots/specs/2026-10-29-mailbots_next-发送后自检.md）。
+# ⚠️ 跳过它本身只是省时间，**前提是运踪不进候选** —— 该前提由
+#    store.get_pending_checks 按 ROBOT_LABELS[EmailType.TRACING] 排除维持。
+#    2026-11-16 任务 19 之后运踪开始写 forward_log，这个前提一度失效，
+#    造成 2026-11-18 运踪自检全部判不出 AB（A_ONLY 6 / NONE 14）。两处必须同时成立。
 QQ_VERIFY_SKIP_SUBFOLDERS = ("tracing",)

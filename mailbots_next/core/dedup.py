@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from ..config import DEDUP_DB_PATH, DEDUP_RETENTION_DAYS
+from ..config import DEDUP_DB_PATH, DEDUP_RETENTION_DAYS, DEDUP_CLAIM_LEASE_SEC
 from .log import get_logger
 
 _log = get_logger(__name__)
@@ -37,6 +37,8 @@ _DEDUP_NEW_COLUMNS = (
     ("folder", "ALTER TABLE dedup ADD COLUMN folder TEXT NOT NULL DEFAULT ''"),
     ("uid", "ALTER TABLE dedup ADD COLUMN uid INTEGER NOT NULL DEFAULT 0"),
     ("retry_count", "ALTER TABLE dedup ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"),
+    # 任务 22-A1：认领租约。老行 lease_until='' = 没有在途租约 ⇒ 可被认领。
+    ("lease_until", "ALTER TABLE dedup ADD COLUMN lease_until TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -157,27 +159,14 @@ def try_claim(message_id: str, row_key: str = "", *, account: str = "",
     if not message_id:
         return False
     full_key = join_key(message_id, row_key)
+    # 函数开头已有 if not message_id / full_key，此处不复写
+    lease = f"+{int(DEDUP_CLAIM_LEASE_SEC)} seconds"
     with _db_lock:
         conn = _connect()
         try:
-            row = conn.execute(
-                "SELECT status FROM dedup WHERE message_id = ?", (full_key,)
-            ).fetchone()
-            if row is not None:
-                if row["status"] == STATUS_UNRESOLVED:
-                    conn.execute(
-                        "UPDATE dedup SET last_try_at = datetime('now'), "
-                        "  account = CASE WHEN COALESCE(account, '') = '' THEN ? ELSE account END, "
-                        "  folder = CASE WHEN COALESCE(folder, '') = '' THEN ? ELSE folder END, "
-                        "  uid = CASE WHEN COALESCE(uid, 0) = 0 THEN ? ELSE uid END "
-                        "WHERE message_id = ?",
-                        (account or "", folder or "", int(uid or 0), full_key),
-                    )
-                    conn.commit()
-                    _log.log_dedup_claim(message_id, True, row_key)
-                    return True
-                _log.log_dedup_claim(message_id, False, row_key)
-                return False
+            # 裸 mid 守卫（§3.4）：必须在 UPSERT 之前。
+            # 残余窗口：只有 scripts/reconcile_legacy.py 会写裸 mid，那是手工
+            # 一次性脚本，只能在 serve 停着时跑（不要试图在 try_claim 里消除它）。
             if row_key:
                 bare = conn.execute(
                     "SELECT status FROM dedup WHERE message_id = ?", (message_id,)
@@ -185,16 +174,78 @@ def try_claim(message_id: str, row_key: str = "", *, account: str = "",
                 if bare is not None and bare["status"] != STATUS_UNRESOLVED:
                     _log.log_dedup_claim(message_id, False, row_key)
                     return False
-            conn.execute(
+            # 单条原子认领：插入成功 = 认领成功；冲突时只有「unresolved 且租约过期」
+            # 才允许改写，改写成功同样 rowcount=1。跨线程、跨进程都成立。
+            # source 写 'auto' 与原实现一致。
+            cursor = conn.execute(
                 "INSERT INTO dedup (message_id, claimed_at, claimed_by, status, "
-                "                   last_try_at, source, account, folder, uid, retry_count) "
-                "VALUES (?, datetime('now'), ?, ?, datetime('now'), 'auto', ?, ?, ?, 0)",
+                "                   last_try_at, source, account, folder, uid, "
+                "                   retry_count, lease_until) "
+                "VALUES (?, datetime('now'), ?, ?, datetime('now'), 'auto', ?, ?, ?, 0, "
+                "        datetime('now', ?)) "
+                "ON CONFLICT(message_id) DO UPDATE SET "
+                "  lease_until = datetime('now', ?), "
+                "  last_try_at = datetime('now'), "
+                "  claimed_by = excluded.claimed_by, "
+                "  account = CASE WHEN COALESCE(dedup.account, '') = '' "
+                "                 THEN excluded.account ELSE dedup.account END, "
+                "  folder  = CASE WHEN COALESCE(dedup.folder, '') = '' "
+                "                 THEN excluded.folder ELSE dedup.folder END, "
+                "  uid     = CASE WHEN COALESCE(dedup.uid, 0) = 0 "
+                "                 THEN excluded.uid ELSE dedup.uid END "
+                "WHERE dedup.status = ? "
+                "  AND (COALESCE(dedup.lease_until, '') = '' "
+                "       OR dedup.lease_until <= datetime('now'))",
                 (full_key, threading.current_thread().name, STATUS_UNRESOLVED,
-                 account or "", folder or "", int(uid or 0)),
+                 account or "", folder or "", int(uid or 0), lease, lease,
+                 STATUS_UNRESOLVED),
             )
             conn.commit()
-            _log.log_dedup_claim(message_id, True, row_key)
-            return True
+            claimed = cursor.rowcount > 0
+            if claimed:
+                _log.log_dedup_claim(message_id, True, row_key)
+                return True
+            row = conn.execute(
+                "SELECT status, claimed_by, lease_until FROM dedup WHERE message_id = ?",
+                (full_key,),
+            ).fetchone()
+            _log.log_dedup_claim(message_id, False, row_key)
+            _log.info(
+                f"Dedup blocked | msg_id={message_id[:50]} | row_key={row_key} | "
+                f"status={(row['status'] if row else '-')} | "
+                f"held_by={(row['claimed_by'] if row else '-')} | "
+                f"lease_until={(row['lease_until'] if row else '-')}"
+            )
+            return False
+        finally:
+            conn.close()
+
+
+def is_inflight(message_id: str, row_key: str = "") -> bool:
+    """该键当前是否「有别人正在处理」= status unresolved 且租约未过期。
+
+    · 查询异常（表/列缺失等）返回 False：读不到就当没在途，交给 try_claim 的
+      原子认领做最终裁决 —— 认领那一步是全流程唯一的真相。
+    · `_connect()` 在 try 之外、其异常**有意不吞**：那是连接级故障（库不可用），
+      吞掉会掩盖环境问题，且与 is_claimed / get_status 的既有风格一致。
+      ⚠️ **不要为了"稳妥"把它挪进 try**：那样 `finally` 里的 `conn.close()` 在
+      `_connect()` 抛异常时会因 `conn` 未绑定而抛 `UnboundLocalError`，
+      把一个清楚的连接错误变成莫名其妙的变量错误。要保持现在的结构。
+    """
+    if not message_id:
+        return False
+    with _db_lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM dedup WHERE message_id = ? AND status = ? "
+                "  AND COALESCE(lease_until, '') <> '' "
+                "  AND lease_until > datetime('now')",
+                (join_key(message_id, row_key), STATUS_UNRESOLVED),
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
         finally:
             conn.close()
 
@@ -251,17 +302,18 @@ def set_status(message_id: str, row_key: str = "", status: str = "",
             cursor = conn.execute(
                 "UPDATE dedup SET status = ?, "
                 "  source = CASE WHEN ? = '' THEN source ELSE ? END, "
-                "  close_reason = ?, last_try_at = datetime('now') "
+                "  close_reason = ?, last_try_at = datetime('now'), "
+                "  lease_until = '' "
                 "WHERE message_id = ?",
                 (status, source or "", source or "", close_reason or "", full_key),
             )
             if cursor.rowcount == 0:
                 # 键还不存在（例：--pool close 一个人工认定的件）：补插一行，
-                # claimed_by 留痕为 source。
+                # claimed_by 留痕为 source。新行不带租约（默认 ''）。
                 conn.execute(
                     "INSERT INTO dedup (message_id, claimed_at, claimed_by, status, "
-                    "                   last_try_at, source, close_reason, retry_count) "
-                    "VALUES (?, datetime('now'), ?, ?, datetime('now'), ?, ?, 0)",
+                    "                   last_try_at, source, close_reason, retry_count, lease_until) "
+                    "VALUES (?, datetime('now'), ?, ?, datetime('now'), ?, ?, 0, '')",
                     (full_key, source or "manual", status, source or "", close_reason or ""),
                 )
             conn.commit()
@@ -302,7 +354,8 @@ def reopen(message_id: str, row_key: str = "", operator: str = "") -> bool:
                 return True
             conn.execute(
                 "UPDATE dedup SET status = ?, source = 'manual', close_reason = '', "
-                "last_try_at = datetime('now'), retry_count = 0, claimed_by = ? "
+                "last_try_at = datetime('now'), retry_count = 0, claimed_by = ?, "
+                "lease_until = '' "
                 "WHERE message_id = ?",
                 (STATUS_UNRESOLVED, operator or "manual", full_key),
             )
@@ -366,6 +419,7 @@ def _to_item(row) -> Dict[str, Any]:
         "account": row["account"] or "",
         "folder": row["folder"] or "",
         "uid": int(row["uid"] or 0),
+        "lease_until": row["lease_until"] or "",
     }
 
 
