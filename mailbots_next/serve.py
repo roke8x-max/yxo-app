@@ -85,7 +85,16 @@ from mailbots_next.core.dedup import (
     bump_alarm,
     list_expired_alarms,
     delete_alarm_state,
+    # 任务 24：人工待处理队列。has_manual **必须改名导入** —— process_email 里已有
+    # 同名局部变量（C2 留人工标志，见下面的 `has_manual = False`），裸名调用会在
+    # 那一行之前的 if 分支里 UnboundLocalError（Python 按「函数内有赋值」判局部）。
+    add_manual,
+    has_manual as dedup_has_manual,
 )
+
+# 任务 24：下游回复草单的判定（唯一定义处在 core/draft_reply.py，别在本文件再写一份）。
+# 只依赖 config 与 core/sender_addr（后者仅 import parseaddr）⇒ 无循环导入风险。
+from mailbots_next.core.draft_reply import is_downstream_draft_reply, parse_draft_reply_ids
 
 # 任务 20 的新常量统一从 settings 取（config/__init__ 不在改动集内，不改导出面）。
 from mailbots_next.config.settings import (
@@ -178,6 +187,18 @@ class MailProcessor:
             self._set_last_outcome({"queued": 1})
             return True
         if not email_type:
+            # 任务 24：下游回复的草单 → 人工待处理，不进 error_queue / 不告警 / 不标已读。
+            # 本分支提前 return True（纳入持久化流程），页尾 mark_seen 不会执行。
+            if is_downstream_draft_reply(sender, subject):
+                _code, _box = parse_draft_reply_ids(subject)
+                if not dedup_has_manual(message_id):
+                    add_manual(message_id, account=account, folder=folder, uid=uid,
+                               subject=subject, sender=sender, date_hdr=date_hdr,
+                               code=_code, box=_box)
+                    increment_counter("draft_reply_manual")  # 每封只计一次
+                self._set_last_outcome({"manual": 1})
+                return True
+            # ↓ 原有 UNCLASSIFIED 逻辑从这里原样继续，一字不改
             _log.log_unclassified_email(message_id, folder, sender, subject)
             error_id = _log.error(f"Unclassified email: folder={folder}, from={sender}, subject={subject[:100]}")
             if not has_pending_message(message_id):
@@ -1895,6 +1916,12 @@ def main():
     parser.add_argument("--pool", nargs="+", metavar="ACTION",
                         help="Pool ops: list | close <message_id> | retry <message_id>")
     parser.add_argument("--row-key", default="", help="Row key for --pool close/retry")
+    # 任务 24：人工待处理队列（下游回复草单）。风格照 --errors / --pool。
+    #   python -m mailbots_next.serve --manual list
+    #   python -m mailbots_next.serve --manual resolve --manual-id 3
+    parser.add_argument("--manual", choices=["list", "resolve"],
+                        help="Manual draft-reply queue: list | resolve <id>")
+    parser.add_argument("--manual-id", type=int, help="ID for --manual resolve")
     args = parser.parse_args()
 
     os.environ["MAILBOT_MODE"] = "live" if args.live else "test"
@@ -1915,6 +1942,24 @@ def main():
             )
 
     _log.info(f"Starting MailBot Next in {mode.upper()} mode")
+
+    # CLI 分支顺序：manual → pool → errors，互不嵌套。
+    if args.manual:
+        from mailbots_next.core.dedup import list_manual, resolve_manual
+        if args.manual == "list":
+            items = list_manual(100, status="pending")
+            print(f"待人工处理：{len(items)} 条")
+            for it in items:
+                print(f"  #{it['id']} | {it['arrived_at']} | {it['subject'][:80]} | "
+                      f"from={it['sender']} | {it['account']}/{it['folder']} uid={it['uid']} | "
+                      f"code={it['code'] or '-'} box={it['box'] or '-'}")
+        elif args.manual == "resolve":
+            if not args.manual_id:
+                print("用法: --manual resolve --manual-id <id>")
+                return 2
+            print("已标记已处理" if resolve_manual(args.manual_id)
+                  else "未找到该 id")
+        return 0
 
     if args.pool:
         return pool_cli(args.pool, row_key=args.row_key or "")
