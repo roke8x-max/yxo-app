@@ -113,6 +113,25 @@ def init_db():
                     count        INTEGER NOT NULL DEFAULT 0,
                     last_sent_at TEXT
                 );
+                -- 任务 24：下游回复草单的人工待处理队列。与 error_queue 完全隔离：
+                -- 不进 sweeper、不重试、不发告警。一封邮件一条（UNIQUE(message_id)）。
+                CREATE TABLE IF NOT EXISTS manual_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL,
+                    account TEXT NOT NULL DEFAULT '',
+                    folder TEXT NOT NULL DEFAULT '',
+                    uid INTEGER NOT NULL DEFAULT 0,
+                    subject TEXT NOT NULL DEFAULT '',
+                    sender TEXT NOT NULL DEFAULT '',
+                    date_hdr TEXT NOT NULL DEFAULT '',
+                    code TEXT NOT NULL DEFAULT '',
+                    box TEXT NOT NULL DEFAULT '',
+                    arrived_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    resolved_at TEXT,
+                    UNIQUE(message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_manual_queue_status ON manual_queue(status);
                 """
             )
             # Migrations for DBs created before these columns existed.
@@ -833,6 +852,103 @@ def add_error(
             )
             row = cursor.fetchone()
             return row[0] if row else -1
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------- 任务 24：人工待处理队列
+# 下游回复的草单邮件（识别返回 None 但骨架完整、发件人域非 yxo）落这里：
+# 不进 error_queue ⇒ 不会被 sweeper 重放、不会重试、不会触发任何告警。
+# 独立表，**与 dedup 三态（sent / closed / unresolved）完全无关**，不许往 dedup 加第四种状态。
+
+
+def add_manual(
+    message_id: str,
+    *,
+    account: str = "",
+    folder: str = "",
+    uid: int = 0,
+    subject: str = "",
+    sender: str = "",
+    date_hdr: str = "",
+    code: str = "",
+    box: str = "",
+) -> int:
+    """幂等落一条人工待处理（UNIQUE(message_id) + INSERT OR IGNORE）。
+    返回新行 id；已存在返回已有 id（不重复落库、不刷新时间）。
+
+    arrived_at 用 datetime('now')（UTC，与 error_queue.created_at 同基准）；
+    date_hdr 存邮件原始 Date 头。message_id 为空返回 -1（不落脏行）。
+    """
+    if not message_id:
+        return -1
+    with _db_lock:
+        conn = _connect()
+        try:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO manual_queue "
+                "  (message_id, account, folder, uid, subject, sender, date_hdr, "
+                "   code, box, arrived_at, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'pending')",
+                (message_id, account or "", folder or "", int(uid or 0), subject or "",
+                 sender or "", date_hdr or "", code or "", box or ""),
+            )
+            conn.commit()
+            # rowcount=0 ⇒ 该 message_id 已存在（OR IGNORE 生效），此时 lastrowid 不可信。
+            if cursor.rowcount and cursor.lastrowid:
+                return int(cursor.lastrowid)
+            row = conn.execute(
+                "SELECT id FROM manual_queue WHERE message_id=?", (message_id,)
+            ).fetchone()
+            return int(row["id"]) if row else -1
+        finally:
+            conn.close()
+
+
+def has_manual(message_id: str) -> bool:
+    """该邮件是否已在人工表（含 resolved）——供分流前查重、避免重复日志。"""
+    if not message_id:
+        return False
+    with _db_lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM manual_queue WHERE message_id=?", (message_id,)
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+
+def list_manual(limit: int = 100, status: str = "pending") -> List[Dict[str, Any]]:
+    """按 arrived_at 升序列出人工待处理条目；status='' 表示不过滤。"""
+    sql = "SELECT * FROM manual_queue"
+    params: List[Any] = []
+    if status:
+        sql += " WHERE status = ?"
+        params.append(status)
+    sql += " ORDER BY arrived_at ASC, id ASC LIMIT ?"
+    params.append(int(limit))
+    with _db_lock:
+        conn = _connect()
+        try:
+            return [dict(r) for r in conn.execute(sql, tuple(params))]
+        finally:
+            conn.close()
+
+
+def resolve_manual(id: int) -> bool:
+    """标记「我已处理」：status='resolved', resolved_at=datetime('now')。"""
+    with _db_lock:
+        conn = _connect()
+        try:
+            cursor = conn.execute(
+                "UPDATE manual_queue SET status='resolved', resolved_at=datetime('now') "
+                "WHERE id=?",
+                (int(id),),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
         finally:
             conn.close()
 
