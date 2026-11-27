@@ -45,7 +45,6 @@ from mailbots_next.core import (
     try_claim,
     add_error,
     has_pending_error,
-    load_records,
     get_responsible_person,
     get_recipients,
     get_sender_by_email,
@@ -66,6 +65,8 @@ from mailbots_next.core import archive
 # 任务 13：发件人域规范化 —— 与 core/extractors/draft.py 共用同一份实现，
 # 不许在本文件里再写一遍（两份实现早晚漂移，只改一处 = 白改）。
 from mailbots_next.core.sender_addr import normalize_sender_domain
+# 任务 33 / 需求3：唯一一份 records 快照（默认 60 秒刷新，硬上限 300 秒）。
+from mailbots_next.core.snapshot_provider import RecordsSnapshotProvider
 
 # 任务 20：三态状态机（sent / closed / unresolved）+ 未发出池 + 告警折叠状态。
 # 直接从 core.dedup 取，**不走 core/__init__ 的汇总导出**（那个文件不在本任务的改动集内）。
@@ -90,6 +91,15 @@ from mailbots_next.core.dedup import (
     # 那一行之前的 if 分支里 UnboundLocalError（Python 按「函数内有赋值」判局部）。
     add_manual,
     has_manual as dedup_has_manual,
+    # 任务 33：失败告警宽限期状态（dedup.db，重启不丢）
+    upsert_pending_alarm,
+    get_alarm,
+    cancel_alarm,
+    mark_due_alarms,
+    claim_alarm_for_send,
+    finish_alarm,
+    is_error_unresolved,
+    is_error_resolved,
 )
 
 # 任务 24：下游回复草单的判定（唯一定义处在 core/draft_reply.py，别在本文件再写一份）。
@@ -99,6 +109,8 @@ from mailbots_next.core.draft_reply import is_downstream_draft_reply, parse_draf
 # 任务 20 的新常量统一从 settings 取（config/__init__ 不在改动集内，不改导出面）。
 from mailbots_next.config.settings import (
     ALARM_FOLD_SEC,
+    ALARM_GRACE_SEC,
+    SNAPSHOT_REFRESH_SEC,
     FAILURE_OWNER_HISTORY_N,
     POOL_EMPTY_RETRY_MAX,
     POOL_STALE_DAYS,
@@ -114,11 +126,48 @@ _pollers: List[Poller] = []
 _inbound_server: Optional[HTTPServer] = None
 _last_bounce_poll_ts: float = float("-inf")  # G3: guarantee first tick polls
 
+# ---------------------------------------------------------------- 任务 33 / 需求3：共享快照
+_records_provider: Optional[RecordsSnapshotProvider] = None
+_records_provider_lock = threading.Lock()
+
+
+def get_records_provider() -> RecordsSnapshotProvider:
+    """进程级唯一 provider。所有判定入口（轮询 / sweeper / repool / 手动转发）共用。"""
+    global _records_provider
+    if _records_provider is None:
+        with _records_provider_lock:
+            if _records_provider is None:
+                _records_provider = RecordsSnapshotProvider(SNAPSHOT_REFRESH_SEC)
+                _log.info(
+                    f"RecordsSnapshotProvider ready | version={_records_provider.version} "
+                    f"| refresh_sec={_records_provider.refresh_sec}"
+                )
+    return _records_provider
+
+
+def set_records_provider(provider: Optional[RecordsSnapshotProvider]) -> None:
+    """测试/集成替换 provider 的唯一入口（不增加运行时 reload 点）。"""
+    global _records_provider
+    with _records_provider_lock:
+        _records_provider = provider
+
+
+def new_processor(config: ConfigSnapshot) -> "MailProcessor":
+    """sweeper / repool / 手动转发等旁路入口统一走这里：共享 provider，不自己读库。"""
+    return MailProcessor(config, provider=get_records_provider())
+
+
+# 到期告警扫描周期：min(60, ALARM_GRACE_SEC/3)，默认 60 秒。
+ALARM_FLUSH_SEC = min(60, max(1, int(ALARM_GRACE_SEC / 3)))
+
 
 class MailProcessor:
-    def __init__(self, config: ConfigSnapshot):
+    def __init__(self, config: ConfigSnapshot, provider: Optional[RecordsSnapshotProvider] = None):
         self.config = config
-        self.records = load_records()
+        # 需求3：唯一数据源。poller 线程只 current() 取 (version, records)，不 reload。
+        self._provider = provider if provider is not None else get_records_provider()
+        self.records = self._provider.records()
+        self._provider_records_at_init = self.records
         self.accounts = get_accounts()
         self.notifier = get_notifier()
         # 行级明细的线程本地槽（T5-5）：12 条轮询线程共享同一 processor 实例，
@@ -130,6 +179,37 @@ class MailProcessor:
         self._units_local = threading.local()
         # 池子重判轮次标志（线程本地）：重判期间压掉逐行即时告警，改为每件一条折叠告警。
         self._pool_round_local = threading.local()
+        # 任务 33 / 需求3：每条判定链开始处取 (version, records) 局部快照；
+        # 12 条轮询线程共享实例，实例属性会被并发覆盖，故必须线程本地。
+        self._snap_local = threading.local()
+
+    # ------------------------------------------------------------ 需求3：判定链快照
+    def _begin_snapshot(self):
+        """判定链入口：取一次 (version, records) 并锁定到本线程局部。"""
+        # 既有测试会用 __new__/Mock 造 processor 再直接调 _process_row；
+        # 这些对象没有 __init__ 的槽位，惰性补齐，不能把既有调用方打掉。
+        loc = getattr(self, "_snap_local", None)
+        if loc is None:
+            loc = threading.local()
+            self._snap_local = loc
+        provider = getattr(self, "_provider", None)
+        version = 0
+        records = getattr(self, "records", None)
+        if provider is not None:
+            version, provider_records = provider.current()
+            # 既有测试/集成会显式注入 proc.records；尊重它（版本仍取共享 provider）。
+            if records is getattr(self, "_provider_records_at_init", None):
+                records = provider_records
+        loc.version = version
+        loc.records = records
+        return version, records
+
+    def _chain_version(self) -> int:
+        return int(getattr(getattr(self, "_snap_local", None), "version", 0) or 0)
+
+    def _chain_records(self):
+        records = getattr(getattr(self, "_snap_local", None), "records", None)
+        return getattr(self, "records", None) if records is None else records
 
     def _set_last_outcome(self, outcome: dict) -> None:
         self._outcome_local.value = outcome
@@ -331,7 +411,7 @@ class MailProcessor:
         per_box = (email_type == EmailType.DSK or email_type == EmailType.ATB)
         keys, companies_seen = {}, []
         for row in rows:
-            routing = route_row(email_type, row, self.records)
+            routing = route_row(email_type, row, self._chain_records())
             company = routing.company if getattr(routing, "success", False) else None
             if not company:
                 continue
@@ -369,7 +449,7 @@ class MailProcessor:
             "designated": designated,
             "group_rows": group_rows,
             "company_routes": company_routes,
-            "records": self.records,
+            "records": self._chain_records(),
             "all_boxes": set(),
             "html_body": None,
             "attachments": [],
@@ -398,6 +478,13 @@ class MailProcessor:
         判成 forwarded，用它定状态会让失败的那一家永不重判。
         """
         full_msg_id = f"{message_id}|{row_key}"
+        # 判定链开始处锁定本线程的 (version, records)：claim → route → decide →
+        # settle / 告警日志全部用同一个版本，杜绝「判定用旧、告警用新」混搭。
+        version, records = self._begin_snapshot()
+        _log.info(
+            f"Snapshot | msg_id={message_id[:50]} | row_key={row_key} | "
+            f"snapshot_version={version} | records_n={len(records or [])}"
+        )
 
         # 认领必须带定位字段：pending / alarm 分支不写 error_queue，dedup 的
         # account/folder/uid 是它们进池后取原文的唯一来源（02_TASK 2.2a）。
@@ -432,7 +519,7 @@ class MailProcessor:
             self._settle_row(message_id, row_key, "rejected", units)
             return "rejected"
 
-        routing = route_row(email_type, row, self.records)
+        routing = route_row(email_type, row, records)
         outcomes = []
         if isinstance(routing, list):
             for r in routing:
@@ -591,8 +678,10 @@ class MailProcessor:
                 )
                 increment_counter("tracing_zero_hit")
                 return "skipped"
-            _log.log_routing_failed(message_id, row.row_idx, routing.route_source)
-            error_id = _log.error(f"Routing failed: {routing.route_source}", error_id=None)
+            # 需求2：同一条诊断日志行，空值打印 None；版本取本判定链锁定的快照版本。
+            self._log_routing_failed_diag(message_id, row, routing, account)
+            error_id = _log.error(
+                f"Routing failure recorded | route_source={routing.route_source}", error_id=None)
             add_error(message_id, row_key, "routing", "NO_ROUTE", routing.route_source, error_id,
                       account=account, folder=folder, uid=uid,
                       subject=subject, sender=sender, date_hdr=date_hdr,
@@ -607,41 +696,51 @@ class MailProcessor:
                     f"（type={email_type} source={routing.route_source} subject={subject[:60]}）",
                     code="no_recipients",
                 )
-            # 任务 17：判定失败 = 告诉负责人、等人工处理 ⇒ 补一条企微 alarm。
-            # 🔴 报警点必须在这里（routing.success=False 不会进 decide），
-            #    写进 decide_* 是无效的。
-            # 🔴 只对走组合键路由的花名册发；TRACING 零命中已在上方 return "skipped"，
-            #    其余 TRACING 失败、以及不经过路由的类型（ALARM/PROGRAM_ERROR/
-            #    BOUNCE/SEND_CHECK）不新增告警。
-            # 🔴 收件人必须过滤空值：success=False 时 responsible_person 必为空，
-            #    空串会落进 notify._send_now 的「无映射收件人」分支 ⇒ 走
-            #    _fallback_owner_email 多发一封 SMTP 降级邮件。这里只传洋一人，
-            #    等价于 send_alarm 但收件人列表可控（send_alarm 的两个位置参数
-            #    无法表达「过滤掉空的那一位」，传空串反而会触发降级邮件）。
+            # 任务 33 / 需求1：首次失败**照常**留痕（日志 / error_queue / 计数 /
+            # unresolved 池），但**不在这里发企微**。等 180 秒宽限期到期、
+            # flush_due_alarms 复查确认没有成功转发且 error_queue 未 resolved 才发。
+            # 🔴 SWEEP_MAX_RETRY 达上限也不得绕过宽限期提前发（验收4）。
+            # 只对走组合键路由的花名册挂起；TRACING 零命中已在上方 return "skipped"。
             if email_type in (EmailType.DSK, EmailType.ATB, EmailType.DRAFT,
                               EmailType.WAYBILL, EmailType.RELEASE,
                               EmailType.RELEASE_CANCEL, EmailType.RETBOX):
-                # 任务 20 / 3.4.1：success=False 时 routing.responsible_person 恒为空，
-                # 原来只发给洋。改为反查（班列号前缀 → 发件人历史归属 → 落洋）。
+                # 任务 20 / 3.4.1：success=False 时 responsible_person 恒为空，
+                # 反查（班列号前缀 → 发件人历史归属 → 落洋）在挂起时算好并落库，
+                # 到期发送直接用同一份，不需要 row 对象（重启也能发）。
                 recipients = self._failure_recipients(row, sender)
                 detail = (
                     f"路由失败（{routing.route_source}），未转发，需人工处理 | "
                     f"type={email_type} | 客编{row.customer_code or '-'} "
                     f"箱{row.container_no or '-'} 班列{getattr(row, 'train_no', '') or '-'} | "
-                    f"{subject[:100]}"
+                    f"发件人{sender or '-'} | {subject[:100]}"
                 )
-                # 折叠只压频率、不压事实：首条照发；同类 24h 内只累加计数。
-                if not self._alarm_suppressed():
-                    self._alarm_keyed(
-                        f"alarm|{message_id}|{row_key}", recipients,
-                        "🚨 报警通知\n" + detail,
-                        kind="alarm", detail=detail, code="route_fail",
-                    )
+                cycle = upsert_pending_alarm(
+                    message_id, row_key, error_id=error_id or "", detail=detail,
+                    recipients=recipients, snapshot_version=self._chain_version(),
+                )
+                if cycle == "repeat_same_cycle":
+                    # 验收11：同一折叠周期的重复失败必须继续累加 alarm_state 计数，
+                    # 但**不发通知**（bump_alarm 只改计数、返回 send=False，
+                    # 不走 _alarm_keyed，所以不会在宽限期内提前弹企微）。
+                    # 🔴 必须在 upsert 返回、_db_lock 释放之后再调：dedup 用的是
+                    # 普通 Lock，bump_alarm 自己也要拿锁，锁内调会自锁。
+                    try:
+                        bump_alarm(f"alarm|{message_id}|{row_key}", int(ALARM_FOLD_SEC))
+                    except Exception as e:
+                        _log.error(
+                            f"alarm fold count failed | msg_id={message_id[:50]} | "
+                            f"row_key={row_key} | {type(e).__name__}: {e}"
+                        )
+                _log.info(
+                    f"alarm_deferred | msg_id={message_id[:50]} | row_key={row_key} | "
+                    f"error_id={error_id} | grace_sec={ALARM_GRACE_SEC} | "
+                    f"cycle={cycle} | snapshot_version={self._chain_version()}"
+                )
             return "queued"
 
         _log.log_routing(message_id, row.row_idx, routing.company, routing.responsible_person or "", routing.to_list, routing.cc_list)
 
-        decision = decide(email_type, row, routing, self.records)
+        decision = decide(email_type, row, routing, self._chain_records())
         _log.log_decide(message_id, row.row_idx, decision.tier, decision.action, decision.reason)
 
         # 阶段三：专列聚合池（任务 11 / spec 03）。入池既不发送、也不标已读 ——
@@ -690,6 +789,8 @@ class MailProcessor:
                 f"company={routing.company or '-'}"
             )
             increment_counter("resend_blocked_forward_log")
+            # 重判发现早已成功落账 ⇒ 立即撤销挂起的失败告警（需求1）。
+            self._cancel_alarm_on_forward(message_id, row_key, "forwarded", routing.company)
             return "forwarded"
 
         sender_info = None
@@ -725,7 +826,8 @@ class MailProcessor:
         success, detail = execute_action(decision, row, routing, raw_bytes, sender_email, sender_password, message_id, send_ctx)
 
         if success:
-            _log.log_action(message_id, row.row_idx, decision.action, detail)
+            _log.log_action(message_id, row.row_idx, decision.action, detail,
+                            snapshot_version=self._chain_version())
             increment_counter(f"action_{decision.action}")
 
             # 归档（任务 12）：邮件**已经发出去了**才复制到「放箱令 / 还箱令」夹。
@@ -786,6 +888,11 @@ class MailProcessor:
                     f"客编{row.customer_code or '-'} 箱{row.container_no or '-'}"
                     f" | {subject[:60]}",
                 )
+            # 任务 33 / 需求1：本单元真正发出去了（forward_log 已落账）⇒ 撤销
+            # 首次失败挂起的告警；只判 routing.success=True 不足以撤销（验收10）。
+            if decision.action == "forward" and detail in ("forwarded", "group-covered"):
+                self._cancel_alarm_on_forward(message_id, row_key, detail, routing.company)
+
             # NB: outcome vocabulary uses "forwarded" (past) while
             # Decision.action uses "forward" — map explicitly.
             if detail == "group-covered":
@@ -863,7 +970,7 @@ class MailProcessor:
         digits = text[2:] if text.startswith("WB") else text
         if not digits:
             return None
-        for rec in (getattr(self, "records", None) or []):
+        for rec in (self._chain_records() or []):
             lib = (rec.get("班列号") or "").strip().upper()
             if not lib:
                 continue
@@ -971,6 +1078,56 @@ class MailProcessor:
         except Exception as e:
             _log.error(f"Alarm record_issue failed | key={key}: {type(e).__name__}: {e}")
         return True
+
+    # ------------------------------------------------------------ 任务 33：诊断 / 撤销
+    def _log_routing_failed_diag(self, message_id, row, routing, account: str) -> None:
+        """需求2：唯一一条 no_route 诊断日志行（字段固定，空值 None）。"""
+        _log.log_routing_failed(
+            message_id, row.row_idx, routing.route_source,
+            customer_code=getattr(row, "customer_code", None),
+            container_no=getattr(row, "container_no", None),
+            train_no=getattr(row, "train_no", None),
+            records_n=len(self._chain_records() or []),
+            processor_id=id(self),
+            snapshot_version=self._chain_version(),
+            thread=threading.current_thread().name,
+            account=account or None,
+        )
+
+    def _cancel_alarm_on_forward(self, message_id: str, row_key: str,
+                                 detail: str = "", company: str = "") -> bool:
+        """只有 forward_log 真正落账才撤销 pending/due 告警（验收10）。
+
+        🔴 `routing.success=True` 但发信失败不得撤销：这里先查 forward_log。
+        撤销对 pending 和 due 两态都生效（验收9 情形②）；状态已是 sent/suppressed
+        时登记 `alarm_late_success`（到期后仍成功，残余风险留痕）。
+        """
+        try:
+            authentic = self._forward_log_hit(message_id, row_key, company)
+            if not authentic and detail == "group-covered":
+                # 组合邮件覆盖的行：forward_log 落在代表行上，按 msg_id 认账。
+                authentic = has_successful_forward(message_id)
+            if not authentic:
+                return False
+            state = get_alarm(message_id, row_key)
+            if state and state.get("status") in ("pending", "due", "sending"):
+                if cancel_alarm(message_id, row_key, "forward_log_committed"):
+                    _log.info(
+                        f"alarm_cancelled_on_recheck | msg_id={message_id[:50]} | "
+                        f"row_key={row_key} | snapshot_version={self._chain_version()}"
+                    )
+            elif state and state.get("status") in ("sent", "suppressed"):
+                _log.warning(
+                    f"alarm_late_success | msg_id={message_id[:50]} | row_key={row_key} | "
+                    f"alarm_status={state.get('status')} | snapshot_version={self._chain_version()}"
+                )
+            return True
+        except Exception as e:
+            _log.error(
+                f"alarm cancel recheck failed | msg={message_id[:50]} | row_key={row_key}: "
+                f"{type(e).__name__}: {e}"
+            )
+            return False
 
 
 def signal_handler(signum, frame):
@@ -1119,7 +1276,9 @@ class InboundHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            processor = MailProcessor(snapshot())
+            # 手动转发前显式刷新一次（需求3 事件触发点），后续判定仍走共享 provider。
+            get_records_provider().force_refresh()
+            processor = new_processor(snapshot())
             raw_bytes = bytes.fromhex(target["raw_hex"]) if target["raw_hex"] else b""
             if not raw_bytes:
                 raise ValueError("No raw email data stored")
@@ -1184,7 +1343,8 @@ def sweep_once(processor=None) -> dict:
     from mailbots_next.config import SWEEP_MAX_RETRY
 
     if processor is None:
-        processor = MailProcessor(snapshot())
+        # 需求3：共享 provider，不再各自 load_records()。
+        processor = new_processor(snapshot())
 
     from mailbots_next.core.ingest import fetch_raw_by_uid
 
@@ -1312,6 +1472,8 @@ def mark_repool_requested(now: Optional[datetime] = None) -> bool:
         _write_json_atomic(REPOOL_REQUEST_PATH, {
             "requested_at": (now or datetime.now()).isoformat(timespec="seconds"),
         })
+        # 需求3：舱单导入提交 = 显式刷新事件，导入后的新数据立刻对判定链可见。
+        get_records_provider().force_refresh()
         return True
     except Exception as e:
         _log.warning(f"repool request marker failed: {type(e).__name__}: {e}")
@@ -1578,8 +1740,11 @@ def repool_once(processor=None) -> dict:
     if not (requested or daily):
         return stats
 
+    # 需求3：repool requested 事件也显式刷新一次（导入提交点可能未落库完成时已触发）。
+    if requested:
+        get_records_provider().force_refresh()
     if processor is None:
-        processor = MailProcessor(snapshot())
+        processor = new_processor(snapshot())
     try:
         items = list_unresolved(limit=int(REPOOL_BATCH_MAX))
     except Exception as e:
@@ -1655,7 +1820,9 @@ def pool_cli(pool_args, row_key: str = "", operator: str = "cli") -> int:
             print(f"reopen 失败（键不存在）：{message_id} | row_key={row_key or '-'}")
             return 1
         print(f"已 reopen：{message_id} | row_key={row_key or '-'} → unresolved")
-        processor = MailProcessor(snapshot())
+        # 手动重判前显式刷新（需求3 事件触发点）。
+        get_records_provider().force_refresh()
+        processor = new_processor(snapshot())
         stats = repool_key(processor, message_id, row_key)
         print(f"重判完成：{stats}")
         return 0
@@ -1696,6 +1863,104 @@ def _flush_expired_alarms() -> int:
             _log.error(f"alarm window cleanup failed | key={key}: "
                        f"{type(e).__name__}: {e}")
     return sent
+
+
+# ---------------------------------------------------------------- 任务 33 / 需求1：到期告警
+def has_successful_forward(message_id: str, row_key: Optional[str] = None) -> bool:
+    """forward_log 是否已有该 msg_id（可限定 row_key）的「未退信」落账（唯一撤销凭据）。
+
+    🔴 到期复查必须按 **row_key** 查：一封多行的邮件里某一行发出去，不代表其它
+    失败行也成功了（否则会把真失败吞掉）。不传 row_key 的整封级查询只用于
+    group-covered 组合邮件的撤销路径。
+    查询异常按「没发过」处理：宁可到期多发一条，也不能因读不到库把真失败吞掉。
+    """
+    if not message_id:
+        return False
+    try:
+        from mailbots_next.core.store import get_bot_config_connection
+
+        conn = get_bot_config_connection()
+        try:
+            sql = ("SELECT 1 FROM forward_log WHERE message_id=? "
+                   "AND COALESCE(bounced, 0) = 0")
+            params: list = [message_id]
+            if row_key is not None:
+                sql += " AND COALESCE(row_key, '') = ?"
+                params.append(row_key or "")
+            return conn.execute(sql + " LIMIT 1", tuple(params)).fetchone() is not None
+        finally:
+            conn.close()
+    except Exception as e:
+        _log.warning(
+            f"forward_log success lookup failed, treated as not-sent | "
+            f"msg={message_id[:50]} | {type(e).__name__}: {e}"
+        )
+        return False
+
+
+def flush_due_alarms(processor=None, grace_sec=None, limit: int = 200) -> dict:
+    """扫描到期 pending 告警并发送。全进程只有主循环调用（禁止 poller 各自扫描）。
+
+    顺序写死：CAS pending→due → CAS due→sending → 发送前复查 forward_log /
+    error_queue → 才调 `_alarm_keyed`（既有 24h 折叠机制原样保留）→ sent/suppressed。
+    复查命中成功：due→cancelled，不发（验收9 情形②）。
+    """
+    grace = int(ALARM_GRACE_SEC if grace_sec is None else grace_sec)
+    p = processor if processor is not None else new_processor(snapshot())
+    stats = {"scanned": 0, "sent": 0, "suppressed": 0, "cancelled": 0, "failed": 0}
+
+    try:
+        due_rows = mark_due_alarms(grace, limit)
+    except Exception as e:
+        _log.error(f"alarm due scan failed: {type(e).__name__}: {e}")
+        return stats
+
+    for state in due_rows:
+        msg_id = state.get("msg_id") or ""
+        row_key = state.get("row_key") or ""
+        stats["scanned"] += 1
+        if not claim_alarm_for_send(msg_id, row_key):
+            continue  # 并发已被别的扫描线程抢走
+        # 发送前复查（ds P0 / 验收9）：到期前 1 秒刚成功也必须撤销。
+        if has_successful_forward(msg_id, row_key) or is_error_resolved(msg_id, row_key):
+            cancel_alarm(msg_id, row_key, "due_recheck_success_or_resolved")
+            stats["cancelled"] += 1
+            _log.info(
+                f"alarm_cancelled_on_recheck | msg_id={msg_id[:50]} | row_key={row_key} | "
+                f"stage=due_recheck | snapshot_version={state.get('snapshot_version') or '-'}"
+            )
+            continue
+        try:
+            try:
+                detail = json.loads(state.get("detail_json") or "{}").get("detail") or ""
+            except Exception:
+                detail = ""
+            try:
+                recipients = json.loads(state.get("recipients_json") or "[]")
+            except Exception:
+                recipients = []
+            sent = p._alarm_keyed(
+                f"alarm|{msg_id}|{row_key}", recipients,
+                "🚨 报警通知\n" + detail,
+                kind="alarm", detail=detail, code="route_fail",
+            )
+            final_status = "sent" if sent else "suppressed"
+            finish_alarm(msg_id, row_key, final_status)
+            stats[final_status] += 1
+            _log.info(
+                f"alarm_due_fired | msg_id={msg_id[:50]} | row_key={row_key} | "
+                f"grace_sec={grace} | alarm_status={final_status} | "
+                f"snapshot_version={state.get('snapshot_version') or '-'}"
+            )
+        except Exception as e:
+            # 发送失败回退到 due，下一轮主循环再试；不能永久停在 sending。
+            finish_alarm(msg_id, row_key, "due")
+            stats["failed"] += 1
+            _log.error(
+                f"alarm due fire failed | msg={msg_id[:50]} | row_key={row_key}: "
+                f"{type(e).__name__}: {e}"
+            )
+    return stats
 
 
 def _bounce_poll_due(now: float, last_ts: float) -> bool:
@@ -1984,7 +2249,9 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     config = snapshot()
-    processor = MailProcessor(config)
+    # 需求3：主 processor 与所有旁路 processor 共用同一个 provider。
+    provider = get_records_provider()
+    processor = MailProcessor(config, provider=provider)
 
     # 启动自检（只读）：company 收件人缺失则 ERROR（绝不在启动期写行）
     from mailbots_next.core.store import check_company_recipients_configured
@@ -2038,9 +2305,29 @@ def main():
     daily_report_thread = threading.Thread(target=run_daily_report, daemon=True)
     daily_report_thread.start()
 
+    # 任务 33：主循环单线程负责两件事
+    #   ① 每 SNAPSHOT_REFRESH_SEC 刷新共享 records 快照（默认 60s，硬上限 300s）；
+    #   ② 每 min(60, ALARM_GRACE_SEC/3) 秒扫一次到期告警（默认 60s ⇒ 到期到发出 ≤90s）。
+    # 12 条 poller 线程只 current() 读快照、不 reload、不各自扫告警。
+    _last_alarm_flush = time.monotonic()
     try:
         while not _shutdown_event.is_set():
             time.sleep(1)
+            now_ts = time.monotonic()
+            try:
+                if provider.refresh_if_due(now_ts):
+                    _log.info(f"Records snapshot refreshed | version={provider.version} | "
+                              f"refresh_sec={provider.refresh_sec}")
+            except Exception as e:
+                _log.error(f"records snapshot refresh failed: {type(e).__name__}: {e}")
+            if now_ts - _last_alarm_flush >= ALARM_FLUSH_SEC:
+                _last_alarm_flush = now_ts
+                try:
+                    flushed = flush_due_alarms(processor)
+                    if flushed.get("scanned"):
+                        _log.info(f"Alarm due flush | {flushed}")
+                except Exception as e:
+                    _log.error(f"alarm due flush tick failed: {type(e).__name__}: {e}")
     except KeyboardInterrupt:
         pass
 

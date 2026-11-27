@@ -51,6 +51,15 @@ INBOUND_SHARED_SECRET = os.environ.get("INBOUND_SHARED_SECRET", "")
 
 SWEEP_INTERVAL_SEC = int(os.environ.get("SWEEP_INTERVAL_SEC", "300"))
 SWEEP_MAX_RETRY = int(os.environ.get("SWEEP_MAX_RETRY", "3"))
+
+# ---- 任务 33：失败告警延后到重判确认后 ----
+# 宽限期从**首次失败**起算（重判失败不续期）。默认 180 秒 = 2 × INGEST_POLL_SEC(90)，
+# 覆盖轮询重认领一个完整周期；洋 2026-11-27 10:40 拍板，不得改默认值。
+# 可通过环境变量配置（离线验收可缩短），但默认值写死在这里。
+ALARM_GRACE_SEC = max(1, int(os.environ.get("ALARM_GRACE_SEC", "180")))
+# 共享 RecordsSnapshotProvider 的刷新间隔：默认 60 秒，provider 内部硬上限
+# SWEEP_INTERVAL_SEC（300 秒）。只由主循环/显式事件触发，poller 线程不 reload。
+SNAPSHOT_REFRESH_SEC = max(1, int(os.environ.get("SNAPSHOT_REFRESH_SEC", "60")))
 # dedup 认领租约（秒）：认领后这段时间内同一个 key 不许第二个人认领。
 # 只挡「并发重复发」，不影响失败重判 —— 发失败那次会在 set_status 里清租约。
 # 取值理由：实测一封从认领到 settle 是 2~4 秒；SMTP 单连接 timeout=30s、

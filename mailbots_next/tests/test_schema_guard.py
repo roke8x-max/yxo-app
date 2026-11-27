@@ -44,7 +44,9 @@ _CREATED_TABLES = {"dedup", "error_queue", "bot_config", "forward_log",
                    "alarm_state",
                    # 任务 24：下游回复草单的人工待处理队列（dedup.py::init_db 建，
                    # 落同一个 dedup.db；独立表，不进 error_queue、不进 sweeper）
-                   "manual_queue"}
+                   "manual_queue",
+                   # 任务 33：告警延后宽限期状态（dedup.py::init_db 建，落 dedup.db）
+                   "alarm_pending"}
 
 
 def _clean_source(text: str) -> str:

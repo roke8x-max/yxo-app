@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -132,6 +133,24 @@ def init_db():
                     UNIQUE(message_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_manual_queue_status ON manual_queue(status);
+                -- 任务 33：告警延后到「重判确认后」的宽限期状态。**持久化在 dedup.db**
+                -- （不放内存，重启不丢）；唯一键 (msg_id, row_key)，宽限期内只一条 pending。
+                -- first_failed_at 只在首次失败写入，重判失败不得续期。
+                CREATE TABLE IF NOT EXISTS alarm_pending (
+                    msg_id           TEXT NOT NULL,
+                    row_key          TEXT NOT NULL DEFAULT '',
+                    first_failed_at  TEXT NOT NULL,
+                    status           TEXT NOT NULL DEFAULT 'pending',
+                    error_id         TEXT NOT NULL DEFAULT '',
+                    detail_json      TEXT NOT NULL DEFAULT '{}',
+                    recipients_json  TEXT NOT NULL DEFAULT '[]',
+                    snapshot_version TEXT NOT NULL DEFAULT '',
+                    cancel_reason    TEXT NOT NULL DEFAULT '',
+                    updated_at       TEXT NOT NULL,
+                    PRIMARY KEY (msg_id, row_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_alarm_pending_due
+                    ON alarm_pending(status, first_failed_at);
                 """
             )
             # Migrations for DBs created before these columns existed.
@@ -712,6 +731,254 @@ def delete_alarm_state(key: str) -> None:
         try:
             conn.execute("DELETE FROM alarm_state WHERE key = ?", (key,))
             conn.commit()
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------- 任务 33：告警宽限期状态机
+#
+# 状态流转：pending → cancelled（重判成功）/ due（到期待发）→ sending → sent / suppressed
+# 另有 due → cancelled（发送前复查发现已成功）。所有时间用 SQLite datetime('now')
+# （UTC），与 error_queue / alarm_state 同基准，不混本地时间串。
+_ALARM_ACTIVE = ("pending", "due", "sending")
+
+
+def upsert_pending_alarm(
+    msg_id: str, row_key: str, *, error_id: str = "", detail: str = "",
+    recipients=None, snapshot_version: str = "",
+) -> Optional[str]:
+    """首次/重复 no_route 挂起一条待发告警（INSERT OR IGNORE 幂等）。
+
+    返回三态（任务33 验收11：24h 折叠计数不能被延后机制吞掉）：
+      · "inserted"          新插入 pending，不算重复
+      · "repeat_same_cycle" 已有 pending/due/sending/cancelled，或 sent/suppressed
+                            但折叠窗口仍在 ⇒ 同一周期重复失败，调用方须 bump_alarm
+                            **只计数不通知**（bump_alarm 不碰 _alarm_keyed）
+      · "new_cycle"         已有 sent/suppressed 且折叠窗口已过（或窗口不存在）
+                            ⇒ 新周期，不预计数，到期正常发
+      · None                msg_id 为空
+
+    🔴 本函数持有 _db_lock（普通 Lock，非 RLock），**绝不能**在锁内调
+    bump_alarm / _alarm_keyed；计数由调用方在返回后做。
+    first_failed_at 只在插入和新周期时写；pending/due/sending/cancelled 的重挂
+    一律保留原时间（验收5：同一周期不续期）。
+    """
+    if not msg_id:
+        return None
+    detail_json = json.dumps({"detail": detail or ""}, ensure_ascii=False)
+    recipients_json = json.dumps(list(recipients or []), ensure_ascii=False)
+    with _db_lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO alarm_pending "
+                "  (msg_id, row_key, first_failed_at, status, error_id, "
+                "   detail_json, recipients_json, snapshot_version, updated_at) "
+                "VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?, datetime('now'))",
+                (msg_id, row_key or "", error_id or "", detail_json,
+                 recipients_json, str(snapshot_version or "")),
+            )
+            if cur.rowcount == 0:
+                row = conn.execute(
+                    "SELECT status FROM alarm_pending WHERE msg_id=? AND row_key=?",
+                    (msg_id, row_key or ""),
+                ).fetchone()
+                old_status = ((row["status"] if row else "") or "").strip()
+
+                # 新周期判定只读 alarm_state，不改其表语义；窗口不存在或已过期
+                # 都等价于 bump_alarm 的「建窗 + 发」。延迟导入避免循环依赖。
+                new_cycle = False
+                if old_status in ("sent", "suppressed"):
+                    from ..config.settings import ALARM_FOLD_SEC
+
+                    st = conn.execute(
+                        "SELECT window_start FROM alarm_state WHERE key=?",
+                        (f"alarm|{msg_id}|{row_key or ''}",),
+                    ).fetchone()
+                    if st is None:
+                        new_cycle = True
+                    else:
+                        new_cycle = bool(conn.execute(
+                            "SELECT CASE WHEN ? <= datetime('now', ?) "
+                            "THEN 1 ELSE 0 END AS x",
+                            (st["window_start"], f"-{int(ALARM_FOLD_SEC)} seconds"),
+                        ).fetchone()["x"])
+
+                if old_status in ("cancelled", "sent", "suppressed"):
+                    # 完成态再次失败 ⇒ 重新挂 pending；仅新周期重置起算时间。
+                    extra = (
+                        "first_failed_at=datetime('now'), " if new_cycle else ""
+                    )
+                    conn.execute(
+                        f"UPDATE alarm_pending SET status='pending', {extra}"
+                        "  error_id=?, detail_json=?, recipients_json=?, "
+                        "  snapshot_version=?, cancel_reason='', "
+                        "  updated_at=datetime('now') "
+                        "WHERE msg_id=? AND row_key=?",
+                        (error_id or "", detail_json, recipients_json,
+                         str(snapshot_version or ""), msg_id, row_key or ""),
+                    )
+                else:
+                    # pending/due/sending 仍在生命周期内：只刷新正文/收件人/
+                    # 版本快照，状态与 first_failed_at 一律不动。
+                    conn.execute(
+                        "UPDATE alarm_pending SET error_id=?, detail_json=?, "
+                        "  recipients_json=?, snapshot_version=?, "
+                        "  updated_at=datetime('now') "
+                        "WHERE msg_id=? AND row_key=?",
+                        (error_id or "", detail_json, recipients_json,
+                         str(snapshot_version or ""), msg_id, row_key or ""),
+                    )
+                conn.commit()
+                return "new_cycle" if new_cycle else "repeat_same_cycle"
+            conn.commit()
+            return "inserted"
+        finally:
+            conn.close()
+
+
+def get_alarm(msg_id: str, row_key: str = "") -> Optional[Dict[str, Any]]:
+    with _db_lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM alarm_pending WHERE msg_id=? AND row_key=?",
+                (msg_id, row_key or ""),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def cancel_alarm(msg_id: str, row_key: str = "", reason: str = "") -> bool:
+    """撤销 pending / due / sending 三态告警。
+
+    🔴 due 也必须能被撤销：CAS 先到 due 时，发送前复查 forward_log 成功后
+    走的就是这条路（验收9 情形②）。
+    """
+    if not msg_id:
+        return False
+    with _db_lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "UPDATE alarm_pending SET status='cancelled', cancel_reason=?, "
+                "  updated_at=datetime('now') "
+                "WHERE msg_id=? AND row_key=? AND status IN ('pending','due','sending')",
+                (reason or "", msg_id, row_key or ""),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def mark_due_alarms(grace_sec: int, limit: int = 200) -> List[Dict[str, Any]]:
+    """到期扫描：原子 CAS `pending → due`，返回本次真正抢到的行。
+
+    🔴 时间条件必须写在 WHERE 里（`first_failed_at <= now - grace_sec`），
+    未到期的 pending 绝不提前标 due（验收4 反证）。BEGIN IMMEDIATE 保证
+    「到期扫描」与「重判成功撤销」互斥，不能同时 alarm + forwarded（验收9）。
+    """
+    grace_sec = max(0, int(grace_sec))
+    with _db_lock:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT * FROM alarm_pending WHERE "
+                "  (status='pending' AND first_failed_at <= datetime('now', ?)) "
+                "  OR status='due' "
+                "ORDER BY first_failed_at ASC LIMIT ?",
+                (f"-{grace_sec} seconds", int(limit)),
+            ).fetchall()
+            claimed = []
+            for row in rows:
+                if row["status"] == "due":
+                    # 上一轮 CAS 到 due 后进程崩了 / 发送失败回退：本轮继续处理。
+                    claimed.append(dict(row))
+                    continue
+                cur = conn.execute(
+                    "UPDATE alarm_pending SET status='due', updated_at=datetime('now') "
+                    "WHERE msg_id=? AND row_key=? AND status='pending'",
+                    (row["msg_id"], row["row_key"] or ""),
+                )
+                if cur.rowcount > 0:
+                    claimed.append(dict(row))
+            conn.commit()
+            return claimed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def claim_alarm_for_send(msg_id: str, row_key: str = "") -> bool:
+    """CAS `due → sending`：只有抢到的单线程/单进程才允许发企微。"""
+    with _db_lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "UPDATE alarm_pending SET status='sending', updated_at=datetime('now') "
+                "WHERE msg_id=? AND row_key=? AND status='due'",
+                (msg_id, row_key or ""),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def finish_alarm(msg_id: str, row_key: str = "", status: str = "sent") -> bool:
+    """`sending → sent / suppressed`（suppressed = 命中 24h 折叠）。"""
+    if status not in ("sent", "suppressed", "cancelled", "due"):
+        raise ValueError(f"invalid alarm status: {status!r}")
+    with _db_lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "UPDATE alarm_pending SET status=?, updated_at=datetime('now') "
+                "WHERE msg_id=? AND row_key=? AND status='sending'",
+                (status, msg_id, row_key or ""),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def is_error_unresolved(msg_id: str, row_key: str = "") -> bool:
+    """error_queue 是否仍有该键的未 resolved 记录（到期发送的必要条件之一）。"""
+    if not msg_id:
+        return False
+    with _db_lock:
+        conn = _connect()
+        try:
+            return conn.execute(
+                "SELECT 1 FROM error_queue WHERE message_id=? "
+                "AND COALESCE(row_key, '')=? AND COALESCE(status, '') <> 'resolved' LIMIT 1",
+                (msg_id, row_key or ""),
+            ).fetchone() is not None
+        finally:
+            conn.close()
+
+
+def is_error_resolved(msg_id: str, row_key: str = "") -> bool:
+    """到期发送前复查：error_queue 已有对应记录且状态 resolved ⇒ 不再告警。
+
+    注意「没有记录」返回 False，不能把无记录的真失败吞掉（验收底线）。
+    """
+    if not msg_id:
+        return False
+    with _db_lock:
+        conn = _connect()
+        try:
+            return conn.execute(
+                "SELECT 1 FROM error_queue WHERE message_id=? "
+                "AND COALESCE(row_key, '')=? AND status='resolved' LIMIT 1",
+                (msg_id, row_key or ""),
+            ).fetchone() is not None
         finally:
             conn.close()
 
