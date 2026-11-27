@@ -33,6 +33,7 @@ from mailbots_next.core.daily_report import build_body, collect
 from mailbots_next.core.dedup import (
     add_error,
     count_unresolved,
+    get_alarm,
     get_alarm_state,
     get_connection as dedup_conn,
     get_status,
@@ -239,6 +240,23 @@ def _log_text():
 def _alarms(proc):
     return [c for c in proc.notifier.notify.call_args_list
             if c.args and c.args[0] == "alarm"]
+
+
+def _flush_deferred(proc, mid=None):
+    """任务 33：失败告警延后 180s。测试用老化 pending + 到期扫描触发真实告警。"""
+    conn = dedup_conn()
+    try:
+        sql = ("UPDATE alarm_pending SET first_failed_at=datetime('now','-200 seconds') "
+               "WHERE status='pending'")
+        params = ()
+        if mid:
+            sql += " AND msg_id=?"
+            params = (mid,)
+        conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+    return serve.flush_due_alarms(proc)
 
 
 def _smtp_ok(msg, sender_email, sender_password, to_list, cc_list=None, mail_from=None):
@@ -456,7 +474,9 @@ class TestC05MultiCompanyConsistent:
             proc.process_email("t@t.com", "放箱令", mid, 21, "subj", _SENDER, "",
                                _RAW)
             assert smtp.call_count == 0
-            assert len(_alarms(proc)) == 1
+            # 任务 33：首次失败只挂起 pending，不发企微。
+            assert len(_alarms(proc)) == 0
+            assert (get_alarm(mid, key) or {}).get("status") == "pending"
             assert get_status(mid, key) == "unresolved"
             assert m_route.call_count == 1
             # 🔴 故意不断言 route_source 相同：首次是 num_multi_company，
@@ -470,6 +490,7 @@ class TestC05MultiCompanyConsistent:
         assert stats["sent"] == 1
         assert smtp.call_count == 1
         assert get_status(mid, key) == "sent"
+        assert (get_alarm(mid, key) or {}).get("status") == "cancelled"
         # 同一入口：两次都过 route_row，第二次还进了 decide（首次 routing 失败进不去）
         assert m_route.call_count == 2
         assert m_decide.call_count == 1
@@ -487,8 +508,11 @@ class TestC06AlarmNotOnlyInReport:
             smtp.side_effect = _smtp_ok
             proc.process_email("t@t.com", "草单", "p20-c06", 31, "subj", _SENDER, "",
                               _RAW)
+            # 任务 33：宽限期内不发；到期复查后照常告警到人和当日汇总（不是只进日报）。
+            assert len(_alarms(proc)) == 0
+            _flush_deferred(proc, "p20-c06")
 
-        assert len(_alarms(proc)) >= 1, "告警必须实时到人"
+        assert len(_alarms(proc)) >= 1, "到期告警必须到人"
         assert rec.call_count >= 1, "同时要有当日汇总项"
         assert any(c.args and c.args[0] == "pool_alarm" for c in rec.call_args_list)
         assert smtp.call_count == 0
@@ -816,6 +840,8 @@ class TestC14OwnerLookup:
                 patch("mailbots_next.core.act.send_smtp") as smtp:
             smtp.side_effect = _smtp_ok
             proc.process_email("t@t.com", "草单", mid, 51, "subj", sender, "", _RAW)
+        # 任务 33：反查收件人落进 pending，到期发出后仍可断言收件人列表。
+        _flush_deferred(proc, mid)
         return smtp
 
     def test_by_train_no(self):

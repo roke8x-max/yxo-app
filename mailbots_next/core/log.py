@@ -110,14 +110,40 @@ class EmailLogger:
             f"Routing resolved | msg_id={message_id[:50]} | row={row_idx} | company={company} | responsible={mask_email(responsible_person)} | to={mask_recipients(to_list)} | cc={mask_recipients(cc_list)}"
         )
 
-    def log_routing_failed(self, message_id: str, row_idx: int, reason: str):
-        self.warning(f"Routing failed | msg_id={message_id[:50]} | row={row_idx} | reason={reason}")
+    def log_routing_failed(self, message_id: str, row_idx: int, reason: str, *,
+                           customer_code=None, container_no=None, train_no=None,
+                           records_n=None, processor_id=None, snapshot_version=None,
+                           thread=None, account=None):
+        """任务 33 / 需求2：no_route 诊断行。
+
+        🔴 固定字段、同一条日志行（此处仅为排版折行）；空值统一打印 `None`。
+        `snapshot_version` 是共享 provider 的版本号 —— 需求3 之后各 processor
+        的 id(self) 可能相同，反证只能靠版本号（验收14）。
+        """
+        def _d(value):
+            return "None" if value is None or value == "" else value
+
+        self.warning(
+            "Routing failed | routing_failed "
+            f"msg_id={_d(message_id)} "
+            f"customer_code={_d(customer_code)} "
+            f"container_no={_d(container_no)} "
+            f"train_no={_d(train_no)} "
+            f"records_n={_d(records_n)} "
+            f"processor_id={_d(processor_id)} "
+            f"snapshot_version={_d(snapshot_version)} "
+            f"thread={_d(thread)} "
+            f"account={_d(account)} "
+            f"route_source={_d(reason)}"
+        )
 
     def log_decide(self, message_id: str, row_idx: int, tier: str, action: str, reason: str):
         self.info(f"Decision | msg_id={message_id[:50]} | row={row_idx} | tier={tier} | action={action} | reason={reason}")
 
-    def log_action(self, message_id: str, row_idx: int, action: str, detail: str):
-        self.info(f"Action | msg_id={message_id[:50]} | row={row_idx} | action={action} | {detail}")
+    def log_action(self, message_id: str, row_idx: int, action: str, detail: str,
+                   snapshot_version=None):
+        suffix = "" if snapshot_version is None else f" | snapshot_version={snapshot_version}"
+        self.info(f"Action | msg_id={message_id[:50]} | row={row_idx} | action={action} | {detail}{suffix}")
 
     def log_action_failed(self, message_id: str, row_idx: int, action: str, error: str, error_id: str):
         self.error(f"Action failed | msg_id={message_id[:50]} | row={row_idx} | action={action} | error={error}", error_id=error_id)

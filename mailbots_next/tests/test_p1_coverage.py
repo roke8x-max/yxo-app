@@ -24,6 +24,7 @@ from mailbots_next.config import (
 from mailbots_next.core.dedup import (
     init_db,
     add_error,
+    get_connection as dedup_conn,
     get_pending_errors,
     get_manual_errors,
 )
@@ -139,7 +140,23 @@ class TestPerRowIndependence:
         assert {e["row_key"] for e in queued} == {"1:NOBOX9999", "2:REUSEDBOX"}
         proc.notifier.send_forwarded.assert_called_once()
         proc.notifier.send_pending.assert_not_called()
-        # 两个失败行各发一条企微 alarm，收件人只有洋（不触发 SMTP 降级）
+        # 任务 33：两个失败行先各挂起一条 pending，到期后才各发一条企微 alarm。
+        conn = dedup_conn()
+        try:
+            rows = conn.execute(
+                "SELECT row_key FROM alarm_pending WHERE msg_id=? AND status='pending'",
+                ("g3-multi-1",),
+            ).fetchall()
+            assert {r["row_key"] for r in rows} == {"1:NOBOX9999", "2:REUSEDBOX"}
+            conn.execute(
+                "UPDATE alarm_pending SET first_failed_at=datetime('now','-200 seconds') "
+                "WHERE msg_id='g3-multi-1'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        from mailbots_next import serve
+        serve.flush_due_alarms(proc)
         alarms = [c for c in proc.notifier.notify.call_args_list
                   if c.args and c.args[0] == "alarm"]
         assert len(alarms) == 2

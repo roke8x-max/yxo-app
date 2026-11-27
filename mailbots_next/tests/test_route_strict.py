@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from mailbots_next import serve
 from mailbots_next.config import (
     BOT_CONFIG_DB_PATH,
     DAILY_COUNTERS_PATH,
@@ -28,7 +29,9 @@ from mailbots_next.config import (
 )
 from mailbots_next.core import boxmatch, routing
 from mailbots_next.core.decide import decide, decide_draft, decide_retbox
-from mailbots_next.core.dedup import get_pending_errors, init_db
+from mailbots_next.core.dedup import (
+    get_connection as dedup_conn, get_pending_errors, init_db,
+)
 from mailbots_next.core.extract import ExtractedRow
 from mailbots_next.core.notify import (
     WeComNotifier,
@@ -112,10 +115,24 @@ def _run(proc, routing_result, row, email_type, tag):
     with patch("mailbots_next.core.act.send_smtp") as mock_smtp, \
          patch("mailbots_next.serve.execute_action") as mock_action:
         mock_action.return_value = (True, "forwarded")
+        mid = f"t17-{tag}"
         outcome = proc._process_routing_result(
-            routing_result, row, email_type, f"t17-{tag}", f"0:{row.row_idx}", b"raw",
+            routing_result, row, email_type, mid, f"0:{row.row_idx}", b"raw",
             "maoxiaoyang@cqtransit.com", "INBOX", 7, "s@x.com", "subj", "",
         )
+    if outcome == "queued":
+        # 任务 33：首次失败只挂起，不发企微。本文件原有断言验的是「最终告警的
+        # 内容 / 收件人 / 不降级」——这里老化 pending 后走一次到期发送，保持覆盖。
+        conn = dedup_conn()
+        try:
+            conn.execute(
+                "UPDATE alarm_pending SET first_failed_at=datetime('now','-200 seconds') "
+                "WHERE msg_id=?", (mid,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        serve.flush_due_alarms(proc)
     return outcome, mock_smtp, mock_action
 
 
